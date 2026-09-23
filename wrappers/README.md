@@ -1,7 +1,3 @@
-# Product wrappers
+# Pi and OMP wrappers
 
-This split-ready tree contains product-named launchers, resident wrappers,
-plugins, tests, and packaging. Wrapper code imports the bus only through
-`github.com/antst/sessionbus/bus/sdk/go`; it never imports daemon internals.
-Repository-local wrapper imports use
-`github.com/antst/sessionbus-peers/wrappers/...`.
+The Pi and OMP Go wrappers use the public Sessionbus Go SDK and share the local `pifamily` bridge. Common host and version helpers come from the pinned `github.com/sessionbus/peer-common` module. There are no imports from daemon internals or from the former combined peers module.

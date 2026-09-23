@@ -3,7 +3,7 @@
 set -eu
 src=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 product=$(cat "$src/ROLE")
-case "$product" in grok|qwen|opencode|kilo|pi|omp) ;; *) echo 'Unknown product' >&2; exit 1;; esac
+case "$product" in pi|omp) ;; *) echo 'Unknown product' >&2; exit 1;; esac
 command -v "$product" >/dev/null || { echo "Install native $product first." >&2; exit 1; }
 root="$HOME/.local/libexec/sessionbus/$product"
 [ ! -L "$root" ] || { echo 'Indirect package root; review before replacing.' >&2; exit 1; }
@@ -20,25 +20,6 @@ cp "$src/LICENSE" "$src/THIRD-PARTY-NOTICES.txt" "$src/README.md" "$src/SOURCE.t
 ln -sfn "$root/$product-peer" "$HOME/.local/bin/$product-peer"
 export PATH="$HOME/.local/bin:$PATH"
 case "$product" in
- grok)
-  ln -sfn grok-peer "$root/grok-peer-mcp"
-  installed=$(grok plugin list --json)
-  if printf '%s\n' "$installed" | grep -Eq '"name"[[:space:]]*:[[:space:]]*"sessionbus"'; then
-   grok plugin uninstall sessionbus --keep-data
-  fi
-  grok plugin install "$root/plugin" --trust
-  ;;
- qwen)
-  ln -sfn qwen-peer "$root/qwen-peer-mcp"
-  if [ -d "$HOME/.qwen/extensions/sessionbus" ]; then qwen extensions uninstall sessionbus; fi
-  qwen extensions install "$root/plugin" --consent --scope user
-  ;;
- kilo)
-  "$root/kilo-peer" --sessionbus-install --plugin-dir "$root/plugin"
-  ;;
- opencode)
-  "$root/opencode-peer" --sessionbus-install --plugin-dir "$root/plugin"
-  ;;
  pi)
   "$root/pi-peer" --sessionbus-install --plugin-dir "$root/plugin"
   ;;

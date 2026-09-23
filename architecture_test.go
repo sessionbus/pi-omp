@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -21,23 +20,21 @@ import (
 )
 
 const (
-	peersModule             = "github.com/antst/sessionbus-peers"
+	productModule           = "github.com/sessionbus/pi-omp"
 	sdkModule               = "github.com/antst/sessionbus/bus/sdk/go"
-	sdkVersion              = "v0.5.7"
-	citationCount           = 259
-	citationReachabilitySHA = "92eda86500493840c3a6e234c6c7b5674ef5fb8a77b213757400c1311582a5be"
+	commonVersion           = "github.com/sessionbus/peer-common v0.0.0-20260922143100-eb655f686e44"
+	citationCount           = 116
+	citationReachabilitySHA = "70a0acc5246af380d8fb221bdd9e1ab8e6b8afa3a48e51c0c99ca58adb6a4550"
 	factsHeader             = "> Historical source note: citations to pre-split Sessionbus paths resolve in\n> the Forgejo `ai/sessionbus` repository through its `legacy-*` branches.\n> Citations to product source resolve in the external repository and full\n> commit recorded by the split archive manifest. Host evidence paths are\n> immutable external artifacts, not repository paths."
 )
 
 func TestRepositoryBoundary(t *testing.T) {
 	allowed := map[string]bool{
-		".forgejo": true, ".git": true,
-		".github": true, ".gitignore": true,
-		".golangci.yml": true, "LICENSE": true, "README.md": true,
-		"RELEASE_VERSION":      true,
-		"architecture_test.go": true, "version_test.go": true, "claude": true, "codex": true, "cmd": true,
-		"docs": true, "go.mod": true, "go.sum": true, "grok": true,
-		"internal": true, "kilo": true, "omp": true, "opencode": true, "pi": true, "qwen": true, "scripts": true, "wrappers": true,
+		".forgejo": true, ".git": true, ".github": true, ".gitignore": true,
+		".golangci.yml": true, "LICENSE": true, "README.md": true, "RELEASE_VERSION": true,
+		"architecture_test.go": true, "version_test.go": true, "cmd": true,
+		"docs": true, "go.mod": true, "go.sum": true, "pi": true, "omp": true,
+		"scripts": true, "wrappers": true,
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -45,64 +42,54 @@ func TestRepositoryBoundary(t *testing.T) {
 	}
 	for _, entry := range entries {
 		if !allowed[entry.Name()] {
-			t.Errorf("path is outside the peers boundary: %s", entry.Name())
+			t.Errorf("path outside Pi/OMP boundary: %s", entry.Name())
 		}
 	}
-	for _, path := range []string{"bus", "integrations", "deploy", "examples", ".specify", ".agents", ".codex-plugin", "hooks", "skills", "go.work", "go.work.sum", "Makefile"} {
-		if _, err := os.Stat(filepath.FromSlash(path)); !os.IsNotExist(err) {
-			t.Errorf("legacy or cross-repository path remains: %s", path)
+	for _, path := range []string{"internal", "wrappers/host", "wrappers/mcp", "scripts/cleanup-legacy", "go.work", "go.work.sum", "Makefile"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("removed path remains: %s", path)
 		}
 	}
-	wantCommands := []string{"claude-peer", "codex-peer", "grok-peer", "kilo-peer", "omp-peer", "opencode-peer", "pi-peer", "qwen-peer"}
-	gotCommands := directoryNames(t, "cmd")
-	if !equalStrings(gotCommands, wantCommands) {
-		t.Errorf("peer command roots = %v, want %v", gotCommands, wantCommands)
+	if got := directoryNames(t, "cmd"); !equalStrings(got, []string{"omp-peer", "pi-peer"}) {
+		t.Errorf("commands = %v", got)
 	}
-	if got := directoryNames(t, "internal"); !equalStrings(got, []string{"cmd", "peerversion", "pluginstage", "testsocket"}) {
-		t.Errorf("internal roots = %v, want [cmd peerversion pluginstage testsocket]", got)
-	}
-	if got := directoryNames(t, "internal/cmd"); !equalStrings(got, []string{"gen-opencode-tool", "stage-native-plugin"}) {
-		t.Errorf("internal commands = %v, want the shared native declaration generator and build stager", got)
+	if got := directoryNames(t, "wrappers"); !equalStrings(got, []string{"omp", "pi", "pifamily"}) {
+		t.Errorf("wrappers = %v", got)
 	}
 	if _, err := os.Stat(".github/workflows/release.yml"); !os.IsNotExist(err) {
-		t.Fatal("initial peers root must not contain a release workflow")
+		t.Fatal("unreviewed release workflow remains")
 	}
 }
 
 func TestModuleAndImportBoundary(t *testing.T) {
 	module := read(t, "go.mod")
-	if !bytes.Contains(module, []byte("module "+peersModule+"\n")) || !bytes.Contains(module, []byte(sdkModule+" "+sdkVersion)) {
-		t.Fatalf("go.mod violates the peers module shape:\n%s", module)
+	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.7", commonVersion} {
+		if !bytes.Contains(module, []byte(expected)) {
+			t.Errorf("go.mod lacks %q", expected)
+		}
 	}
 	if bytes.Contains(module, []byte("replace ")) {
-		t.Fatal("peers go.mod contains a filesystem replacement")
-	}
-	for _, path := range []string{"go.work", "go.work.sum"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("%s must not be committed", path)
-		}
+		t.Fatal("local module replacement")
 	}
 	checkGoImports(t, ".", func(path, imported string) {
-		if strings.HasPrefix(imported, "github.com/antst/sessionbus/bus/internal/") {
-			t.Errorf("%s imports daemon internal package %s", path, imported)
+		if strings.HasPrefix(imported, "github.com/antst/sessionbus-peers") ||
+			strings.HasPrefix(imported, "github.com/antst/sessionbus/wrappers/") ||
+			strings.HasPrefix(imported, "github.com/antst/sessionbus/bus/internal/") {
+			t.Errorf("%s retains combined-tree import %s", path, imported)
 		}
-		if strings.HasPrefix(imported, "github.com/antst/sessionbus/") && imported != sdkModule && !strings.HasPrefix(imported, sdkModule+"/") {
-			t.Errorf("%s imports non-SDK Sessionbus package %s", path, imported)
-		}
-		if strings.HasPrefix(imported, "github.com/antst/sessionbus/wrappers/") {
-			t.Errorf("%s retains pre-split wrapper import %s", path, imported)
+		if strings.HasPrefix(imported, "github.com/antst/sessionbus/") &&
+			imported != sdkModule && !strings.HasPrefix(imported, sdkModule+"/") {
+			t.Errorf("%s imports non-SDK daemon package %s", path, imported)
 		}
 	})
 	command := exec.Command("go", "list", "-m", "all")
 	command.Env = append(os.Environ(), "GOWORK=off")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("independent peers module graph: %v\n%s", err, output)
+		t.Fatalf("module graph: %v\n%s", err, output)
 	}
-	for _, line := range bytes.Split(bytes.TrimSpace(output), []byte{'\n'}) {
-		if bytes.Equal(line, []byte("github.com/antst/sessionbus")) {
-			t.Fatalf("module graph contains the daemon root:\n%s", output)
-		}
+	if bytes.Contains(output, []byte("github.com/antst/sessionbus\n")) {
+		t.Fatal("daemon module in graph")
 	}
 }
 
@@ -120,8 +107,8 @@ func TestFactsHeadersAndReachabilityAudit(t *testing.T) {
 		path := filepath.Join("docs/products", entry.Name())
 		body := read(t, path)
 		lines := bytes.Split(body, []byte{'\n'})
-		if len(lines) < 8 || len(lines[0]) == 0 || !bytes.Equal(bytes.Join(lines[2:7], []byte{'\n'}), []byte(factsHeader)) {
-			t.Errorf("facts header is absent or misplaced: %s", path)
+		if len(lines) < 8 || !bytes.Equal(bytes.Join(lines[2:7], []byte{'\n'}), []byte(factsHeader)) {
+			t.Errorf("facts header absent or misplaced: %s", path)
 		}
 		for _, match := range citationPattern.FindAllSubmatch(body, -1) {
 			citations = append(citations, string(match[1]))
@@ -130,7 +117,7 @@ func TestFactsHeadersAndReachabilityAudit(t *testing.T) {
 	sort.Strings(citations)
 	digest := sha256.Sum256([]byte(strings.Join(citations, "\n") + "\n"))
 	if len(citations) != citationCount || hex.EncodeToString(digest[:]) != citationReachabilitySHA {
-		t.Fatalf("historical citations differ from the resolved split archive audit: count=%d sha256=%s", len(citations), hex.EncodeToString(digest[:]))
+		t.Fatalf("citation audit changed: count=%d SHA=%s", len(citations), hex.EncodeToString(digest[:]))
 	}
 }
 
@@ -141,11 +128,10 @@ func TestFormerBrandGuardForProductFacts(t *testing.T) {
 		}
 		cleaned, cleanErr := removeHistoricalExceptions(read(t, path))
 		if cleanErr != nil {
-			t.Errorf("%s: %v", path, cleanErr)
-			return nil
+			return cleanErr
 		}
 		if containsFormerBrand(cleaned) {
-			t.Errorf("former brand remains outside a fenced capture, evidence path, or commit-qualified citation: %s", path)
+			t.Errorf("former brand in facts: %s", path)
 		}
 		return nil
 	})
@@ -156,9 +142,9 @@ func TestFormerBrandGuardForProductFacts(t *testing.T) {
 
 func TestSPDXAndLicenseCoverage(t *testing.T) {
 	if !bytes.Contains(read(t, "LICENSE"), []byte("MIT License")) {
-		t.Fatal("root MIT license is missing")
+		t.Fatal("root MIT license missing")
 	}
-	if err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -170,220 +156,82 @@ func TestSPDXAndLicenseCoverage(t *testing.T) {
 		}
 		body := read(t, path)
 		if bytes.Contains(body, []byte("SPDX-License-Identifier: "+"GPL")) {
-			t.Errorf("GPL SPDX identifier remains in peers tree: %s", path)
+			t.Errorf("GPL SPDX: %s", path)
 		}
-		if filepath.Ext(path) == ".go" && firstOrSecondLine(body) != "// SPDX-License-Identifier: MIT" {
-			t.Errorf("Go source lacks MIT SPDX header: %s", path)
-		}
-		if filepath.Ext(path) == ".mjs" && firstOrSecondLine(body) != "// SPDX-License-Identifier: MIT" {
-			t.Errorf("JavaScript source lacks MIT SPDX header: %s", path)
+		switch filepath.Ext(path) {
+		case ".go", ".mjs":
+			if firstOrSecondLine(body) != "// SPDX-License-Identifier: MIT" {
+				t.Errorf("missing MIT SPDX: %s", path)
+			}
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{
-		"docs/designs/claude-0.5.0/held-lane-skills/codex-lane/scripts/lane-preflight",
-		"docs/designs/claude-0.5.0/held-lane-skills/grok-lane/scripts/lane-preflight",
-		"grok/scripts/native-entry", "scripts/codex-mcp", "scripts/test-codex-mcp",
-	} {
+	for _, path := range []string{"scripts/package-product", "scripts/install-pi.sh", "scripts/install-omp.sh", "scripts/release/install-product", "scripts/release/version.sh"} {
 		if firstOrSecondLine(read(t, path)) != "# SPDX-License-Identifier: MIT" {
-			t.Errorf("shell source lacks MIT SPDX header: %s", path)
+			t.Errorf("missing shell MIT SPDX: %s", path)
 		}
 	}
 }
 
-func TestOpenCodePackageBoundary(t *testing.T) { testNativePackageBoundary(t, "opencode") }
-func TestKiloPackageBoundary(t *testing.T)     { testNativePackageBoundary(t, "kilo") }
-func testNativePackageBoundary(t *testing.T, product string) {
-	t.Helper()
-	var manifest struct {
-		Name       string            `json:"name"`
-		Bin        map[string]string `json:"bin"`
-		Files      []string          `json:"files"`
-		Repository struct {
-			Type      string `json:"type"`
-			URL       string `json:"url"`
-			Directory string `json:"directory"`
-		} `json:"repository"`
-		Dependencies map[string]string `json:"dependencies"`
-	}
-	if err := json.Unmarshal(read(t, product+"/package.json"), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if manifest.Name != "@sessionbus/"+product || len(manifest.Bin) != 0 {
-		t.Fatalf("Native package unexpectedly requires a Node installer: %#v", manifest)
-	}
-	wantFiles := []string{"README.md", "activation.mjs", "delivery.mjs", "endpoint.mjs", "forward.mjs", "gate.mjs", "owners.mjs", "peer.mjs", "profile.mjs", "readiness.mjs", "server.mjs", "sessionbus-tool.json", "skills", "tui.mjs"}
-	sort.Strings(manifest.Files)
-	if !equalStrings(manifest.Files, wantFiles) {
-		t.Errorf("Native package files = %v, want %v", manifest.Files, wantFiles)
-	}
-	if manifest.Repository.Type != "git" || manifest.Repository.URL != "git+https://github.com/antst/sessionbus-peers.git" || manifest.Repository.Directory != product {
-		t.Errorf("Native repository metadata is invalid: %#v", manifest.Repository)
-	}
-	if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.7" || strings.HasPrefix(manifest.Dependencies["@sessionbus/kit"], "file:") {
-		t.Errorf("Native kit dependency is not exact: %q", manifest.Dependencies["@sessionbus/kit"])
-	}
-	workflow := read(t, ".github/workflows/pkg-pr-new.yml")
-	if !bytes.Contains(workflow, []byte(`for PRODUCT in opencode kilo; do`)) ||
-		!bytes.Contains(workflow, []byte(`pkg-pr-new publish "$RUNNER_TEMP/native-plugin/opencode" "$RUNNER_TEMP/native-plugin/kilo"`)) ||
-		bytes.Count(workflow, []byte("pkg-pr-new publish ")) != 1 || bytes.Contains(workflow, []byte("integrations/opencode")) {
-		t.Fatal("pkg.pr.new does not publish the fixed native product stages")
-	}
-}
-
-func TestRepositoryURLsAndRemovedPaths(t *testing.T) {
-	for _, root := range []string{"claude", "grok", "kilo", "omp", "opencode", "pi", "qwen", "scripts", "wrappers/README.md"} {
-		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if ignoredDirectory(path) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			body := read(t, path)
-			if bytes.Contains(body, []byte("github.com/antst/sessionbus.git")) || bytes.Contains(body, []byte("integrations/opencode")) {
-				t.Errorf("active peer asset points to pre-split repository path: %s", path)
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestRetainedManifestCommandReachability(t *testing.T) {
-	installed := map[string]bool{
-		"${CLAUDE_PLUGIN_ROOT}/bin/sessionbus-mcp": true,
-		"claude-peer": true,
-		"codex-peer":  true,
-		"grok-peer":   true,
-		"qwen-peer":   true,
-	}
-	for _, item := range []struct {
-		path    string
-		command string
-	}{
-		{"claude/.mcp.json", manifestCommand(t, "claude/.mcp.json")},
-	} {
-		if !installed[item.command] {
-			t.Errorf("%s names an unresolved installed command %q", item.path, item.command)
-		}
-	}
-	for _, path := range []string{"qwen/mcp.json", "qwen/.mcp.json"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("ordinary Qwen must not register a global MCP manifest: %s (%v)", path, err)
-		}
-	}
-	skills, err := filepath.Glob("qwen/skills/*/SKILL.md")
-	if err != nil || len(skills) != 1 || skills[0] != "qwen/skills/sessionbus/SKILL.md" {
-		t.Fatalf("Qwen generic skill inventory = %v (%v)", skills, err)
-	}
-	qwenLane := read(t, "wrappers/qwen/qwen.go")
-	if !bytes.Contains(qwenLane, []byte("InstalledMCPExecutable()")) || !bytes.Contains(qwenLane, []byte("laneMCPServer(endpoint.Path, mcpExecutable)")) {
-		t.Error("Qwen lane must resolve its permanent private alias into per-session MCP configuration")
-	}
-	if !bytes.Contains(read(t, "cmd/qwen-peer/main.go"), []byte("basename == qwen.PrivateAlias")) {
-		t.Error("Qwen private alias must dispatch through the same binary")
-	}
-	if command := manifestCommand(t, "grok/.mcp.json"); command != "${GROK_PLUGIN_ROOT}/scripts/native-entry" {
-		t.Errorf("Grok manifest command = %q", command)
-	}
-	if info, err := os.Stat("grok/scripts/native-entry"); err != nil || info.Mode()&0o111 == 0 {
-		t.Errorf("Grok manifest entry is absent or not executable: %v", err)
-	}
-	entry := read(t, "grok/scripts/native-entry")
-	if !bytes.Contains(entry, []byte("/.local/libexec/sessionbus/grok/grok-peer-mcp")) || !bytes.Contains(entry, []byte("exec \"$peer_binary\"")) {
-		t.Error("Grok manifest entry does not resolve to the installed grok-peer binary")
-	}
-	var openCode struct {
-		Bin map[string]string `json:"bin"`
-	}
-	if err := json.Unmarshal(read(t, "opencode/package.json"), &openCode); err != nil {
-		t.Fatal(err)
-	}
-	if len(openCode.Bin) != 0 || !regular(t, "wrappers/opencodefamily/plugin/server.mjs") || !regular(t, "wrappers/opencodefamily/plugin/tui.mjs") {
-		t.Error("OpenCode native entries are missing or Node installer remains")
-	}
+func TestPackageAndInstallerBoundary(t *testing.T) {
+	pack := read(t, "scripts/package-product")
 	installer := read(t, "scripts/release/install-product")
-	if !bytes.Contains(installer, []byte(`"$root/opencode-peer" --sessionbus-install --plugin-dir "$root/plugin"`)) || bytes.Contains(installer, []byte("node ")) {
-		t.Error("OpenCode archive does not use its Go maintenance executable")
+	if !bytes.Contains(pack, []byte("case \"$product\" in pi|omp)")) ||
+		!bytes.Contains(installer, []byte("case \"$product\" in pi|omp)")) {
+		t.Fatal("package or installer accepts unsupported product")
 	}
-	if _, err := os.Stat(".claude-plugin"); !os.IsNotExist(err) {
-		t.Fatal("obsolete repository marketplace must not provide an alternate Claude install route")
-	}
-	var plugin struct {
-		Name        string `json:"name"`
-		Version     string `json:"version"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(read(t, "claude/.claude-plugin/plugin.json"), &plugin); err != nil {
-		t.Fatal(err)
-	}
-	if plugin.Name != "sessionbus" || plugin.Version != strings.TrimSpace(string(read(t, "RELEASE_VERSION"))) || !strings.Contains(plugin.Description, "Claude lanes") {
-		t.Errorf("Claude native plugin metadata is inconsistent with both modes: %#v", plugin)
-	}
-	pack := read(t, "scripts/package-claude")
-	if !bytes.Contains(pack, []byte("cp -R claude/.claude-plugin")) {
-		t.Error("Claude archive must include the product-local native plugin metadata")
-	}
-}
-
-func TestReadmeIsTheSourceInstallAuthority(t *testing.T) {
-	readme := read(t, "README.md")
-	for _, exact := range []string{
-		`git clone https://github.com/antst/sessionbus.git && cd sessionbus && GOBIN="$HOME/.local/bin" go install ./bus/cmd/...`,
-		"scripts/package-product qwen ./dist",
-		"qwen/README.md",
-		"`qwen-peer-mcp`",
-		"scripts/package-codex ./dist",
-		"scripts/package-product grok ./dist",
-		"scripts/package-product pi ./dist",
-		"pi/README.md",
-		"scripts/package-product omp ./dist",
-		"omp/README.md",
-		"grok/README.md",
-		"codex/README.md",
-		"`go install <pkg>@version` is not available",
-		"this README is the installation authority until then",
+	for _, expected := range []string{
+		"wrappers/pi/extension.mjs wrappers/pi/native.mjs",
+		"wrappers/omp/extension.mjs",
+		"wrappers/pifamily/extension/bridge.mjs",
+		"CGO_ENABLED=0",
 	} {
+		if !bytes.Contains(pack, []byte(expected)) {
+			t.Errorf("package lacks %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"\"$root/pi-peer\" --sessionbus-install --plugin-dir \"$root/plugin\"",
+		"\"$root/omp-peer\" --sessionbus-install --plugin-dir \"$root/plugin\"",
+	} {
+		if !bytes.Contains(installer, []byte(expected)) {
+			t.Errorf("installer lacks %q", expected)
+		}
+	}
+	for _, removed := range []string{"npm ", "node ", "grok", "qwen", "kilo", "opencode", "claude", "codex", "-peer-mcp"} {
+		if bytes.Contains(pack, []byte(removed)) || bytes.Contains(installer, []byte(removed)) {
+			t.Errorf("package/installer references removed or unnecessary target %q", removed)
+		}
+	}
+	for _, product := range []string{"pi", "omp"} {
+		path := "scripts/install-" + product + ".sh"
+		if !bytes.Contains(read(t, path), []byte("https://github.com/sessionbus/pi-omp/releases/")) {
+			t.Errorf("%s does not use destination releases", path)
+		}
+	}
+}
+
+func TestReadmeAndPreviewLinks(t *testing.T) {
+	readme := read(t, "README.md")
+	for _, exact := range []string{"scripts/package-product pi ./dist", "scripts/package-product omp ./dist",
+		"docs/migration/FUNCTIONALITY-CHECKLIST.md", "preview", "node --test", "pi/README.md", "omp/README.md"} {
 		if !bytes.Contains(readme, []byte(exact)) {
-			t.Errorf("root README lacks required install statement %q", exact)
+			t.Errorf("README lacks %q", exact)
 		}
 	}
-	for _, binary := range []string{"claude-peer", "codex-peer", "grok-peer", "qwen-peer", "omp-peer", "opencode-peer", "kilo-peer", "pi-peer"} {
-		if !bytes.Contains(readme, []byte(binary)) {
-			t.Errorf("root README omits installed binary %s", binary)
+	for _, path := range []string{"docs/designs/pi-omp-0.5.0/ACCEPTANCE.md", "docs/designs/pi-omp-0.5.0/DESIGN.md"} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("local acceptance link missing: %s", path)
 		}
 	}
-}
-
-func manifestCommand(t *testing.T, path string) string {
-	t.Helper()
-	var manifest struct {
-		Servers map[string]struct {
-			Command string `json:"command"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(read(t, path), &manifest); err != nil {
-		t.Fatal(err)
-	}
-	return manifest.Servers["sessionbus"].Command
-}
-
-func regular(t *testing.T, path string) bool {
-	t.Helper()
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }
 
 func checkGoImports(t *testing.T, root string, check func(string, string)) {
 	t.Helper()
-	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -408,16 +256,15 @@ func checkGoImports(t *testing.T, root string, check func(string, string)) {
 			check(path, imported)
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
-
 func ignoredDirectory(path string) bool {
 	base := filepath.Base(path)
 	return base == ".git" || base == "node_modules" || base == "dist" || base == "bin"
 }
-
 func removeHistoricalExceptions(body []byte) ([]byte, error) {
 	evidence := regexp.MustCompile(`/home/antst/agentbus-evidence/[^\x60\s]+`)
 	citation := regexp.MustCompile("`[0-9a-f]{7,40}:[^`]+`")
@@ -441,13 +288,9 @@ func removeHistoricalExceptions(body []byte) ([]byte, error) {
 	}
 	return cleaned, nil
 }
-
 func containsFormerBrand(body []byte) bool {
 	lower := bytes.ToLower(body)
-	for _, former := range [][]byte{
-		[]byte("agent" + "bus"), []byte("agent" + "_sessions"),
-		[]byte("agent" + "-sessions"),
-	} {
+	for _, former := range [][]byte{[]byte("agent" + "bus"), []byte("agent" + "_sessions"), []byte("agent" + "-sessions")} {
 		if bytes.Contains(lower, former) {
 			return true
 		}
@@ -455,7 +298,6 @@ func containsFormerBrand(body []byte) bool {
 	words := bytes.Join(bytes.Fields(body), []byte{' '})
 	return bytes.Contains(words, []byte("Agent "+"Sessions"))
 }
-
 func directoryNames(t *testing.T, path string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(path)
@@ -471,7 +313,6 @@ func directoryNames(t *testing.T, path string) []string {
 	sort.Strings(names)
 	return names
 }
-
 func firstOrSecondLine(body []byte) string {
 	lines := bytes.SplitN(body, []byte{'\n'}, 3)
 	if len(lines) > 0 && bytes.HasPrefix(lines[0], []byte("#!")) && len(lines) > 1 {
@@ -482,7 +323,6 @@ func firstOrSecondLine(body []byte) string {
 	}
 	return ""
 }
-
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
@@ -494,7 +334,6 @@ func equalStrings(left, right []string) bool {
 	}
 	return true
 }
-
 func read(t *testing.T, path string) []byte {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -502,29 +341,4 @@ func read(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return body
-}
-
-func TestClaudeInteractivePackageBoundary(t *testing.T) {
-	for _, name := range []string{"launch.go", "owner.go", "mcp.go", "delivery.go", "tools.go"} {
-		if !regular(t, filepath.Join("wrappers/claude/interactive", name)) {
-			t.Errorf("missing Go module %s", name)
-		}
-	}
-	if manifestCommand(t, "claude/.mcp.json") != "${CLAUDE_PLUGIN_ROOT}/bin/sessionbus-mcp" {
-		t.Fatal("private MCP alias changed")
-	}
-	if _, err := os.Stat("claude/package.json"); !os.IsNotExist(err) {
-		t.Fatal("active plugin must not require npm")
-	}
-	for _, name := range []string{"main.mjs", "mcp.mjs", "owner.mjs", "delivery.mjs", "tools.mjs"} {
-		if !regular(t, filepath.Join("docs/designs/claude-0.5.0/node-reference", name)) {
-			t.Errorf("reviewed Node reference missing: %s", name)
-		}
-	}
-	if !bytes.Contains(read(t, "wrappers/claude/claude.go"), []byte("func (p *Wrapper) Open")) {
-		t.Fatal("held lane source removed")
-	}
-	if !bytes.Contains(read(t, "cmd/claude-peer/main.go"), []byte("interactive.PrivateAlias")) {
-		t.Fatal("private alias dispatch missing")
-	}
 }

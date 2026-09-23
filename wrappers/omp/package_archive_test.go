@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
+	"github.com/sessionbus/peer-common/testsocket"
 )
 
 func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {

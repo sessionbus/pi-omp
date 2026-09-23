@@ -10,8 +10,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/omp"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/omp"
 )
 
 func resetOMPCommandHooks(t *testing.T) {

@@ -891,7 +891,7 @@ test("actual Unix bridge supports owner.ready callback into native.describe", as
 test("native tool arguments match the shared closed MCP field declaration", () => {
   const native = nativeFixture();
   createOMPExtension({ launch: launch("lane") })(native.pi);
-  const declaration = JSON.parse(fs.readFileSync(new URL("../opencodefamily/plugin/sessionbus-tool.json", import.meta.url), "utf8"));
+  const declaration = JSON.parse(fs.readFileSync(new URL("../pifamily/extension/testdata/sessionbus-tool.json", import.meta.url), "utf8"));
   assert.deepEqual(native.pi.tool.parameters.properties.action, declaration.inputSchema.properties.action);
   assert.deepEqual(native.pi.tool.parameters.properties.arguments, declaration.inputSchema.properties.arguments);
   assert.equal(native.pi.tool.parameters.properties.arguments.additionalProperties, false);

@@ -16,14 +16,8 @@ func TestPublicVersionFlagsNeverStartNativeProducts(t *testing.T) {
 		name  string
 		short string
 	}{
-		{"claude", "-v"},
-		{"codex", "-V"},
-		{"grok", "-v"},
-		{"kilo", "-v"},
-		{"omp", "-v"},
-		{"opencode", "-v"},
 		{"pi", "-v"},
-		{"qwen", "-v"},
+		{"omp", "-v"},
 	}
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
@@ -36,7 +30,7 @@ func TestPublicVersionFlagsNeverStartNativeProducts(t *testing.T) {
 	}
 	for _, product := range products {
 		peer := product.name + "-peer"
-		build := exec.Command("go", "build", "-trimpath", "-ldflags=-X github.com/antst/sessionbus-peers/internal/peerversion.Release=v0.5.2 -X github.com/antst/sessionbus-peers/internal/peerversion.Revision="+revision, "-o", filepath.Join(bin, peer), "./cmd/"+peer)
+		build := exec.Command("go", "build", "-trimpath", "-ldflags=-X github.com/sessionbus/peer-common/peerversion.Release=v0.5.2 -X github.com/sessionbus/peer-common/peerversion.Revision="+revision, "-o", filepath.Join(bin, peer), "./cmd/"+peer)
 		build.Env = append(os.Environ(), "GOWORK=off")
 		if output, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build %s: %v\n%s", peer, err, output)

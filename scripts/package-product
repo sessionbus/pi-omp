@@ -3,15 +3,13 @@
 set -eu
 product=${1:?usage: scripts/package-product PRODUCT OUTPUT_DIRECTORY}
 out=${2:?usage: scripts/package-product PRODUCT OUTPUT_DIRECTORY}
-case "$product" in grok|qwen|opencode|kilo|pi|omp) ;; *) echo 'Use package-claude or package-codex for those products.' >&2; exit 1;; esac
+case "$product" in pi|omp) ;; *) echo 'Unsupported product; use pi or omp.' >&2; exit 1;; esac
 mkdir -p "$out"
 out=$(CDPATH='' cd "$out" && pwd -P)
 repo=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$repo"
 . "$repo/scripts/release/version.sh"
 peer_version_init "$repo"
-# Physical path: npm ci treats a symlinked project path (macOS /var -> /private/var)
-# as a link and reports "Missing: <dir>@<version> from lock file".
 stage=$(CDPATH='' cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$stage"' 0
 trap 'exit 1' HUP INT TERM
@@ -19,34 +17,18 @@ platform=${GOOS:-$(go env GOOS)}
 arch=${GOARCH:-$(go env GOARCH)}
 CGO_ENABLED=0 GOOS="$platform" GOARCH="$arch" peer_go_build "$stage/$product-peer" "./cmd/$product-peer"
 mkdir "$stage/plugin"
-if [ "$product" = opencode ] || [ "$product" = kilo ]; then
- # The build uses npm to select the published native plugin payload and resolve
- # its pinned kit. Target installation uses Go; native hooks run existing Bun.
- # The stager executes here even when the product archive targets another OS.
- GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./internal/cmd/stage-native-plugin -repo "$repo" -product "$product" -output "$stage/npm-source"
- packed=$(cd "$stage/npm-source" && npm pack --ignore-scripts --silent --pack-destination "$stage")
- tar -xzf "$stage/$packed" -C "$stage/plugin" --strip-components=1
- cp "$product/package-lock.json" "$stage/plugin/"
- npm ci --prefix "$stage/plugin" --omit=dev --ignore-scripts
-elif [ "$product" = pi ]; then
+if [ "$product" = pi ]; then
  mkdir -p "$stage/plugin/pi" "$stage/plugin/pifamily/extension"
  cp wrappers/pi/extension.mjs wrappers/pi/native.mjs "$stage/plugin/pi/"
  cp wrappers/pifamily/extension/bridge.mjs "$stage/plugin/pifamily/extension/"
-elif [ "$product" = omp ]; then
+else
  mkdir -p "$stage/plugin/omp" "$stage/plugin/pifamily/extension"
  cp wrappers/omp/extension.mjs "$stage/plugin/omp/"
  cp wrappers/pifamily/extension/bridge.mjs "$stage/plugin/pifamily/extension/"
-else
- cp -R "$product/." "$stage/plugin/"
 fi
 cp scripts/release/THIRD-PARTY-NOTICES.txt LICENSE "$stage/"
 printf '%s\n' "$peer_revision" > "$stage/SOURCE.txt"
 cp scripts/release/install-product "$stage/install"
 if [ -f "$product/README.md" ]; then cp "$product/README.md" "$stage/README.md"; else cp "docs/products/$product.md" "$stage/README.md"; fi
 printf '%s\n' "$product" > "$stage/ROLE"
-set -- "$product-peer"
-if [ "$product" = grok ] || [ "$product" = qwen ]; then
- ln -s "$product-peer" "$stage/$product-peer-mcp"
- set -- "$@" "$product-peer-mcp"
-fi
-tar -czf "$out/$product-peer-$platform-$arch.tar.gz" -C "$stage" "$@" plugin LICENSE THIRD-PARTY-NOTICES.txt README.md install ROLE SOURCE.txt
+tar -czf "$out/$product-peer-$platform-$arch.tar.gz" -C "$stage" "$product-peer" plugin LICENSE THIRD-PARTY-NOTICES.txt README.md install ROLE SOURCE.txt

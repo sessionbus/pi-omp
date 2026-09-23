@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/antst/sessionbus-peers/internal/peerversion"
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/pi"
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/peer-common/peerversion"
+	"github.com/sessionbus/pi-omp/wrappers/pi"
 )
 
 var (

@@ -33,16 +33,15 @@ func TestVersionGuardAcceptsDevelopmentAndMatchingStableTag(t *testing.T) {
 
 func TestVersionGuardRejectsEveryStableVersionAuthorityMismatch(t *testing.T) {
 	tests := []struct {
-		name, releaseVersion, claudeVersion, codexVersion, release, errorText string
+		name, releaseVersion, release, errorText string
 	}{
-		{"tag", "0.5.2", "0.5.2", "0.5.2-codex.0", "v0.5.3", "Stable peer release v0.5.3 does not match RELEASE_VERSION v0.5.2"},
-		{"claude", "0.5.2", "0.5.1", "0.5.2-codex.0", "v0.5.2", "Claude manifest version 0.5.1 does not match RELEASE_VERSION 0.5.2"},
-		{"codex", "0.5.2", "0.5.2", "0.5.1-codex.0", "v0.5.2", "Codex base version 0.5.1-codex.0 does not match RELEASE_VERSION 0.5.2"},
+		{"tag", "0.5.2", "v0.5.3", "Stable peer release v0.5.3 does not match RELEASE_VERSION v0.5.2"},
+		{"format", "0.5", "v0.5", "Invalid RELEASE_VERSION: 0.5"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeVersionFixture(t, root, test.releaseVersion, test.claudeVersion, test.codexVersion)
+			writeVersionFixture(t, root, test.releaseVersion)
 			output, err := runVersionGuard(root, test.release)
 			if err == nil || !strings.Contains(string(output), test.errorText) {
 				t.Fatalf("err=%v output=%q", err, output)
@@ -64,12 +63,12 @@ printf '%s|%s|%s\n' "$peer_base_version" "$peer_release" "$peer_revision"`, "fix
 	return command.CombinedOutput()
 }
 
-func writeVersionFixture(t *testing.T, root, releaseVersion, claudeVersion, codexVersion string) {
+func writeVersionFixture(t *testing.T, root, releaseVersion string) {
 	t.Helper()
+	// Pi and OMP have no product manifest tied to RELEASE_VERSION; removed product
+	// manifests must not be required by the guard.
 	files := map[string]string{
-		"RELEASE_VERSION":                                   releaseVersion + "\n",
-		"claude/.claude-plugin/plugin.json":                 `{"version":"` + claudeVersion + `"}`,
-		"codex/marketplace/codex/.codex-plugin/plugin.json": `{"version":"` + codexVersion + `"}`,
+		"RELEASE_VERSION": releaseVersion + "\n",
 	}
 	for path, body := range files {
 		path = filepath.Join(root, filepath.FromSlash(path))

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -29,12 +29,7 @@ jobs:
           go vet ./...
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           golangci-lint run ./...
-          npm ci --prefix claude --ignore-scripts
-          npm test --prefix claude
-          (cd claude && npm pack --dry-run --json)
-          ./scripts/test-codex-mcp
-          npm install --prefix opencode --ignore-scripts --no-package-lock
-          npm test --prefix opencode
+          node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/omp/extension.test.mjs
       - name: Workflow guard
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7

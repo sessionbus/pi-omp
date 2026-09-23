@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/pi"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/pi"
 )
 
 func resetPiCommandHooks(t *testing.T) {

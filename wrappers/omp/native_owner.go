@@ -15,8 +15,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/antst/sessionbus-peers/wrappers/pifamily"
 	kit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 var errNativeOwnerClosed = errors.New("OMP native owner closed")

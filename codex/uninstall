@@ -1,8 +1,0 @@
-#!/bin/sh
-# SPDX-License-Identifier: MIT
-set -eu
-codex plugin remove codex@sessionbus-peers
-if [ -L "$HOME/.local/bin/codex-peer" ] && [ "$(readlink "$HOME/.local/bin/codex-peer")" = "$HOME/.local/libexec/sessionbus/codex/bin/codex-peer" ]; then
- rm "$HOME/.local/bin/codex-peer"
-fi
-rm -rf "$HOME/.local/libexec/sessionbus/codex" "$HOME/.local/share/sessionbus/codex/marketplace"

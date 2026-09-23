@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/pifamily"
 	kit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/peer-common/testsocket"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 const (

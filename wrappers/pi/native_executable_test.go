@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
+	"github.com/sessionbus/peer-common/testsocket"
 )
 
 func piExecutableFixture(t *testing.T) (string, string) {

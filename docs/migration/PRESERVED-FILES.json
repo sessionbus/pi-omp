@@ -1,0 +1,2168 @@
+{
+  "source": "710e5d33369cba4fb9468cd24fea0fe844a0219d",
+  "status": "resolved against extracted Pi/OMP source and pinned peer-common; no installed acceptance claimed",
+  "shared_module": {
+    "module": "github.com/sessionbus/peer-common",
+    "version": "v0.0.0-20260922143100-eb655f686e44",
+    "commit": "eb655f686e4456a4c1121054763318e3d27e89b0"
+  },
+  "file_count": 105,
+  "test_function_count": 346,
+  "js_test_count": 48,
+  "files": [
+    {
+      "path": "cmd/omp-peer/main.go",
+      "sha256": "2f12aae0d1b2a39831d27f16eae74a1a364065c0c50bd6dac8988407a1d82b66",
+      "git_blob": "17447824db914efedd3907b9368ca9c7dc49e68d",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/omp-peer/main.go"
+      },
+      "resolved_sha256": "a73a47876e31dffe022dd7448964dff7f8bf023b99f73c9172960e2e34f58f35",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "cmd/omp-peer/main_test.go",
+      "sha256": "b7b9de87e8fc9cf0037a91a8e42ff8b55f893243587ef410e946ba7922f1de65",
+      "git_blob": "096dfe2e2d9bd985a2ce804f77ee1d6d8c5f4302",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPNonTerminalInputOrOutputUsesExactNativePassthrough",
+        "TestOMPTTYRoutesManagedAndNativeInvocations",
+        "TestOMPLanePrecedesNonTerminalPassthroughAndMaintenancePrecedesLane",
+        "TestOMPTerminalRejectsRegularFiles"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/omp-peer/main_test.go"
+      },
+      "resolved_sha256": "62b6af9e7d92286cbcf24ec12cd18705c6cfbab412b15e89d98b17819c12fe9f",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "cmd/omp-peer/terminal_darwin.go",
+      "sha256": "14615ef0b503e8814d8ba3c00afa5af12249215ce0b2bbbe2102c577c11e4c45",
+      "git_blob": "ddab6079f263bfe9de2fd2a1e207fc4b58f55bbe",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/omp-peer/terminal_darwin.go"
+      },
+      "resolved_sha256": "14615ef0b503e8814d8ba3c00afa5af12249215ce0b2bbbe2102c577c11e4c45",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "cmd/omp-peer/terminal_linux.go",
+      "sha256": "06782f2687e5d7cd4c2d558e0e1916471aa3d2b6306df5f7e82124e706af4ea9",
+      "git_blob": "fa1121a1c167bed921340dae7224ca2352587c44",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/omp-peer/terminal_linux.go"
+      },
+      "resolved_sha256": "06782f2687e5d7cd4c2d558e0e1916471aa3d2b6306df5f7e82124e706af4ea9",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "cmd/pi-peer/main.go",
+      "sha256": "2f821884eb95b1378d67463bb56f47b530672e061ea10dad9b3278ca35c2b594",
+      "git_blob": "4f162c2f04262f3020488cc259ac1462bd60664e",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/pi-peer/main.go"
+      },
+      "resolved_sha256": "31b43a9225a44df2a1745864b47291245f799753a7b368dfeb23b459edd2e848",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "cmd/pi-peer/main_test.go",
+      "sha256": "a1d13ff69fbb2f8564770e9b8494d946c433694c2b6e9d6f4521e7a0bb6e0d65",
+      "git_blob": "10e893ecf17bf50fd45d89d155d2784fdfc12c40",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiNonTerminalInputOrOutputUsesExactNativePassthrough",
+        "TestPiTTYRoutesManagedAndNativeInvocations",
+        "TestPiTTYRejectsDisabledManagedToolBeforeNativeLaunch",
+        "TestPiLaneAndMaintenanceBoundaries",
+        "TestPiTerminalRejectsRegularFiles"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/pi-peer/main_test.go"
+      },
+      "resolved_sha256": "99438c9fdbb4429fed3b8d023514037e491112072d5ddead49fa9c5f8968e66e",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "cmd/pi-peer/terminal_darwin.go",
+      "sha256": "e843bdca70b7a9a33db864a8559e46b7e09ff4627abf1e4b34ff5b3bcf60f0c2",
+      "git_blob": "14a8a73852d45e1267686d45cfb2f4dd16bdd84f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/pi-peer/terminal_darwin.go"
+      },
+      "resolved_sha256": "e843bdca70b7a9a33db864a8559e46b7e09ff4627abf1e4b34ff5b3bcf60f0c2",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "cmd/pi-peer/terminal_linux.go",
+      "sha256": "c1042610dd04883404de86eb3dfbd5f671d0bec7bda33aa40de32eb554fcd5ce",
+      "git_blob": "af8fa58dad96bce749076bb98fad6fc323cdcd0c",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "cmd/pi-peer/terminal_linux.go"
+      },
+      "resolved_sha256": "c1042610dd04883404de86eb3dfbd5f671d0bec7bda33aa40de32eb554fcd5ce",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "docs/designs/pi-omp-0.5.0/ACCEPTANCE.md",
+      "sha256": "e0c544d6ad1750da04e43a6ad04584c4cf17994046149128583741d9a1307ff4",
+      "git_blob": "80462f673ffe28956d55e32b53fbb89350ed390c",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "docs/designs/pi-omp-0.5.0/ACCEPTANCE.md"
+      },
+      "resolved_sha256": "e0c544d6ad1750da04e43a6ad04584c4cf17994046149128583741d9a1307ff4",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "docs/designs/pi-omp-0.5.0/DESIGN.md",
+      "sha256": "e1028e59af8750604cb7264844a7390cd438b083ee9b8660c4f1f128f944944f",
+      "git_blob": "2f85a1b9b4ac5f2c5a376d3e81e1edb27a6959fb",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "docs/designs/pi-omp-0.5.0/DESIGN.md"
+      },
+      "resolved_sha256": "e1028e59af8750604cb7264844a7390cd438b083ee9b8660c4f1f128f944944f",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "docs/products/omp.md",
+      "sha256": "4b2f792c0abee331910cda9b6516a9e83229232ceecfabbcd3676caa3a67e4cd",
+      "git_blob": "83bd8f4dd467205b3c2c973ca96f3505912bff9f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "docs/products/omp.md"
+      },
+      "resolved_sha256": "4b2f792c0abee331910cda9b6516a9e83229232ceecfabbcd3676caa3a67e4cd",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "docs/products/pi.md",
+      "sha256": "2cebf2d15caf7499c2e3ce385d2f903f1656442fbe37c1107bca2e54092e785f",
+      "git_blob": "9edd1cd66a51929cd8ec6a14e5b3325830ca11d5",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "docs/products/pi.md"
+      },
+      "resolved_sha256": "2cebf2d15caf7499c2e3ce385d2f903f1656442fbe37c1107bca2e54092e785f",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "internal/peerversion/version.go",
+      "sha256": "eba3a70af92bd7c53ca78422fc96b6b223c1cd81eca72a09430499a042982d2d",
+      "git_blob": "4026bc9e7e5b20ca11ffe6b8fdab54714960ecae",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "peerversion/version.go"
+      },
+      "resolved_sha256": "eba3a70af92bd7c53ca78422fc96b6b223c1cd81eca72a09430499a042982d2d",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "internal/peerversion/version_test.go",
+      "sha256": "10e619661cebe9dd7ac3c34e9d60a57ecf76cd48b1334cc501499968a1817aee",
+      "git_blob": "8e04c0a6a2cb608ae3d47c502793248538d88a93",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestResolvePublicVersionAndNativeEscape",
+        "TestResolveKeepsPrivateAndNonExactArguments"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "peerversion/version_test.go"
+      },
+      "resolved_sha256": "10e619661cebe9dd7ac3c34e9d60a57ecf76cd48b1334cc501499968a1817aee",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "internal/testsocket/directory.go",
+      "sha256": "373cdb0e9219c4235ff88dc11a30987bec1725939a6e02df58087adf00ce74c0",
+      "git_blob": "9268dbbaf3b13ffbeb8efc4b5eb9c5befb350bd8",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "testsocket/directory.go"
+      },
+      "resolved_sha256": "373cdb0e9219c4235ff88dc11a30987bec1725939a6e02df58087adf00ce74c0",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "internal/testsocket/directory_test.go",
+      "sha256": "6e40eed060759a1eaf1cac5e552bed9113e5e5e28e0132e597ce16a741e696dc",
+      "git_blob": "bb34848ac0b2c594ec75ad56ddc338e4b714f260",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestDirectoryUsesDefaultSessionSocketParent",
+        "TestDirectoryResolvesSymlinkBeforeBindingSocket"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "testsocket/directory_test.go"
+      },
+      "resolved_sha256": "6e40eed060759a1eaf1cac5e552bed9113e5e5e28e0132e597ce16a741e696dc",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "omp/README.md",
+      "sha256": "9fd4d441241140a04f49b91c4b36398d1bcc3b686e40f2224b94ed641a912a33",
+      "git_blob": "de55274617a73990cf1d4a4a5579e7812f89b6b1",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "canonical repository/release URL github.com/antst/sessionbus-peers -> github.com/sessionbus/pi-omp only (if a canonical URL is repointed)",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "omp/README.md"
+      },
+      "resolved_sha256": "9fd4d441241140a04f49b91c4b36398d1bcc3b686e40f2224b94ed641a912a33",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "pi/README.md",
+      "sha256": "5f4b2965cbe60b03c1aa8a7ed0e50266a8a91d24876e4e650b1c0cde66b20a04",
+      "git_blob": "5023cf7c34d799a246550ba7c29631357c6d6731",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "canonical repository/release URL github.com/antst/sessionbus-peers -> github.com/sessionbus/pi-omp only (if a canonical URL is repointed)",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "pi/README.md"
+      },
+      "resolved_sha256": "5f4b2965cbe60b03c1aa8a7ed0e50266a8a91d24876e4e650b1c0cde66b20a04",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "scripts/cleanup-legacy/inventory.go",
+      "sha256": "df9433da5b355b42e5d407966e85803c87b25a7d5ba40d61d914b77a9a1837d6",
+      "git_blob": "f8fe397225380ac03bd62ac8eb7443fe94218e83",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "scripts/cleanup-legacy/inventory.go"
+      },
+      "resolved_sha256": "df9433da5b355b42e5d407966e85803c87b25a7d5ba40d61d914b77a9a1837d6",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "scripts/cleanup-legacy/main.go",
+      "sha256": "b427e8052bac1eeb3c1e9513746ee8ad7d0e1754fd8c25d8b6f1405de2ee4788",
+      "git_blob": "4525700fe2281a6b3e7526fba5dafa368dc391d6",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "scripts/cleanup-legacy/main.go"
+      },
+      "resolved_sha256": "b427e8052bac1eeb3c1e9513746ee8ad7d0e1754fd8c25d8b6f1405de2ee4788",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "scripts/cleanup-legacy/main_test.go",
+      "sha256": "4bae5028687ea87ef06dd8288ea4e31316d3c4ace7cf04ef971823e27e02d32a",
+      "git_blob": "c1c1a288144be064669efd383652f2d23d0ea762",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestQuarantinePreservesCurrentAliasAndLegacyTarget",
+        "TestConfigEditPreservesSymlinkConcurrentNativeChangesAndBackup",
+        "TestRejectIndirectParentAndReplacedAlias",
+        "TestNativeMCPRemovalIsOwnershipCheckedAndExact",
+        "TestGrokCleanupUsesNativeInstalledRepository"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "scripts/cleanup-legacy/main_test.go"
+      },
+      "resolved_sha256": "4bae5028687ea87ef06dd8288ea4e31316d3c4ace7cf04ef971823e27e02d32a",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "scripts/cleanup-legacy/review_boundary_test.go",
+      "sha256": "3b3f0a71481b1915ad2bc8529c9db8652791b14a745db47493d3830fdcca1151",
+      "git_blob": "ad687776e75ef199197a29554a82532bdfb3594d",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestReviewNativeRemovalRejectsConfigOutsideHome",
+        "TestReviewClaudeMixedScopesRefuseBeforePlan",
+        "TestReviewServiceOwnershipRequiresExecutableNotComment"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "scripts/cleanup-legacy/review_boundary_test.go"
+      },
+      "resolved_sha256": "3b3f0a71481b1915ad2bc8529c9db8652791b14a745db47493d3830fdcca1151",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "scripts/install-omp.sh",
+      "sha256": "09c7335b9d5560f18deb03a7bef699383eb5d9a2a5ae7d1ba0fa546fee5fb0b3",
+      "git_blob": "908d54b0dbcfb59ac9ddaa8de0528504a43bb5de",
+      "mode": "100755",
+      "class": "pi-omp-product",
+      "permitted_change": "canonical repository/release URL github.com/antst/sessionbus-peers -> github.com/sessionbus/pi-omp only (if a canonical URL is repointed)",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "scripts/install-omp.sh"
+      },
+      "resolved_sha256": "2378ac398334bef7ff05ee5413ed02d220d57d3508dd1eb39c26425e95ebb505",
+      "resolution": "canonical-release-URL"
+    },
+    {
+      "path": "scripts/install-pi.sh",
+      "sha256": "45e693f7afc90f5f3e73cd4cac6a5825c84ba3f3b1b7da97907ab9f62977ddbb",
+      "git_blob": "11f3c4e8622eac8b8ce9516b6b2af0b918774e2e",
+      "mode": "100755",
+      "class": "pi-omp-product",
+      "permitted_change": "canonical repository/release URL github.com/antst/sessionbus-peers -> github.com/sessionbus/pi-omp only (if a canonical URL is repointed)",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "scripts/install-pi.sh"
+      },
+      "resolved_sha256": "a9b5323c517fe4e14a4f8bdf8349d2672dbc1868654431f169b2ba462c0659e7",
+      "resolution": "canonical-release-URL"
+    },
+    {
+      "path": "scripts/package-product",
+      "sha256": "d1e707cc7dc2be7018c06eea09cc2cb32da4fba461c6011977d24b5fcc892afc",
+      "git_blob": "88c0009b99e1be2068766db4eb7130494887ac27",
+      "mode": "100755",
+      "class": "shared-product-surface",
+      "permitted_change": "non-Pi/OMP product branches removed; pi and omp extension staging branches and archive members byte-identical",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "scripts/package-product"
+      },
+      "resolved_sha256": "372e3ab5e537b5d1fc8febd97cca7772c8d7e8e21bb6bbfb048d68dbe894351d",
+      "resolution": "Pi-OMP-arm-trim"
+    },
+    {
+      "path": "scripts/release/install-product",
+      "sha256": "036bc6fb761bb8c09030a4a45f5f2b36d24875515278daeca2295361fb6f63c3",
+      "git_blob": "e3bb2ac78602443d12ab8f491123c2d29c785b04",
+      "mode": "100755",
+      "class": "shared-product-surface",
+      "permitted_change": "non-Pi/OMP ROLE case arms removed; pi and omp arms and shared preamble byte-identical",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "scripts/release/install-product"
+      },
+      "resolved_sha256": "0f12b4a0d30f68f215e6af59734e2a76639e9e04ec6f4cff78f93eb4da4c2770",
+      "resolution": "Pi-OMP-arm-trim"
+    },
+    {
+      "path": "wrappers/host/endpoint.go",
+      "sha256": "dada1a15bdf425e18e844d67e609b446d22622d5ca7c81b24aeb23a9a2fca832",
+      "git_blob": "41c9766efc10dbfabf3719c8082c08539d746aa1",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/endpoint.go"
+      },
+      "resolved_sha256": "dada1a15bdf425e18e844d67e609b446d22622d5ca7c81b24aeb23a9a2fca832",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/endpoint_test.go",
+      "sha256": "9ec9fe16cc432a6e2feda44a65dcf7086fd58117afc84fae4e7e7f26cffa2a9e",
+      "git_blob": "299f437249ad46a867d8419a001acac6ae238a45",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestPrivateEndpointBridgeCancel",
+        "TestPrivateEndpointReplacesStalePath"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/endpoint_test.go"
+      },
+      "resolved_sha256": "3ec7a6b59db96060a9ef8ae98f0e6f90d7d96d655f66de055b0b8f22bf4c0145",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/host/handoff.go",
+      "sha256": "8385aa6586d3c66a21220ea360e94b51191a9c221e217a929fe9628155026a92",
+      "git_blob": "56218b2864778817c2ff2b060e8f2c85c72bf103",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/handoff.go"
+      },
+      "resolved_sha256": "8385aa6586d3c66a21220ea360e94b51191a9c221e217a929fe9628155026a92",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/handoff_test.go",
+      "sha256": "eb32e0ecab777c3dba61957283bc2682f69d59c73b39f1f0f2377761d404a183",
+      "git_blob": "e24850651da06964cd368d646985a1d79122ab0d",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestHandoffDeliveryAndQueueCommit",
+        "TestHandoffFailedCreationKeepsFullQueue",
+        "TestHandoffFailedCreationRestoresPendingDelivery",
+        "TestHandoffFailedCreationPreservesAdmissionOrder",
+        "TestHandoffClaimAndFinish",
+        "TestHandoffClaimableDeliveryReportsQueuedAcrossTerminal",
+        "TestHandoffSDKInterruptCrossings"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/handoff_test.go"
+      },
+      "resolved_sha256": "d5c40382d04ca92c2b325b1bed3edc2c40b486fd0389d599f0a5615ef0244979",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/host/launch.go",
+      "sha256": "02c82ac348716cab696449539804c754e0b082302f6c652bcd54cfdb3161c8f9",
+      "git_blob": "0a1566c99ac1b5ec2c8822e63783d085e505f1da",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/launch.go"
+      },
+      "resolved_sha256": "02c82ac348716cab696449539804c754e0b082302f6c652bcd54cfdb3161c8f9",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/launch_test.go",
+      "sha256": "266be8c8599bab982a46a69652f46e1433558ba89b966db1f25bdeac8700dff4",
+      "git_blob": "0f2e983a3ba59bb3971dd1807ff546b54940b915",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestLaneModeUsesTokenPresence",
+        "TestLaunchTokenDigestLength",
+        "TestInteractivePlan",
+        "TestInteractivePlanErrors",
+        "TestClassifiedInteractivePlanDefersProjectionErrors",
+        "TestBuildArgumentsTable",
+        "TestChildOwnershipTable",
+        "TestOwnedChildHelper",
+        "TestChildCloseIgnoresStoppedProcessNoise",
+        "TestChildOutputDrainsAfterExit"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/launch_test.go"
+      },
+      "resolved_sha256": "5666f8503348496b22fb20f1040224dc333a25f91e6fc79da8ca833428d71a8c",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/host/lock.go",
+      "sha256": "84159d31dc79d3a506d532e35cbe1cfdf99ea5e74784bacbff84221c6c0e5d12",
+      "git_blob": "9e31828c1ef4e02cd36d66a6f71705a035903fed",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/lock.go"
+      },
+      "resolved_sha256": "84159d31dc79d3a506d532e35cbe1cfdf99ea5e74784bacbff84221c6c0e5d12",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/lock_test.go",
+      "sha256": "8a252811f328812037f66403e7735716f4806ac4ef420734127a93561dc30d97",
+      "git_blob": "1e2e1053c527451965954653bc8a0b563db81c5b",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestSessionLockStaleFileAndContention",
+        "TestSessionLockRenamePreservesClaim",
+        "TestSessionLockOrderlyCloseAllowsResume",
+        "TestSessionLockRenameRecoversCrashStaleTarget",
+        "TestSessionLockRenameRetriesInodeMismatch",
+        "TestSessionLockRenamePreservesRecreatedTarget",
+        "TestSessionLockRenameDoesNotReplaceHolder"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/lock_test.go"
+      },
+      "resolved_sha256": "bf797eae96b30a26bcd0a7a75fff1c6a06f5f64102d2abb3d782bce389a9cc0f",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/host/not_running.go",
+      "sha256": "65dd0e7a37acec2da346627869309af268d6c5b68b5452a586d5bf1e240e9f5d",
+      "git_blob": "e62a0158d4f28d01f3c21183fe1e5022eb810482",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/not_running.go"
+      },
+      "resolved_sha256": "65dd0e7a37acec2da346627869309af268d6c5b68b5452a586d5bf1e240e9f5d",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/render.go",
+      "sha256": "5825cf7f4f178393f1c424a647fe716a236df65484ff00456684f7c75110a4bf",
+      "git_blob": "df5de0b77e76d0c5b69395c486fb1779ec6ae3f5",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/render.go"
+      },
+      "resolved_sha256": "5825cf7f4f178393f1c424a647fe716a236df65484ff00456684f7c75110a4bf",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/render_test.go",
+      "sha256": "afe8e1a16480c62217049e42e209c1bd7f8bf7174b34232179bc994dcc637d22",
+      "git_blob": "cd8a200676d5eda8577d2cd7696928939218a2ea",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestRendererMatchesC5Fixture"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/render_test.go"
+      },
+      "resolved_sha256": "afe8e1a16480c62217049e42e209c1bd7f8bf7174b34232179bc994dcc637d22",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/host/testdata/native-message-envelope.json",
+      "sha256": "3b6fd04eb1d829f0e5313e350e624ebc27cd2e1e86286a68e395dd731e6d46bf",
+      "git_blob": "3b16a853d38d0aa45d874a038498b950000fb24b",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "host/testdata/native-message-envelope.json"
+      },
+      "resolved_sha256": "3b6fd04eb1d829f0e5313e350e624ebc27cd2e1e86286a68e395dd731e6d46bf",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/SESSIONBUS.md",
+      "sha256": "ff6fe51ed21e1350845bd111fc6686774e1529409c80da7eff43b0987ba621e9",
+      "git_blob": "58d04d81c5da4d51721b43db2170c5b6804cca5e",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/SESSIONBUS.md"
+      },
+      "resolved_sha256": "ff6fe51ed21e1350845bd111fc6686774e1529409c80da7eff43b0987ba621e9",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/lane.go",
+      "sha256": "8b04b2461decde1b1ae0d82bdc2ec78f2f7565cbbcd958c3476bbb1f59a444f5",
+      "git_blob": "a8886f4611d8914928405c78f159be5a2bac2010",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/lane.go"
+      },
+      "resolved_sha256": "8b04b2461decde1b1ae0d82bdc2ec78f2f7565cbbcd958c3476bbb1f59a444f5",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/lane_test.go",
+      "sha256": "e7445ffaed03a51edd3e40439f70da2d407097f2b5af36c3542f57522298a139",
+      "git_blob": "66dc1f002f96ac1333adc06eb8474fa6bace6311",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestLaneBackendCrossingCallsAndErrors",
+        "TestLaneBackendRequiresSocket",
+        "TestPrivateActionKeepsCallerInResidentServer",
+        "TestPrivateActionPreservesWorkerCollectionError",
+        "TestServeLaneJoinsAdmittedActions"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/lane_test.go"
+      },
+      "resolved_sha256": "032ad5facd1bfd51e8942e777f47cfba6e2d296f51e62e0c6173ad6ff5bf3b76",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/mcp/self_info_test.go",
+      "sha256": "1d74e4cc9cacd08dc3423cb8b8a1164159c2fd38cb6402421f31617ab15d7e06",
+      "git_blob": "073130230403e5ba252163908967176ac1eee19a",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestListSelfInfoSurvivesCallerAndNativeToolResponse"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/self_info_test.go"
+      },
+      "resolved_sha256": "1d74e4cc9cacd08dc3423cb8b8a1164159c2fd38cb6402421f31617ab15d7e06",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/send_test.go",
+      "sha256": "fc02016425eb1383b3d084f83f9edbca5e226c4448ff52de2ccb6bc68725177c",
+      "git_blob": "60802795e39d7ab9c8e583307549e90a9fa0b94d",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestSendRejectsUnknownSummaryBeforeDispatch",
+        "TestAdvertisedArgumentsMatchPublicActionFieldUnion"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/send_test.go"
+      },
+      "resolved_sha256": "fc02016425eb1383b3d084f83f9edbca5e226c4448ff52de2ccb6bc68725177c",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/server.go",
+      "sha256": "edf6a6e468b1be8296f285a0dac29bfb8c753792b76f90397bb0602267e264d3",
+      "git_blob": "f0ed6b8c6e849a20c599963c4943eb407c1df88e",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/server.go"
+      },
+      "resolved_sha256": "edf6a6e468b1be8296f285a0dac29bfb8c753792b76f90397bb0602267e264d3",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/server_test.go",
+      "sha256": "21b0d44c7d38cc8c26fda0073524b84426a8ecc2ea3ad5a52dcc8e4c484cfa0c",
+      "git_blob": "d3e17072971e004f26405fb06927b1e4f23a4993",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestServerMethods",
+        "TestInvalidRequests",
+        "TestToolArgumentsMustBeObject",
+        "TestServerUsesBackendCallerAfterPrepare",
+        "TestServerUsesStatelessActionBackend",
+        "TestServerReturnsOutputFailure",
+        "TestServerCancelWithStoppedOutput"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/server_test.go"
+      },
+      "resolved_sha256": "21b0d44c7d38cc8c26fda0073524b84426a8ecc2ea3ad5a52dcc8e4c484cfa0c",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/sessionbus.go",
+      "sha256": "f7fe0a847a5fb58b005c61c86d97f83010866b11d407b458421ce63605c49cb7",
+      "git_blob": "926ed7bdd5f377158fcf6292b8f95fe1ff46203d",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/sessionbus.go"
+      },
+      "resolved_sha256": "f7fe0a847a5fb58b005c61c86d97f83010866b11d407b458421ce63605c49cb7",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/sessionbus_bounds_test.go",
+      "sha256": "e59d02ed325197568fa9c9daa7c1f72b197b69b1b7074000f9ba8b577c2402c5",
+      "git_blob": "3fba5851239e464f4b47f33d97f936f969cf7492",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestMCPBlockedResponsesDoNotHoldEOF",
+        "TestMCPBlockedOSPipeWriteJoinsOnEOF",
+        "TestMCPInitializedOnlyAfterSuccessfulWrite",
+        "TestMCPResponseWorkAndRetainedInputLimits",
+        "TestMCPReturnedPayloadBudgetStopsBlockedResponses",
+        "TestMCPFrameAndEscapedResultBounds",
+        "TestMCPCompletedActionDoesNotWriteAfterEOF",
+        "TestMCPResponseReservationsReleaseAndIDsCanBeReused",
+        "TestMCPOversizedPayloadStopsWithoutOutput",
+        "TestMCPCancelledCallsReleaseWorkWithoutReplies"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/sessionbus_bounds_test.go"
+      },
+      "resolved_sha256": "e59d02ed325197568fa9c9daa7c1f72b197b69b1b7074000f9ba8b577c2402c5",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/sessionbus_test.go",
+      "sha256": "411caa0d710203944f75bd83002f11a36f929333beb854e5bbc4ae4fb9ac62ed",
+      "git_blob": "2286a88aed2a5952ce07ba65174d990aae401819",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestSessionbusNativeReportsAreExplicitAndHidden",
+        "TestSessionbusReportCannotShadowPublicTool",
+        "TestSessionbusMetadataIsPerNativeRequest",
+        "TestInactiveMCPStaysUntilEOFAndAdvertisesNothing"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/sessionbus_test.go"
+      },
+      "resolved_sha256": "411caa0d710203944f75bd83002f11a36f929333beb854e5bbc4ae4fb9ac62ed",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/sessionbus_tools.go",
+      "sha256": "7c553b1ad6f8abf3c3da72417d1bf771b98cc31614cbe96aa2b9564da27f5924",
+      "git_blob": "2113cf19522f661bfec41f9e578ac23772455cd6",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/sessionbus_tools.go"
+      },
+      "resolved_sha256": "7c553b1ad6f8abf3c3da72417d1bf771b98cc31614cbe96aa2b9564da27f5924",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/mcp/trace_policy_test.go",
+      "sha256": "98f71c86987892c98f4dcdb02fd2c4cc1cf96f024b60328ac342281334f30875",
+      "git_blob": "c34073b1d148cc08d6cfd69758784dfd9cca6ec8",
+      "mode": "100644",
+      "class": "peer-common",
+      "permitted_change": "exact peer-common copy; Go import relocation and gofmt only",
+      "test_functions": [
+        "TestSpawnResultTraceSurvivesSDKAndMCP"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/peer-common",
+        "commit": "eb655f686e4456a4c1121054763318e3d27e89b0",
+        "path": "mcp/trace_policy_test.go"
+      },
+      "resolved_sha256": "98f71c86987892c98f4dcdb02fd2c4cc1cf96f024b60328ac342281334f30875",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/extension.mjs",
+      "sha256": "c1c7477db45f1912c66e131e2a79a201c681934c25f135807f6977a1bddb76d9",
+      "git_blob": "d05e7b8e5f7cc83db90230b2f5d8dc900cfa681b",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/extension.mjs"
+      },
+      "resolved_sha256": "c1c7477db45f1912c66e131e2a79a201c681934c25f135807f6977a1bddb76d9",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/extension.test.mjs",
+      "sha256": "90898642b443be85b85a4b315e761c479973eea4da2fda255aa84cb0c9d92416",
+      "git_blob": "884944469c271b59cb776c9ad790e3c131f4a9d4",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [
+        "captureLaunch validates and scrubs private physical metadata",
+        "lane primary reports ready and preflight before routing its exact tool identity",
+        "native stage can follow published hello before local owner.ready continuation",
+        "invalid managed factory mode fails closed before retaining a binding",
+        "interactive delivery tracks independent batches through one coalesced native context",
+        "interactive later batch can complete before an older claimed batch",
+        "interactive scheduling failure retires the owner and releases the claimed batch",
+        "interactive batch reservation failure retires without later native submission",
+        "interactive claimed batch retires on a new durable reset boundary",
+        "interactive FIFO enforces and releases its process retained-payload bound",
+        "session replacement rotates owner token and resets report sequence without transferring queued input",
+        "failed session replacement releases the superseded binding",
+        "Task child receives a separate owner and cannot request primary shutdown",
+        "failed Task child reports its end without retiring the healthy primary",
+        "actual Unix bridge reports a failed Task child end while the primary remains healthy",
+        "bounded report worker aborts a factory without spawning per-report work",
+        "session shutdown joins already-owned report work before its end acknowledgement",
+        "unexpected passive bridge end aborts and shuts down the primary",
+        "actual Unix bridge supports owner.ready callback into native.describe",
+        "native tool arguments match the shared closed MCP field declaration"
+      ],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/extension.test.mjs"
+      },
+      "resolved_sha256": "59a4c8453945918af3af648f0b5da1720a1e416f6a03436c5aa962786a860e40",
+      "resolution": "test-fixture-path-only"
+    },
+    {
+      "path": "wrappers/omp/interactive_arguments.go",
+      "sha256": "aa0b727d642351f3b96533b3ffd4199785f59a56d2426e901c84e197fe5a8833",
+      "git_blob": "68156c41c78958d13a723ed549a5fa6cc153d90e",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/interactive_arguments.go"
+      },
+      "resolved_sha256": "f71703c11ec888a7c43d2965dac861b634cca9f465222f6b5f66c9461aed940a",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/interactive_arguments_test.go",
+      "sha256": "3bcf8a758567692c62de7b552ad6c072d65762c7328ef49c72068fe5acb7ec3e",
+      "git_blob": "3e6561e5b80b1d7b605bff822a4ecbbfa59097d9",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPInteractiveBypassPreservesNativeOrder",
+        "TestOMPInteractivePlanProjectsIdentityAfterNativeValues",
+        "TestOMPInteractivePlanNativeValuesProtectWrapperTokens",
+        "TestOMPInteractivePlanProtectsOwnedWrapperValuesDuringRouting",
+        "TestOMPInteractivePlanRoutesProjectedNativeArguments",
+        "TestOMPInteractivePlanNativePassthroughIsExact",
+        "TestOMPInteractivePlanRoutesEveryRegisteredNativeCommand",
+        "TestOMPInteractivePlanMirrorsNativeCommandOwnership",
+        "TestOMPProfileTraversalPreservesNativeBoundaries",
+        "TestOMPInteractivePlanReservedNativeOutcomes",
+        "TestOMPInteractivePlanBoundaryAndWrapperValidation",
+        "TestOMPInteractivePlanAttachedWrapperIdentity",
+        "TestOMPInteractivePlanRejectsManagedExtensionConflict",
+        "TestOMPInteractivePlanValidatesExecutionInputs",
+        "TestOMPInteractivePlanModeAndExportMissingValuesStayManaged"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/interactive_arguments_test.go"
+      },
+      "resolved_sha256": "36ba2429c89466ba20d0479bfd49fcf5f2f9fe158ebcf3ec712c99590e3f12ba",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/interactive_launch.go",
+      "sha256": "a15c7780da6aa73f3d0cced04965d4f153f49ddede4e95f8685746d0de4841d7",
+      "git_blob": "248f70b991ed7629d2be4e911585cfe9e05039b7",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/interactive_launch.go"
+      },
+      "resolved_sha256": "73ef7dfc12ae43fd3608d58bf0a9074cda078c5a812709dd3af59d296a57c295",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/interactive_launch_test.go",
+      "sha256": "b270e9d3aeed761bd328602ece13d0e63bc2e5c7fb3d2b02b71e8dac09ac42ad",
+      "git_blob": "88c81e27452f5a59fc2c22c3bedd7acabb94ffe5",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestInteractiveOwnerOptionsPreserveNativeArgumentsAndBindIdentity",
+        "TestInteractivePlanSocketPolicyPassesRealOwnerOptionsBoundary",
+        "TestInteractiveOwnerOptionsRejectMismatchedPlanAndStaleOwnership",
+        "TestWaitInteractiveOwnerRequiresPrimaryAndPropagatesTerminalState",
+        "TestWaitInteractiveOwnerCancellationBeforeAndAfterReady",
+        "TestRunInteractiveOwnerClosesExactlyOnceAndRetainsTerminalError",
+        "TestNewOMPInteractiveProvisionalUsesExactEntropy"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/interactive_launch_test.go"
+      },
+      "resolved_sha256": "18aa849dcc4f4f57124f1b4cb4e7e2d2c066864b697f283c53589b1430759626",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/managed_extension.go",
+      "sha256": "3c7183dc6ebb93d0042d0e3352c8e3332b4ae7af59258805229b90227c03b23c",
+      "git_blob": "3f2d42f2446d9f4d943d0397e6d459d60a354875",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/managed_extension.go"
+      },
+      "resolved_sha256": "3c7183dc6ebb93d0042d0e3352c8e3332b4ae7af59258805229b90227c03b23c",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/managed_extension_test.go",
+      "sha256": "ef12a3e06aa261aae3ef68580388e7058b9c60e6bcb6a739ee7e2c134a12aa47",
+      "git_blob": "f7fb425e64f9289086ce63d5fcc961307dad1438",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestResolveManagedExtensionFromInstalledPeer",
+        "TestResolveManagedExtensionRejectsUnrelatedExecutable",
+        "TestValidateManagedPluginRejectsMissingSymlinkAndOversizedFiles",
+        "TestInstallPluginValidatesOnlyExplicitLocalPayload"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/managed_extension_test.go"
+      },
+      "resolved_sha256": "1f4cb2e0f48d976d47cc7de94fc21c63b153df16876d0a9622879e57d4207571",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/native_executable.go",
+      "sha256": "829d0109859f86d5af3c28d794f13aca1149104c23d1bb255e389f026b6e1ed4",
+      "git_blob": "337968a0b7b764c2c3fd2f12a3e6b4914a6b8520",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/native_executable.go"
+      },
+      "resolved_sha256": "829d0109859f86d5af3c28d794f13aca1149104c23d1bb255e389f026b6e1ed4",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/native_executable_test.go",
+      "sha256": "03f6d0cf563e3a67bc36ac3ce186fdefdbaeb3e7a6a1048e5d2720a2da2003f6",
+      "git_blob": "7bfd010e728b215cc8988abfd11b01540735e85f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestResolveNativeExecutablePublishedPackageAndBun",
+        "TestResolveNativeExecutableOverrideUsesPATHAndStillValidates",
+        "TestResolveNativeExecutableRejectsPackageDrift",
+        "TestResolveNativeExecutableRejectsWrongEntryRuntimeAndMode",
+        "TestResolveNativeExecutableRejectsInvalidBunWithoutFallback",
+        "TestResolveNativeExecutableRejectsNonregularMetadataAndRuntime"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/native_executable_test.go"
+      },
+      "resolved_sha256": "24e86a16cd11819d7dbfebecd0915d3993af8bee7cfea5e9d1b30eede4bdb1f6",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/native_owner.go",
+      "sha256": "f392eed2ab6e1824c92704fa09f77fa11046aedbceffcd2a9640844d992351da",
+      "git_blob": "f9f8140825df8eae16c769779643691bc0c18392",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/native_owner.go"
+      },
+      "resolved_sha256": "46584319b3f3ded198726d4728a9dd0af2e56cc876bf479fbf8ab73377d448fd",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/native_owner_test.go",
+      "sha256": "55c37ed59fa99c684e4c059385a039890993474966cc5b0a5c321b0bcafeda22",
+      "git_blob": "bfaaaae8fbd530d5cd9a0b8ac30bdc7255530737",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPNativeOwnerHelper",
+        "TestNativeOwnerJoinsStartupShutdownAndOwnedResources",
+        "TestNativeOwnerInteractiveUsesTerminalAndExtensionReadiness",
+        "TestNativeOwnerBypassRetainsManagedExtension",
+        "TestNativeOwnerRequiresObserverOnlyForLane",
+        "TestNativeOwnerRetainsStartupNativeEventFailure",
+        "TestNativeOwnerObservesPostReadinessNativeEvent",
+        "TestNativeOwnerCloseCancelsHeldStartupAndJoins",
+        "TestNativeOwnerRejectsContradictoryStateAndJoins",
+        "TestNativeOwnerBridgeLossCancelsHeldStateReadAndJoins",
+        "TestNativeOwnerRetiresUnexpectedChildExit",
+        "TestNativeOwnerAdoptsLiveCWDSeparateFromLaunchDirectory",
+        "TestNativeOwnerParentCancellationForcesAndJoins",
+        "TestNativeOwnerCloseCancellationForcesAndJoinsChild",
+        "TestNativeOwnerParentCancellationInterruptsHeldShutdownResponse",
+        "TestNativeOwnerAcceptsEndBeforeShutdownResponse",
+        "TestNativeOwnerContextWatcherJoinsRunningCallback",
+        "TestNativeOwnerPreservesClosingProtocolFailure",
+        "TestNativeOwnerDrainsClosingProtocolFailureAfterChildExit",
+        "TestNativeOwnerGracefulRPCDrainCancellationJoinsHeldOutput",
+        "TestDecodeNativeOwnerStateRequiresTypedReadiness",
+        "TestNativeOwnerRejectsNonphysicalExtension"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/native_owner_test.go"
+      },
+      "resolved_sha256": "e64588c52270ebd78e1910afcb2c7ad38a447e9c42bfe057e7f8deeed08592e7",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/omp.go",
+      "sha256": "4465f238b394aa9c5376fa9237681beb28b2614631255b1381142d7c3317948f",
+      "git_blob": "2d79da1c7edda665f5940ff54f71c0205027e6ab",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/omp.go"
+      },
+      "resolved_sha256": "af32bee9d97d5438ae75392fb0bfe5cae507af1c98cb8140b5565fa8ed13624e",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/omp_test.go",
+      "sha256": "9ad217d570b59250f059b8f00fb37f6ad69133f5d80a666db803e06efdc435e8",
+      "git_blob": "400ec7de99de3e7ba10318eab93d44e0de087835",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPHelloAndLaneArguments",
+        "TestOMPLaneArgumentsRejectTypedOwnerConflicts",
+        "TestOMPLaneExplicitBypassKeepsNativeArguments",
+        "TestOMPWrapperOpenResumeAndCloseUsesNativeOwner",
+        "TestOMPWrapperOpenFreshConfirmsNativeNameAndClose",
+        "TestOMPWrapperOpenAcceptsStartupAndIdleNotifications",
+        "TestOMPWrapperOpenRejectsStartupDialogWithMethod",
+        "TestOMPNameAndResumeValidation",
+        "TestOMPOpenBindingAdoptsOnlyOmittedResumeCWD",
+        "TestOMPAdoptOpenRejectsCallerCancellationAtCommitBoundary",
+        "TestOMPAdoptOpenRejectsClosingWithoutAContextError",
+        "TestOMPAdoptOpenRejectsChangedBindingAndRecordedOwnerFailure",
+        "TestOMPLossShutdownWorkIsAdmittedBeforeCloseWait"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/omp_test.go"
+      },
+      "resolved_sha256": "9ad217d570b59250f059b8f00fb37f6ad69133f5d80a666db803e06efdc435e8",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/owner_registry.go",
+      "sha256": "4d6635a410fb84c5a9e6ee2f773f0f481b6c800d2cd724e7c986b1d97feb7a30",
+      "git_blob": "e7089c79c50dc336dc7f70384e51bb2a152aa406",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/owner_registry.go"
+      },
+      "resolved_sha256": "8d3d2f03670c6241ddbd037b7bdb4d00067cdec90ade088d2de519b815387b82",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/owner_registry_test.go",
+      "sha256": "8a21176ae07e9959e7bf54fabbcb8b2eee6bec611572fc39ecdfd1c5d245f661",
+      "git_blob": "a2ed91fcd62ef59d4c1c0a8eac1dd57f7aa757b8",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOwnerRegistryRejectsInvalidConstruction",
+        "TestOwnerRegistryWaitsForBridgeAssignmentBeforeDispatch",
+        "TestOwnerRegistryBridgeAssignmentWaitCancelsAndJoins",
+        "TestOwnerRegistryKeepsLanePrimaryAndChildCallersDistinct",
+        "TestOwnerRegistryAcceptsCleanBridgeEOFOnlyAfterAcknowledgedEnd",
+        "TestOwnerRegistryRejectsBridgeEOFBeforeAcknowledgedEnd",
+        "TestOwnerRegistryStagesInteractiveDeliveryAndConfirmsExactBatch",
+        "TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner",
+        "TestOwnerRegistryRejectsAmbiguousNativeQueueCapacity",
+        "TestOwnerRegistryRejectsCapacityAfterNativeClaim",
+        "TestOwnerRegistryAdmitsHelloBeforeFollowingPublicRequest",
+        "TestOwnerRegistryStageCancellationBoundaries",
+        "TestOwnerRegistryChildFirstDoesNotAdoptPrimary",
+        "TestOwnerRegistryClaimCanPrecedeStageResponseAndReportsReorder",
+        "TestOwnerRegistryInteractiveSwitchWithdrawsBeforeReplacement",
+        "TestOwnerRegistryToolCallPinsCallerGeneration",
+        "TestOwnerRegistryConsumedEvidenceDoesNotImposeLifetimeTurnLimit",
+        "TestOwnerRegistryRecoversWhenDaemonStartsAfterNativeOwner",
+        "TestOwnerRegistryReconnectsWithoutReplayingLostToolCall",
+        "TestOwnerRegistryPublishesOnlyReplacementIdentityAfterOutage",
+        "TestOwnerRegistryJoinsCanceledPublisherDialOnSessionEnd",
+        "TestOwnerRegistryJoinsCanceledPublisherHelloOnSessionEnd",
+        "TestOwnerRegistryJoinsCanceledUnreadHelloWriteOnSessionEnd",
+        "TestOwnerRegistryReconnectsChildWithoutChangingLanePrimary",
+        "TestOwnerRegistryReleasesLostAttemptDeliveryAccounting",
+        "TestOwnerRegistrySupersessionIsTerminalBeforeHeldAcknowledgement",
+        "TestOwnerRegistryInvalidHelloIsTerminal",
+        "TestOwnerRegistryRejectsAdmissionAfterRecordedFailure",
+        "TestOwnerRegistrySupersessionWinsHeldReplacementDescription",
+        "TestOwnerRegistryWaitsForNextMatchingPreflightAndConsumesAccounting",
+        "TestOwnerRegistryPreflightWaitDoesNotSearchPastForeignWitness",
+        "TestOwnerRegistryPreflightWaitWakesOnCancellationAndOwnerEnd",
+        "TestOwnerRegistryCanceledPreflightWaitPreservesArrivedEvidence",
+        "TestOwnerRegistryFailedPreflightWaitPreservesArrivedEvidence",
+        "TestOwnerRegistryBoundsReorderedReportPayloadBytes",
+        "TestOwnerRegistryShutdownIsPrimaryRequestOnly"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/owner_registry_test.go"
+      },
+      "resolved_sha256": "e64f98d2cee6f7ba4c0a5dc653e192959db6c2c55397ab1900dab3e3d8fb9b6d",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/package_archive_test.go",
+      "sha256": "1f3367b1da03a78e1259afe223cba3c089d9a256c4db30e01d413bd2ed864b7c",
+      "git_blob": "ca0cb9c63ee7b44d548aac271c82867a27284985",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPArchiveInstallsOnlyTheManagedLaunchPayload"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/package_archive_test.go"
+      },
+      "resolved_sha256": "dcd9eb67565b301d787d8efbbb75e8f43f05400363b650b2604402cc4474ff39",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/process.go",
+      "sha256": "9eded5a16fb4db1cf09925449019fae23ca7ff8c8b46c5d2b1d0549f02fb5298",
+      "git_blob": "7c68af53308dae63c741fcb274c858ac126843c5",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/process.go"
+      },
+      "resolved_sha256": "aa5a8c1b11767c37c301136d612891bb985daf6314c8b9596901334179063f4b",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/process_test.go",
+      "sha256": "877862ae9102f13286b1b742248cbdec54a41bf2e5aee1f5e67d73f33702acaf",
+      "git_blob": "f6dccab359171bd5e8c0af054b64668c93ae7c83",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPProcessHelper",
+        "TestOMPInteractiveProcessPreservesTopology",
+        "TestOMPOwnedProcessUsesDirectRuntimeAndPrivateDescriptor",
+        "TestOMPProcessForceJoinsAndCleans",
+        "TestOMPProcessRejectsRelativeNativePaths",
+        "TestOMPProcessAcceptCancellationJoinsAndOwnsResources",
+        "TestOMPAcceptClosesConnectionWhenCancellationWinsHandoff"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/process_test.go"
+      },
+      "resolved_sha256": "a8d221c0773df45f0d742c25897f1cfbd3519be2211fad6735d9fb7fe99c1532",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/rpc.go",
+      "sha256": "ae1dd6d7df8d7116c9ca734a7cdde934c3328e8e435caf81cf7e7d561992d7a4",
+      "git_blob": "a947fa6d4314a1761e74231eea8c0c215a185cf0",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/rpc.go"
+      },
+      "resolved_sha256": "ae1dd6d7df8d7116c9ca734a7cdde934c3328e8e435caf81cf7e7d561992d7a4",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/rpc_test.go",
+      "sha256": "662ceec2dafd8e795d6950673c383c59859ece85587ab7f4bb1205e218e95c45",
+      "git_blob": "080b40624048202d139740e093ec3f99e28411f0",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestNativeRPCRequiresAndNegotiatesExactReadiness",
+        "TestNativeRPCRejectsInvalidReadiness",
+        "TestNativeRPCOutOfOrderResponsesAndNativeError",
+        "TestNativeRPCPromptKeepsCorrelationForLateNativeFailure",
+        "TestNativeRPCPromptPreservesTypedImmediateAgentOutcome",
+        "TestNativeRPCInvalidPromptStartReleasesAlreadyAcceptedLateError",
+        "TestNativeRPCPromptTerminalFinishRejectsLaterResponse",
+        "TestNativeRPCPromptFinishJoinsConcurrentTransportLoss",
+        "TestNativeRPCReassemblesProtocolTwoResponse",
+        "TestNativeRPCRejectsInvalidChunkSequences",
+        "TestNativeRPCRejectedCommandDoesNotConsumeID",
+        "TestNativeRPCUICancellationIsOneWayAndDoesNotConsumeCallID",
+        "TestNativeRPCCancellationBeforeAtomicAdmissionWritesNothing",
+        "TestNativeRPCReportsAtomicQueueAdmission",
+        "TestNativeRPCCompletedWriteWinsSimultaneousCancellation",
+        "TestNativeRPCAcceptedResponseWinsSimultaneousCancellation",
+        "TestNativeRPCResponseViolationsRetireAndReleaseCaller",
+        "TestNativeRPCDuplicateResponseRetiresAfterAcceptedResult",
+        "TestNativeRPCPostWriteCancellationDrainsLateResponse",
+        "TestNativeRPCPendingCapacityRejectsBeforeWrite",
+        "TestNativeRPCAcceptedResponseCompletesBeforeWriteCallback",
+        "TestNativeRPCEndInputQueuesBehindAcceptedResponseWrite",
+        "TestNativeRPCUICancellationDuringUnsettledWriteRetires",
+        "TestNativeRPCHeldUICancellationDoesNotOwnAdmissionLock",
+        "TestNativeRPCCancellationDuringPartialWriteRetiresAndJoins",
+        "TestNativeRPCAggregateRetainedCapacityReleasesCaller",
+        "TestNativeRPCEventsAreObservedAndObserverFailureRetires",
+        "TestNativeRPCEndInputRequiresSettledCallsAndAcceptsCleanEOF",
+        "TestNativeRPCOrderlyOutputEOFJoinsInputCloseCompletion",
+        "TestNativeRPCRejectsPartialCRLFAndOversizedOutput"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/rpc_test.go"
+      },
+      "resolved_sha256": "662ceec2dafd8e795d6950673c383c59859ece85587ab7f4bb1205e218e95c45",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/omp/run.go",
+      "sha256": "4d9ef84972701f801c2caeaa14b2979a374d731a23ea2fefda8288871e7a2547",
+      "git_blob": "857a3f83468891bdaed3ae3a1a71dca7924193e9",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/run.go"
+      },
+      "resolved_sha256": "089525159eb7077d27cd7d7980a2618e380f362f9d1371152663a6a646a654db",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/run_test.go",
+      "sha256": "cf9c9e731faf21e426edf244c8ecbc89ae52a90093cc6c2ac0fc02a30055e755",
+      "git_blob": "f7af1a9c7f68fba23b828457e1f742e2ea37938f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOMPRunJoinsLatePreflightAndCurrentTerminalAssistant",
+        "TestOMPImmediateNoAgentIsFiniteWithoutBorrowedAssistant",
+        "TestOMPPromptResultNoAgentIsFiniteAndCorrelated",
+        "TestOMPWorkerReportsSubmittedNoAgentDeliveryBeforeTerminal",
+        "TestOMPRunRejectsForeignLeadingPreflight",
+        "TestOMPRunCancelsOwnedRuntimeUIAndJoinsWrite",
+        "TestOMPAdmittedInterruptJoinsAbortAndPreservesNextRun",
+        "TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight",
+        "TestOMPTerminalCancelsAndJoinsUnsettledUIBeforeResult",
+        "TestOMPManagedExtensionFailureAndPostTerminalWorkRetireRPC",
+        "TestOMPHeldCompletionWaitKeepsTerminalAcrossForeignRetirement",
+        "TestOMPAssistantDecoderRejectsUnknownStopAndUsesTextParts"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/run_test.go"
+      },
+      "resolved_sha256": "b7061388f933b3060d064945dd45e78ff88f10a2588d5472a7c01771c74db282",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/omp/trace_policy_test.go",
+      "sha256": "70f4a04de3a484e332b1d11ed5381b2371ccfbbd90987e971e3a56bc77f6fd10",
+      "git_blob": "749375a868292a22a48710c4ec418f1a89b408e4",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestOwnerRegistrySpawnResultPreservesTrace"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/omp/trace_policy_test.go"
+      },
+      "resolved_sha256": "70f4a04de3a484e332b1d11ed5381b2371ccfbbd90987e971e3a56bc77f6fd10",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/arguments.go",
+      "sha256": "0a30c5f21dcb50584db574dcbc7748c5b0b985813f08b62477df169292fa93ac",
+      "git_blob": "2fb7b81181642f19bc4b6cf5df7331cbfdd477b0",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/arguments.go"
+      },
+      "resolved_sha256": "3b07cf8aef5ef4451dff07810cd2ee22123b4130d3f791e608dd1028b66134e2",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/arguments_test.go",
+      "sha256": "2c59bfdf4b12b45da55d96b41f22aa07f3257c558f4d9f5b7b0947810d30b2ea",
+      "git_blob": "59a4c71387c714a2d2c446431dd10a0dc1c3b940",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiLaunchPreservesNativeSelectionAndOptionArity",
+        "TestPiRejectsLifecycleAndTypedFieldOverrides",
+        "TestPiRejectsUnsupportedNativeSelections"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/arguments_test.go"
+      },
+      "resolved_sha256": "2c59bfdf4b12b45da55d96b41f22aa07f3257c558f4d9f5b7b0947810d30b2ea",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/extension.mjs",
+      "sha256": "a6367258a6f0fe0e635fed6cd0d5ac02c9396c7c6e9fa2bc33e0f0e4ef662d64",
+      "git_blob": "8907d934eff4a19cfd743b1d7141ad327250f5c4",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/extension.mjs"
+      },
+      "resolved_sha256": "a6367258a6f0fe0e635fed6cd0d5ac02c9396c7c6e9fa2bc33e0f0e4ef662d64",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/extension.test.mjs",
+      "sha256": "422193998653a1e8b46e75455131332f837ef2f2b1b88baed363092f66e5ae6c",
+      "git_blob": "c1ab676850e500fcb90e0dcd09004395e296fe30",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [
+        "launch capture scrubs and binds a private physical socket",
+        "lane handshake and ordered witnesses retain native ownership",
+        "interactive drains before a prompt and after a settled turn through nested native appends",
+        "interactive wakes after manual compaction and brackets unobservable branch summaries",
+        "reload reuses one bridge and replaces the stale native context",
+        "deferred drain accepts fresh event contexts and rejects a replaced generation",
+        "mode mismatch and bridge failure fail closed",
+        "an idle owner connection ending retires the native session",
+        "actual Unix bridge supports handshake, nested drain, tool call, and joined quit",
+        "actual idle Unix EOF retires native ownership",
+        "default managed factory survives real module reevaluation after launch scrub",
+        "native tool arguments match the shared closed MCP field declaration"
+      ],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/extension.test.mjs"
+      },
+      "resolved_sha256": "189e67f36bf6fa76dc94cfdba7fa6be9618fb72ac397e558ee05f9bbf9e88895",
+      "resolution": "test-fixture-path-only"
+    },
+    {
+      "path": "wrappers/pi/history.go",
+      "sha256": "3bdaa942ab53e0a9700997ed532987b793bc64b4bdf0fc8c74a3426b1f941e94",
+      "git_blob": "2de3308dd7b574b59ec83a9c4e5798f884a8b181",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/history.go"
+      },
+      "resolved_sha256": "3bdaa942ab53e0a9700997ed532987b793bc64b4bdf0fc8c74a3426b1f941e94",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/history_test.go",
+      "sha256": "00d3cbdc4a54c3195cb66f2c8f7681dd1bc93d96da1e5d3a888a7a9a0ce8887b",
+      "git_blob": "1f4dd0a8b8a69608f45685510d25b583eb08d9b9",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestHistoryDoesNotBorrowAnEarlierAnswer",
+        "TestHistoryUsesNativeTerminalAndPreservesText",
+        "TestHistoryIncludesRetryAndCompactionInCurrentBranch",
+        "TestHistoryNativeCustomDeliveryAndToolIntervals",
+        "TestHistoryEmptyNativeRoot",
+        "TestHistoryRejectsMissingOrForeignOutcome",
+        "TestHistoryMalformedReferences"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/history_test.go"
+      },
+      "resolved_sha256": "00d3cbdc4a54c3195cb66f2c8f7681dd1bc93d96da1e5d3a888a7a9a0ce8887b",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/interactive_arguments.go",
+      "sha256": "80e38feb5aefa1d007d87170ab4380ded442c949f46fbf9629b3671529a90a62",
+      "git_blob": "6e76e6573700b8b7cc710bd2ae640dfaecf4c769",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_arguments.go"
+      },
+      "resolved_sha256": "2927bcfea25bf9249210fca285594b0bb6a3a4a50fdc2db36db6b482707e4160",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/interactive_arguments_test.go",
+      "sha256": "a67fbf795a625bc1808cf0de8b27926115ddd7782adcee4f73a28edd3047ce4c",
+      "git_blob": "6d2c9befbb000d835f1c7494b4a91ce0a364864e",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestInteractivePlanProjectsWrapperIdentityAndKeepsNativeArguments",
+        "TestInteractivePlanNativeValueAndBoundaryProtectWrapperFlags",
+        "TestInteractivePlanNativeMaintenancePassthroughIsBytePreserving",
+        "TestInteractivePlanDoesNotTreatExtensionFlagValueAsCommand",
+        "TestInteractivePlanRecognizesMaintenanceOnlyAsFirstArgument",
+        "TestInteractivePlanProtectsWrapperValuesBeforeNativeClassification",
+        "TestInteractivePlanSelectsPeerShortNameAndNativeLongName",
+        "TestInteractivePlanRejectsTopologyOverride",
+        "TestInteractivePlanRejectsManagedToolDisable",
+        "TestInteractivePlanPreservesEffectiveManagedToolSelection",
+        "TestInteractivePlanKeepsNativeNoPromptToolControls",
+        "TestInteractivePlanYoloCoexistsWithManagedToolSelection",
+        "TestInteractivePlanRejectsInvalidWrapperValue"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_arguments_test.go"
+      },
+      "resolved_sha256": "9fa6ea0159f8a3b8c002e2b5d6da806fd1aebe4774e6e190a3447157f840338e",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/interactive_launch.go",
+      "sha256": "1bc2b4a5a8a224e76a10f522a3d774248f0badcaf9f7ca0b76bb8fd6a4610fe4",
+      "git_blob": "a0c2057d9986949213648a4b70103c1d9a39a016",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_launch.go"
+      },
+      "resolved_sha256": "9d98494e62337e7c79e86546e678cc8c3f63dedd6b8367c11476382bd6fef081",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/interactive_launch_test.go",
+      "sha256": "185373b1244f9988a5b19796e6a5b0ed07f8ab7ea4a990e3abfa9801194d497a",
+      "git_blob": "7c6612f888946744df10c25ff2427ee0e39b09e9",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiInteractiveNativeChild",
+        "TestRunPiInteractiveWaitsForInitiallyAbsentDaemonWithoutRestartingNative",
+        "TestRunPiInteractiveOwnsBridgeIdentityAndGracefulSignalCleanup",
+        "TestPiInteractiveBridgeResultOnlyNormalizesJoinedGracefulQuit",
+        "TestRunPiInteractiveReconnectsPublicIdentityWithoutRestartingNative",
+        "TestRunPiInteractivePropagatesNativeExitAndContainsBridgeLoss",
+        "TestRunPiInteractiveClosesAcceptedConnectionWhenChildAlreadyExited"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_launch_test.go"
+      },
+      "resolved_sha256": "3db9c6284cd077b2322bce402a43fc4ca749d6c8bb2a37cfe13cfd2ed9e1a679",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/interactive_owner.go",
+      "sha256": "de755ec2c0d6cc7aea6546a57166e8d1caf60f65a2a8be89cd02338ee8f3b6af",
+      "git_blob": "fbcb98f2051ff750336db1d56f960bd983ccdc41",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_owner.go"
+      },
+      "resolved_sha256": "83d0d4df98fd52b8adc2e9d31f0203619e5bb09b4fb1e9b512b8202dfdd7c5f2",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/interactive_owner_test.go",
+      "sha256": "881034df5eabdfeb428b73a804c9ed992f35c9f7c2218438cb69b6c45d1010fa",
+      "git_blob": "f39e310934eaa60f44db53e2f0d5aa9722126a1f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestInteractiveOwnerPublishesRebindsAndRoutesExactToolIdentity",
+        "TestInteractiveOwnerReconnectsLatestIdentityWithoutReplayAndSessionEndStopsOldLifetime",
+        "TestInteractiveOwnerSupersededIsTerminal",
+        "TestInteractiveOwnerSupersededOwnsTerminationBeforeHeldAck",
+        "TestInteractiveOwnerCloseJoinsHeldSupersededAck",
+        "TestInteractiveOwnerIgnoresSupersededBeforeHelloAdmission",
+        "TestInteractiveOwnerSessionEndWhileDisconnectedStopsReconnect",
+        "TestInteractiveOwnerCloseJoinsAbsentDaemonReconnect",
+        "TestInteractiveOwnerPreservesFIFOAcrossBusyAndIdleDeliveries",
+        "TestInteractiveOwnerRejectsUnobservableBranchSummaryBeforeRetention",
+        "TestInteractiveOwnerCancelsTreeBeforeRetainedWorkAndGatesFastPath",
+        "TestInteractiveOwnerCanceledDeliveryBeforeAdmissionDoesNotRetireOwner",
+        "TestInteractiveOwnerOldGenerationCannotUseSameIDReplacement",
+        "TestInteractiveOwnerCloseJoinsUnadmittedHelloWatcher",
+        "TestInteractiveOwnerRejectsPoisonedDeliveryBeforeExistingQueue"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/interactive_owner_test.go"
+      },
+      "resolved_sha256": "eb436150dc47ea27f376426fb0fd1d76546797fc8fc203ce232526262e59a8be",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/managed_extension.go",
+      "sha256": "c01a1efa1964d8c8f35847279cb92238328f9ae13bb005039dfed88649ff3033",
+      "git_blob": "414e750737c9c3ecb3290c48d616a3938fae3aa5",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/managed_extension.go"
+      },
+      "resolved_sha256": "c01a1efa1964d8c8f35847279cb92238328f9ae13bb005039dfed88649ff3033",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/managed_extension_test.go",
+      "sha256": "5dfd5a5ef1bba4255dea06a0f3c3137321fedace68e774981d5eb2d7cdb5b1de",
+      "git_blob": "f0426e72fbb7fc6884319bb2f938abf5a6e44f22",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestResolveManagedExtensionFromInstalledPeer",
+        "TestResolveManagedExtensionRejectsUnrelatedExecutable",
+        "TestValidateManagedPluginRejectsMissingSymlinkAndOversizedFiles",
+        "TestInstallPluginValidatesOnlyExplicitLocalPayload"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/managed_extension_test.go"
+      },
+      "resolved_sha256": "b0cb4fb3f861c18b4a245a3ed5f47f46717547329d88545c7ac79225404379d9",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/native.mjs",
+      "sha256": "88bc52aa6b3bfde875d1f1969a273384ab1b5f274f2eae0ec96fb19fd78b265f",
+      "git_blob": "b57b073833342468b07eaab0af4cd6852a0cdcbc",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/native.mjs"
+      },
+      "resolved_sha256": "88bc52aa6b3bfde875d1f1969a273384ab1b5f274f2eae0ec96fb19fd78b265f",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/native.test.mjs",
+      "sha256": "5523a98ae2f30d2b1d59554f1ee16ca50e37a9344784316953801c35c755e449",
+      "git_blob": "98bf8acabc3f9a2af1e37756abf366acdb0ba703",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [
+        "native active transition acknowledges ownership while persisted leaf remains stale",
+        "busy context retains wrapper ownership and makes no native submission",
+        "void API return without native ownership is a definite pre-submission failure",
+        "wrong or stale session cannot receive the delivery",
+        "delivery identity and body bounds reject before native submission"
+      ],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/native.test.mjs"
+      },
+      "resolved_sha256": "5523a98ae2f30d2b1d59554f1ee16ca50e37a9344784316953801c35c755e449",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/native_executable.go",
+      "sha256": "ba2c92f34ce4ca5d95e1b2c1d707cd92fe318d33f16c5690115b4260dcf94ca4",
+      "git_blob": "4568bb90518821e834181eb434f15a81fbaa9e3c",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/native_executable.go"
+      },
+      "resolved_sha256": "ba2c92f34ce4ca5d95e1b2c1d707cd92fe318d33f16c5690115b4260dcf94ca4",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/native_executable_test.go",
+      "sha256": "18c6d350cdf12faf46c114a3b84d303d88145493ef365dd195c6ff55f68519a0",
+      "git_blob": "2d8122a3bd30615d45459e8b7be785933a5a4dca",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestResolveNativeExecutablePublishedPackage",
+        "TestResolveNativeExecutableOverrideUsesPATHAndStillValidates",
+        "TestResolveNativeExecutableRejectsPackageDrift",
+        "TestResolveNativeExecutableBadOverrideDoesNotFallBack",
+        "TestResolveNativeExecutableRejectsNonregularMetadataAndRuntime"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/native_executable_test.go"
+      },
+      "resolved_sha256": "c43016cd8ff7f1432b603e3adbcd338d6e19c2435ade71d1db1c6db25b9424b1",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/package_archive_test.go",
+      "sha256": "b0148376054ecf503afc898896d8982f51537e315c1e17d99463147d9d974de4",
+      "git_blob": "257f020ab423a1bf78f8fab8a358005b78a5a6d0",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiArchiveInstallsOnlyTheManagedLaunchPayload"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/package_archive_test.go"
+      },
+      "resolved_sha256": "707bf1aa83a868582caa6d7c3686d3d2df327e170c893c64a35653902711e4fe",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/pi.go",
+      "sha256": "7a241bbcbeee13838f153f810dd6ccaeff414b4b9b57eaf62b46886dacbcee64",
+      "git_blob": "1627e03ef0aa6262ef172caffadf8092efcd2d67",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/pi.go"
+      },
+      "resolved_sha256": "b371a72579a36c290a66ce84b66a5fbf781e65f9af26c7cf5162a4edb86fbeae",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/pi_test.go",
+      "sha256": "afc6cd51d9686f11e4cd1edae5a376c99b0d955d169b4e1ffaea3f5602df2560",
+      "git_blob": "dc27f17cfe2a982e38ad8925efd7b88a97381a7e",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiNativeHelper",
+        "TestPiOwnedOpenCloseFreshAndResume",
+        "TestPiOpenAcceptsStartupAndIdleNotifications",
+        "TestPiOpenRejectsStartupDialogWithMethod",
+        "TestPiCloseForgetLeavesNativeHistoryToDaemonRowOwnership",
+        "TestPiOpenFailureJoinsOwnedProcessAndResources",
+        "TestPiCancelledCloseForcesAndJoinsExactChild",
+        "TestPiCloseWaitsForStartupResourceAdmission",
+        "TestPiClosePreservesMalformedTerminalWire",
+        "TestPiCloseJoinsLossShutdownWork",
+        "TestPiConcurrentTransportAndHandlerLossDoesNotSelfJoin",
+        "TestPiHelloAndLaneDeliveryPolicy",
+        "TestPiNameAndStateValidation"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/pi_test.go"
+      },
+      "resolved_sha256": "7f8489d537768bd065f726f0a12f6fc2166221492df3d2e08ed7c96f886f1bed",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/process.go",
+      "sha256": "c06a9e36d6dae78825429c30370e21c61db27fab32802cbfe272db9053e4a164",
+      "git_blob": "bdedb30f9a8db6390167574e594582de43115a58",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/process.go"
+      },
+      "resolved_sha256": "0d667e2a1b239b6e78d4c5d96e56eb17857e20d31954bd9e95b2880e8d6854bd",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/rpc.go",
+      "sha256": "0b13dff826ca43734d0627bd475563583da1f96d7c70c711091f3450bf242df6",
+      "git_blob": "f5efc7e7740ecf14658f55dca269eff37d3d1c66",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/rpc.go"
+      },
+      "resolved_sha256": "0b13dff826ca43734d0627bd475563583da1f96d7c70c711091f3450bf242df6",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/rpc_test.go",
+      "sha256": "889369dc6293792aa44a5005dc1a17bb33b12fe2e1700d40a2e7be4b3844ead3",
+      "git_blob": "1b88416c5d2cca75a175983871274c65fd01d98f",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestNativeRPCOutOfOrderResponsesAndNativeError",
+        "TestNativeRPCRejectedCommandDoesNotConsumeID",
+        "TestNativeRPCUICancellationIsOneWayAndDoesNotConsumeCallID",
+        "TestNativeRPCCancellationBeforeAtomicAdmissionWritesNothing",
+        "TestNativeRPCReportsAtomicQueueAdmission",
+        "TestNativeRPCCompletedWriteWinsSimultaneousCancellation",
+        "TestNativeRPCAcceptedResponseWinsSimultaneousCancellation",
+        "TestNativeRPCResponseViolationsRetireAndReleaseCaller",
+        "TestNativeRPCDuplicateResponseRetiresAfterAcceptedResult",
+        "TestNativeRPCPostWriteCancellationDrainsLateResponse",
+        "TestNativeRPCPendingCapacityRejectsBeforeWrite",
+        "TestNativeRPCAcceptedResponseCompletesBeforeWriteCallback",
+        "TestNativeRPCEndInputQueuesBehindAcceptedResponseWrite",
+        "TestNativeRPCUICancellationDuringUnsettledWriteRetires",
+        "TestNativeRPCHeldUICancellationDoesNotOwnAdmissionLock",
+        "TestNativeRPCCancellationDuringPartialWriteRetiresAndJoins",
+        "TestNativeRPCAggregateRetainedCapacityReleasesCaller",
+        "TestNativeRPCEventsAreObservedAndObserverFailureRetires",
+        "TestNativeRPCEndInputRequiresSettledCallsAndAcceptsCleanEOF",
+        "TestNativeRPCOrderlyOutputEOFJoinsInputCloseCompletion",
+        "TestNativeRPCRejectsPartialCRLFAndOversizedOutput"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/rpc_test.go"
+      },
+      "resolved_sha256": "889369dc6293792aa44a5005dc1a17bb33b12fe2e1700d40a2e7be4b3844ead3",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pi/run.go",
+      "sha256": "6057b773b020526bbb5c5b488ac3b855b17972e5ed14f5972f4972d619f018d0",
+      "git_blob": "28a6c5bf4df991a2d4f28e024159c541c8cd29f5",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/run.go"
+      },
+      "resolved_sha256": "4015e39e20cfbd83aacc2b2d98c184ee446a62c51bf58756a80531d7f3d94124",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/run_test.go",
+      "sha256": "4bcd4e8dbb6bfd46966ec4e0a667bc305e24db49dbc010bfdc2a58d181e72888",
+      "git_blob": "96888ef8e2c14c8a932f11472237512c9dcaf528",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestPiOwnedRunJoinsNativeWitnessesAndCurrentHistory",
+        "TestPiRunUsesAppendCursorSeparatelyFromSelectedLeaf",
+        "TestPiHandledPromptConsumesSubmittedHandoff",
+        "TestPiOwnedInterruptJoinsAbortAndNativeTerminal",
+        "TestPiSDKInterruptCancelsHeldNativeAdmission",
+        "TestPiRunAllowsLaterNativeUsersAndFiltersExtensionErrors",
+        "TestPiReconcilesCrossTransportStartAtSettledBoundary",
+        "TestPiIdleExtensionErrorsOnlyRetireForManagedPath",
+        "TestPiRuntimeDialogCancellationUsesOneWayNativeInput",
+        "TestPiRuntimeDialogAdmissionIsBoundedAndJoined",
+        "TestPiResultFinalizationRejectsLateOwnedWork"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/run_test.go"
+      },
+      "resolved_sha256": "94a01a00eeda0458576e484cebafc0ab40e8627988442271e14ecdb5521b9bfe",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pi/trace_policy_test.go",
+      "sha256": "465aa605649bb11ca578d663ebcba624d460f47075e423740043650e13903827",
+      "git_blob": "7d93200f296ed80a2bc18e748f5516595ddec9b7",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestInteractiveSpawnResultPreservesTrace"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pi/trace_policy_test.go"
+      },
+      "resolved_sha256": "465aa605649bb11ca578d663ebcba624d460f47075e423740043650e13903827",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pifamily/bridge.go",
+      "sha256": "18b2ffd2f2b59a606ca1a96dcaaa48e8b0e5a239171efd1bcab84e09596256b6",
+      "git_blob": "30b86db442b53423ed80ba46e38122f8b1c67b6b",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pifamily/bridge.go"
+      },
+      "resolved_sha256": "18b2ffd2f2b59a606ca1a96dcaaa48e8b0e5a239171efd1bcab84e09596256b6",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pifamily/bridge_test.go",
+      "sha256": "e32397be23a9130f01f3c536652362a3234594dd70affa1c86b928338fa0ec3d",
+      "git_blob": "822be2faaef50523536eb343d2c5021252fe481b",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "Go module import relocation and gofmt import ordering only",
+      "test_functions": [
+        "TestBridgeFullDuplexNestedCall",
+        "TestBridgeCancellationDrainsResponseAndKeepsConnectionHealthy",
+        "TestBridgePendingCapacityRejectsBeforeWrite",
+        "TestBridgeRejectsDuplicateRequestAndUnknownResponse",
+        "TestBridgeRejectsOversizedFrame",
+        "TestBridgeRejectedFrameDoesNotConsumeRequestID",
+        "TestBridgeHelloPrecedesResponseToEagerPeer",
+        "TestBridgeRetainedResponseFailureStillWakesCaller",
+        "TestBridgeConcurrentCallsStayInWireIDOrder",
+        "TestBridgeInteroperatesWithNativeModule",
+        "TestBridgeCloseCancelsAndJoinsHandler",
+        "TestBridgeCancellationDuringPartialWriteRetiresAndJoins",
+        "TestBridgeAcceptedResponseWinsCancellationBeforeWriteCompletion"
+      ],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pifamily/bridge_test.go"
+      },
+      "resolved_sha256": "cacb71711c36b93fb75bab7902dea8d019ae7c775ab927938480c9701ee66b35",
+      "resolution": "Go-import-relocation-only"
+    },
+    {
+      "path": "wrappers/pifamily/extension/bridge.mjs",
+      "sha256": "3eb32265727f97f32c9ef4b1b69b52bdbd76f461da5a2f5b98496c51cfcbcd2f",
+      "git_blob": "8405c99d366f95717c164284ee2c7527fe34e54c",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pifamily/extension/bridge.mjs"
+      },
+      "resolved_sha256": "3eb32265727f97f32c9ef4b1b69b52bdbd76f461da5a2f5b98496c51cfcbcd2f",
+      "resolution": "byte-identical"
+    },
+    {
+      "path": "wrappers/pifamily/extension/bridge.test.mjs",
+      "sha256": "bb93af6a19c9127b92008e4f7b5fcc408b6906418960a747ff409380354c399f",
+      "git_blob": "e77f11fa1a9a82659432cb340200020cf67b2c57",
+      "mode": "100644",
+      "class": "pi-omp-product",
+      "permitted_change": "byte-identical, except deletion-induced relative links repointed to immutable baseline source",
+      "test_functions": [],
+      "js_tests": [
+        "full-duplex call result and ownership accounting",
+        "cancelled call drains its response and preserves a healthy next call",
+        "pending-call capacity rejects before a second write",
+        "duplicate request and unknown response retire the connection",
+        "oversized frames retire the connection",
+        "rejected frame does not consume a request ID",
+        "hello is first even when the peer sent a request eagerly",
+        "held write plus retained response failure wakes its caller",
+        "accepted response wins cancellation before write callback",
+        "connectBridge joins an actual socket close after constructor rejection",
+        "actual socket close settles buffered writes and joins handlers"
+      ],
+      "proposed_location": {
+        "repository": "sessionbus/pi-omp",
+        "path": "wrappers/pifamily/extension/bridge.test.mjs"
+      },
+      "resolved_sha256": "bb93af6a19c9127b92008e4f7b5fcc408b6906418960a747ff409380354c399f",
+      "resolution": "byte-identical"
+    }
+  ],
+  "derived_from_sha256": "afff374a8dad541b8e1066779f526dba84f787db3e456b290376e291c8976939"
+}

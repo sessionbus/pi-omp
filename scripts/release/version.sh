@@ -10,16 +10,6 @@ peer_version_init() {
 		echo "Invalid RELEASE_VERSION: $peer_base_version" >&2
 		return 1
 	fi
-	peer_claude_version=$(awk -F'"' '$2 == "version" { print $4 }' "$peer_version_root/claude/.claude-plugin/plugin.json")
-	peer_codex_version=$(awk -F'"' '$2 == "version" { print $4 }' "$peer_version_root/codex/marketplace/codex/.codex-plugin/plugin.json")
-	if [ "$peer_claude_version" != "$peer_base_version" ]; then
-		echo "Claude manifest version $peer_claude_version does not match RELEASE_VERSION $peer_base_version" >&2
-		return 1
-	fi
-	if [ "$peer_codex_version" != "$peer_base_version-codex.0" ]; then
-		echo "Codex base version $peer_codex_version does not match RELEASE_VERSION $peer_base_version" >&2
-		return 1
-	fi
 	peer_release=${SESSIONBUS_PEERS_RELEASE:-development}
 	if [ "$peer_release" != development ] && [ "$peer_release" != "v$peer_base_version" ]; then
 		echo "Stable peer release $peer_release does not match RELEASE_VERSION v$peer_base_version" >&2
@@ -39,6 +29,6 @@ peer_go_build() {
 	peer_build_output=$1
 	peer_build_package=$2
 	go build -trimpath \
-		-ldflags="-s -w -X github.com/antst/sessionbus-peers/internal/peerversion.Release=$peer_release -X github.com/antst/sessionbus-peers/internal/peerversion.Revision=$peer_revision" \
+		-ldflags="-s -w -X github.com/sessionbus/peer-common/peerversion.Release=$peer_release -X github.com/sessionbus/peer-common/peerversion.Revision=$peer_revision" \
 		-o "$peer_build_output" "$peer_build_package"
 }
