@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/sessionbus/peer-common/host"
 )
 
 // Native 3b3a6dc cli/flag-tables.ts. Keep one traversal for native value

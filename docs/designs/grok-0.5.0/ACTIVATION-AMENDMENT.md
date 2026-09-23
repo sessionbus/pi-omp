@@ -1,9 +1,0 @@
-# Grok activation surface
-
-Selected 2026-09-10 after dev2-activation/REPORT.md. Actual native Grok1.0.24 explicitly ignores agent --plugin-dir in leader mode. Current captured TUI help exposes no process-local plugin selector. Do not use persistent enable/disable changes around launches; concurrent ordinary/managed sessions would share that state.
-
-Use the real globally registered plugin and an explicit inert MCP mode. Without this launch's Sessionbus activation marker bound to the exact native GROK_LEADER_SOCKET, the helper must decide before any owner, bus connection or observer is created: initialize and ping succeed, tools/list is empty, tool calls reject, no hidden tools/instructions are exposed, and the helper remains until stdin EOF. Do not exit early and cause a native startup warning. Native GROK_SESSION_ID remains the identity authority in managed mode; the activation marker is never a substitute ID. Inherited activation metadata with a different native leader is inert, so nested ordinary launches do not acquire managed ownership merely from environment inheritance.
-
-This narrows the original ordinary-isolation claim: ordinary Grok still discovers the registered plugin and starts its inert helper. The single generic skill remains discoverable and must say that Sessionbus operations require the active public tool; remove the obsolete separate agent-lanes skill. Do not claim no plugin/process discovery. Installed ordinary acceptance must show successful empty catalog and absence of bus/observer side effects. Managed acceptance must demonstrate the actual public generic tool using the same installed payload.
-
-Retain normal native installation/configuration and explicit native permission outcomes. No alternate home/config/prefix, dummy global server, implicit allow rule or Node runtime. Direct agent --no-leader --plugin-dir is a separate advertised native surface, not proof of interactive leader propagation.

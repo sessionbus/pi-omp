@@ -11,14 +11,14 @@ import (
 )
 
 func TestBootstrapReleaseSelection(t *testing.T) {
-	for _, role := range []string{"claude", "codex", "grok", "qwen", "opencode", "kilo", "pi", "omp"} {
+	for _, role := range []string{"pi", "omp"} {
 		for _, tc := range []struct{ name, version, mirror, base, status string }{
-			{"default", "", "", "https://github.com/antst/sessionbus-peers/releases/download/v0.5.0", "200"},
-			{"latest", "latest", "", "https://github.com/antst/sessionbus-peers/releases/download/v0.5.0", "200"},
-			{"new latest release", "", "", "https://github.com/antst/sessionbus-peers/releases/download/v12.34.56", "newrelease"},
-			{"default prerelease", "", "", "https://github.com/antst/sessionbus-peers/releases/download/development", "none"},
-			{"latest prerelease", "latest", "", "https://github.com/antst/sessionbus-peers/releases/download/development", "none"},
-			{"release page unavailable", "", "", "https://github.com/antst/sessionbus-peers/releases/download/v0.5.0", "page504"},
+			{"default", "", "", "https://github.com/sessionbus/pi-omp/releases/download/v0.5.0", "200"},
+			{"latest", "latest", "", "https://github.com/sessionbus/pi-omp/releases/download/v0.5.0", "200"},
+			{"new latest release", "", "", "https://github.com/sessionbus/pi-omp/releases/download/v12.34.56", "newrelease"},
+			{"default prerelease", "", "", "https://github.com/sessionbus/pi-omp/releases/download/development", "none"},
+			{"latest prerelease", "latest", "", "https://github.com/sessionbus/pi-omp/releases/download/development", "none"},
+			{"release page unavailable", "", "", "https://github.com/sessionbus/pi-omp/releases/download/v0.5.0", "page504"},
 			{"lookup gateway timeout", "", "", "", "504"},
 			{"unexpected origin", "", "", "", "foreign"},
 			{"prerelease redirect", "", "", "", "prerelease"},
@@ -27,8 +27,8 @@ func TestBootstrapReleaseSelection(t *testing.T) {
 			{"lookup denied", "", "", "", "403"},
 			{"lookup unavailable", "", "", "", "503"},
 			{"lookup transport failure", "", "", "", "transport"},
-			{"development", "development", "", "https://github.com/antst/sessionbus-peers/releases/download/development", ""},
-			{"tag", "v0.5.0", "", "https://github.com/antst/sessionbus-peers/releases/download/v0.5.0", ""},
+			{"development", "development", "", "https://github.com/sessionbus/pi-omp/releases/download/development", ""},
+			{"tag", "v0.5.0", "", "https://github.com/sessionbus/pi-omp/releases/download/v0.5.0", ""},
 			{"mirror", "latest", "file:///offline/releases", "file:///offline/releases", ""},
 		} {
 			t.Run(role+"/"+tc.name, func(t *testing.T) {
@@ -37,23 +37,23 @@ func TestBootstrapReleaseSelection(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "curl"), []byte(`#!/bin/sh
 printf '%s\n' "$@" >> "$INSTALL_TEST_CURL_ARGS"
 for arg do
- if [ "$arg" = https://github.com/antst/sessionbus-peers/releases/latest ]; then
+ if [ "$arg" = https://github.com/sessionbus/pi-omp/releases/latest ]; then
   [ "$INSTALL_TEST_HTTP_STATUS" != transport ] || exit 7
   # A release-page outage must be irrelevant: following the redirect fails.
   for option do
    case "$option" in
-    -L*|-[!-]*L*|--location|--location-trusted) printf '504 https://github.com/antst/sessionbus-peers/releases/tag/v0.5.0'; exit 0;;
+    -L*|-[!-]*L*|--location|--location-trusted) printf '504 https://github.com/sessionbus/pi-omp/releases/tag/v0.5.0'; exit 0;;
    esac
   done
   case "$INSTALL_TEST_HTTP_STATUS" in
-   200|page504) printf '302 https://github.com/antst/sessionbus-peers/releases/tag/v0.5.0';;
-   newrelease) printf '302 https://github.com/antst/sessionbus-peers/releases/tag/v12.34.56';;
-   none) printf '302 https://github.com/antst/sessionbus-peers/releases';;
+   200|page504) printf '302 https://github.com/sessionbus/pi-omp/releases/tag/v0.5.0';;
+   newrelease) printf '302 https://github.com/sessionbus/pi-omp/releases/tag/v12.34.56';;
+   none) printf '302 https://github.com/sessionbus/pi-omp/releases';;
    foreign) printf '302 https://example.com/releases/tag/v0.5.0';;
-   prerelease) printf '302 https://github.com/antst/sessionbus-peers/releases/tag/v0.5.1-rc.1';;
-   badtag) printf '302 https://github.com/antst/sessionbus-peers/releases/tag/v0.5.0/extra';;
+   prerelease) printf '302 https://github.com/sessionbus/pi-omp/releases/tag/v0.5.1-rc.1';;
+   badtag) printf '302 https://github.com/sessionbus/pi-omp/releases/tag/v0.5.0/extra';;
    missing) printf '200 ';;
-   *) printf '%s https://github.com/antst/sessionbus-peers/releases/latest' "$INSTALL_TEST_HTTP_STATUS";;
+   *) printf '%s https://github.com/sessionbus/pi-omp/releases/latest' "$INSTALL_TEST_HTTP_STATUS";;
   esac
   exit 0
  fi
@@ -82,7 +82,7 @@ exit 39
 				if err != nil {
 					t.Fatal(err)
 				}
-				metadata := strings.Contains(string(args), "https://github.com/antst/sessionbus-peers/releases/latest\n")
+				metadata := strings.Contains(string(args), "https://github.com/sessionbus/pi-omp/releases/latest\n")
 				if metadata != (tc.status != "") {
 					t.Fatalf("release lookup=%t, status=%q: %s", metadata, tc.status, args)
 				}

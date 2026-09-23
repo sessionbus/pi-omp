@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/pifamily"
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
+	"github.com/sessionbus/peer-common/testsocket"
 )
 
 const piNativeHelperEnv = "PI_SESSIONBUS_TEST_NATIVE"

@@ -14,19 +14,19 @@ if [ -n "${SESSIONBUS_DOWNLOAD_ROOT:-}" ]; then
 elif [ "$version" = latest ]; then
  # Resolve the redirect without fetching the release page, which may fail
  # independently of downloads. Pin both downloads to the same stable tag.
- release=$(curl -IsS --retry 2 --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code} %{redirect_url}' https://github.com/antst/sessionbus-peers/releases/latest)
+ release=$(curl -IsS --retry 2 --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code} %{redirect_url}' https://github.com/sessionbus/pi-omp/releases/latest)
  case "$release" in
-  30[12378]' https://github.com/antst/sessionbus-peers/releases/tag/'*)
-   tag=${release#*https://github.com/antst/sessionbus-peers/releases/tag/}
+  30[12378]' https://github.com/sessionbus/pi-omp/releases/tag/'*)
+   tag=${release#*https://github.com/sessionbus/pi-omp/releases/tag/}
    awk -v tag="$tag" 'BEGIN { exit(tag !~ /^v[0-9]+[.][0-9]+[.][0-9]+$/) }' || { echo "Invalid stable peer release redirect ($release)" >&2; exit 1; }
-   base=https://github.com/antst/sessionbus-peers/releases/download/$tag;;
-  30[12378]' https://github.com/antst/sessionbus-peers/releases')
+   base=https://github.com/sessionbus/pi-omp/releases/download/$tag;;
+  30[12378]' https://github.com/sessionbus/pi-omp/releases')
    echo 'No stable peer release yet; installing the published development build.' >&2
-   base=https://github.com/antst/sessionbus-peers/releases/download/development;;
+   base=https://github.com/sessionbus/pi-omp/releases/download/development;;
   *) echo "Cannot determine latest peer release ($release)" >&2; exit 1;;
  esac
 else
- base=https://github.com/antst/sessionbus-peers/releases/download/$version
+ base=https://github.com/sessionbus/pi-omp/releases/download/$version
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' 0

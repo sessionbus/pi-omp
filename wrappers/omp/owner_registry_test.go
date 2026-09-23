@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
-	"github.com/antst/sessionbus-peers/wrappers/pifamily"
 	kit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
+	"github.com/sessionbus/peer-common/testsocket"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 type ownerNativeFixture struct {

@@ -14,7 +14,7 @@ import (
 )
 
 func TestDownloadRequiresExactChecksumBeforeInstallation(t *testing.T) {
-	for _, role := range []string{"claude", "codex", "grok", "qwen", "opencode", "kilo", "pi", "omp"} {
+	for _, role := range []string{"pi", "omp"} {
 		t.Run(role, func(t *testing.T) {
 			root := t.TempDir()
 			payload := filepath.Join(root, "payload")

@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
+	"github.com/sessionbus/peer-common/host"
 
-	"github.com/antst/sessionbus-peers/internal/testsocket"
+	"github.com/sessionbus/peer-common/testsocket"
 )
 
 const (

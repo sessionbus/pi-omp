@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
+	"github.com/sessionbus/peer-common/host"
 )
 
 func TestPiOwnedRunJoinsNativeWitnessesAndCurrentHistory(t *testing.T) {

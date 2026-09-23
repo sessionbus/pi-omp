@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
+	"github.com/sessionbus/peer-common/host"
 )
 
 type interactiveNativeOwner interface {

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -29,10 +29,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            opencode/package-lock.json
-            kilo/package-lock.json
       - name: Download modules
         env:
           GOWORK: 'off'
@@ -61,19 +57,12 @@ jobs:
         run: |
           go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
           golangci-lint run ./...
-      - name: Claude Go archive
-        run: ./scripts/package-claude "${RUNNER_TEMP}/claude archive"
-      - name: Codex Go archive
-        run: ./scripts/package-codex "${RUNNER_TEMP}/codex archive"
-      - name: Historical Codex installer fixture
-        run: ./scripts/test-codex-mcp
       - name: Pi-family native bridges
         run: node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/omp/extension.test.mjs
-      - name: Native family plugins
+      - name: Pi and OMP archives
         run: |
-          for product in opencode kilo; do
-            npm ci --prefix "$product" --ignore-scripts
-            npm test --prefix "$product"
+          for product in pi omp; do
+            ./scripts/package-product "$product" "${RUNNER_TEMP}/$product archive"
           done
 
   workflow-guard:

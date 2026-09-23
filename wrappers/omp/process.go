@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
+	"github.com/sessionbus/peer-common/host"
 )
 
 const launchEnvironmentName = "SESSIONBUS_OMP_LAUNCH"

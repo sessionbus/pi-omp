@@ -14,8 +14,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/antst/sessionbus-peers/wrappers/host"
-	"github.com/antst/sessionbus-peers/wrappers/pifamily"
+	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 const interactiveBridgeSocket = "owner.sock"
