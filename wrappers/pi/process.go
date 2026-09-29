@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -36,7 +37,7 @@ type piProcess struct {
 	directory string
 	socket    string
 	input     *os.File
-	output    *os.File
+	output    io.ReadCloser
 	stderr    *piLog
 	done      chan struct{}
 

@@ -648,7 +648,7 @@ func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) e
 		}
 		childErr := process.Wait()
 		if rpc != nil {
-			p.closeErr = errors.Join(p.closeErr, rpc.Close())
+			p.closeErr = errors.Join(p.closeErr, drainPiNativeRPC(ctx, rpc))
 		}
 		if bridge != nil {
 			bridgeErr := bridge.Close()
@@ -674,4 +674,16 @@ func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) e
 		}
 	})
 	return p.closeErr
+}
+
+// Once the native process exits, let the RPC reader consume its finite stdout
+// before closing it so already-written terminal errors remain observable. The
+// existing Close context still bounds an inherited or otherwise held writer.
+func drainPiNativeRPC(ctx context.Context, rpc *nativeRPC) error {
+	select {
+	case <-rpc.Done():
+		return errors.Join(rpc.Err(), context.Cause(ctx))
+	case <-ctx.Done():
+		return errors.Join(context.Cause(ctx), rpc.Close())
+	}
 }
