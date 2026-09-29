@@ -1,8 +1,8 @@
-github.com/antst/sessionbus/bus/sdk/go v0.5.7 h1:LjVy0HskRRMdgW+6JudUTRKt2ovYjxJ5pTW0UD2BTHU=
-github.com/antst/sessionbus/bus/sdk/go v0.5.7/go.mod h1:SujgzvvPHjgVO/vHIixeL9EbOS8NPs/zXJA5ISSFnqM=
+github.com/antst/sessionbus/bus/sdk/go v0.5.9 h1:dRXXkemDBwtYo4FzbUkOXs36UixeB+9HJMdamzP7Dwo=
+github.com/antst/sessionbus/bus/sdk/go v0.5.9/go.mod h1:SujgzvvPHjgVO/vHIixeL9EbOS8NPs/zXJA5ISSFnqM=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6NgVqpn3+iol9aGu4=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
-github.com/sessionbus/peer-common v0.0.0-20260922143100-eb655f686e44 h1:HnUBKNdoWKYQUw/i4rGO/o13qwr96xvMCsxIZHrMpxM=
-github.com/sessionbus/peer-common v0.0.0-20260922143100-eb655f686e44/go.mod h1:g6tTBj31OI2MIGDuGq6e9A0FcCdv+DPLWFDNZidi4mo=
+github.com/sessionbus/peer-common v0.0.0-20260929104500-c5551a29654c h1:qheURBhfFYMS4H0Ix/ES/rs0Wal2ahOTNfJEjAQhecM=
+github.com/sessionbus/peer-common v0.0.0-20260929104500-c5551a29654c/go.mod h1:bWv9tgz+OwCR5T1bTQmbHceyuzzcH2gy2PAtF/hi9LU=
 golang.org/x/sys v0.30.0 h1:QjkSwP/36a20jFYWkSue1YwXzLmsV5Gfq7Eiy72C1uc=
 golang.org/x/sys v0.30.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=

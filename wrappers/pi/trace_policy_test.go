@@ -35,7 +35,7 @@ func TestInteractiveSpawnResultPreservesTrace(t *testing.T) {
 		if call.Method != "lane.spawn" {
 			t.Fatalf("public method = %s", call.Method)
 		}
-		want := json.RawMessage(`{"session_id":"child@local","policy":{"persistent":false,"auto_close_ms":60000,"idle_message":"run","notify":true,"trace":"events"}}`)
+		want := json.RawMessage(`{"session_id":"child@local","policy":{"persistent":false,"auto_close_ms":60000,"notify":true,"trace":"events"}}`)
 		// Raw daemon bytes exercise the pinned SDK's response decoder as well
 		// as the native bridge; a permissive mock Caller would miss this break.
 		wire, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": want})
