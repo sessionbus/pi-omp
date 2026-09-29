@@ -23,11 +23,8 @@ var piAttachInheritedBridge = pifamily.AttachPiInheritedBridge
 var piStartProcess = startPiProcess
 
 type piLaunch struct {
-	Directory string `json:"directory,omitempty"`
-	OwnerPID  int    `json:"owner_pid,omitempty"`
-	Socket    string `json:"socket,omitempty"`
-	BridgeFD  int    `json:"bridge_fd,omitempty"`
-	Topology  string `json:"topology"`
+	BridgeFD int    `json:"bridge_fd"`
+	Topology string `json:"topology"`
 }
 
 type piProcess struct {

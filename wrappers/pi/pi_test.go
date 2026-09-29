@@ -61,7 +61,7 @@ func TestPiNativeHelper(t *testing.T) {
 func runPiNativeHelper(mode string) error {
 	var launch piLaunch
 	if json.Unmarshal([]byte(os.Getenv(launchEnvironmentName)), &launch) != nil ||
-		launch.Topology != "lane" || launch.BridgeFD < 3 || launch.OwnerPID != 0 || launch.Directory != "" || launch.Socket != "" {
+		launch.Topology != "lane" || launch.BridgeFD < 3 {
 		return errors.New("invalid helper launch descriptor")
 	}
 	for _, name := range []string{
