@@ -19,6 +19,7 @@ import (
 const inheritedBridgeChild = `
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { closeSync, fstatSync, openSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const transport = await import(pathToFileURL(process.env.BRIDGE_MODULE).href);
@@ -71,6 +72,43 @@ if (mode === "framing") {
   setTimeout(() => stream.destroy(), 30);
   await closed;
   process.stdout.write("READ_CANCEL_OK\n");
+} else if (mode === "bun-fd-ownership") {
+  assert.equal(kind, "omp");
+  const stream = openStream();
+  let cancelCompletion;
+  let endCompletion;
+  const cancel = stream.reader.cancel.bind(stream.reader);
+  const writer = stream.writer;
+  const end = writer.end.bind(writer);
+  stream.reader.cancel = (...args) => (cancelCompletion = Promise.resolve(cancel(...args)));
+  stream.writer = new Proxy(writer, {
+    get(target, property) {
+      if (property === "end") return (...args) => (endCompletion = Promise.resolve(end(...args)));
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  stream.destroy();
+  for (const fd of [readFD, writeFD]) {
+    assert.throws(() => fstatSync(fd), (error) => error?.code === "EBADF");
+  }
+  const opened = [];
+  const reused = new Map();
+  try {
+    for (let count = 0; count < 256 && reused.size < 2; count += 1) {
+      const fd = openSync("/dev/null", "r+");
+      opened.push(fd);
+      if (fd === readFD || fd === writeFD) reused.set(fd, fd);
+    }
+    assert.equal(reused.size, 2);
+    await Promise.allSettled([cancelCompletion, endCompletion]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fstatSync(reused.get(readFD));
+    fstatSync(reused.get(writeFD));
+  } finally {
+    for (const fd of opened) closeSync(fd);
+  }
+  process.stdout.write("BUN_FD_OWNERSHIP_OK\n");
 } else {
   throw new Error("unknown inherited bridge mode " + mode);
 }
@@ -104,14 +142,13 @@ func TestInheritedBridgeFramingAcrossNativeRuntimes(t *testing.T) {
 	for _, runtime := range inheritedRuntimes(t) {
 		t.Run(runtime.kind, func(t *testing.T) {
 			command, transport, output := inheritedCommand(t, runtime, "framing")
+			t.Cleanup(func() { _ = transport.Close() })
 			if err := command.Start(); err != nil {
 				t.Fatal(err)
 			}
 			if err := transport.CloseChildCopies(); err != nil {
 				t.Fatal(err)
 			}
-			defer transport.Close()
-
 			doneCalled := make(chan struct{})
 			host, err := NewBridge(transport.Parent, BridgeHost, func(_ context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 				switch method {
@@ -166,6 +203,7 @@ func TestInheritedBridgeEOFAndCancellationAcrossNativeRuntimes(t *testing.T) {
 		for _, mode := range []string{"peer-eof", "write-cancel", "read-cancel"} {
 			t.Run(runtime.kind+"/"+mode, func(t *testing.T) {
 				command, transport, output := inheritedCommand(t, runtime, mode)
+				t.Cleanup(func() { _ = transport.Close() })
 				if err := command.Start(); err != nil {
 					t.Fatal(err)
 				}
@@ -197,6 +235,59 @@ func TestInheritedBridgeEOFAndCancellationAcrossNativeRuntimes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBunInheritedDescriptorsHaveOneCloseOwner(t *testing.T) {
+	for _, runtime := range inheritedRuntimes(t) {
+		if runtime.kind != "omp" {
+			continue
+		}
+		command, transport, output := inheritedCommand(t, runtime, "bun-fd-ownership")
+		t.Cleanup(func() { _ = transport.Close() })
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if err := transport.CloseChildCopies(); err != nil {
+			t.Fatal(err)
+		}
+		if err := waitInheritedCommand(t, command, output); err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != "BUN_FD_OWNERSHIP_OK\n" {
+			t.Fatalf("output = %q", output.String())
+		}
+	}
+}
+
+func TestInheritedBridgeFailedStartClosesChildCopies(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		attach func(*exec.Cmd) (*InheritedBridgeTransport, error)
+	}{
+		{name: "pi", attach: AttachPiInheritedBridge},
+		{name: "omp", attach: AttachOMPInheritedBridge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(filepath.Join(t.TempDir(), "missing-native"))
+			transport, err := test.attach(command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = transport.Close() })
+			if err = command.Start(); err == nil {
+				t.Fatal("missing native executable started")
+			}
+			if err = transport.CloseChildCopies(); err != nil {
+				t.Fatal(err)
+			}
+			if err = transport.CloseChildCopies(); err != nil {
+				t.Fatalf("idempotent child close = %v", err)
+			}
+			if err = transport.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

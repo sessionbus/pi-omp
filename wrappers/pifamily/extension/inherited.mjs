@@ -58,6 +58,9 @@ class BunPipeStream extends EventEmitter {
   destroy(error = undefined) {
     if (this.destroyed) return this;
     this.destroyed = true;
+    // Bun 1.4 treats numeric Bun.file descriptors as borrowed: cancel/end
+    // finalize their JS objects but do not close the OS descriptors. This
+    // stream is their sole OS-FD owner and closes each exactly once here.
     void this.reader.cancel().catch(() => {});
     try {
       this.writer.end();

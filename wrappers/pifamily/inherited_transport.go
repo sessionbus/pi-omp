@@ -14,8 +14,10 @@ import (
 )
 
 // InheritedBridgeTransport owns the parent endpoint of an anonymous bridge
-// and the child copies appended to an exec.Cmd. Call CloseChildCopies after
-// Start, whether Start succeeds or fails.
+// and the child copies appended to an exec.Cmd. Attach at most one bridge to a
+// command, and never retry or reuse that command. Arrange Close before Start;
+// immediately call CloseChildCopies after every Start result, whether Start
+// succeeds or fails, and Close the transport on failure or shutdown.
 type InheritedBridgeTransport struct {
 	Parent io.ReadWriteCloser
 
