@@ -1,8 +1,8 @@
 # Sessionbus OMP peer
 
-`omp-peer` integrates the pinned Oh My Pi command with Sessionbus. Install Oh
-My Pi 18.1.17 and Bun 1.3.14 or newer first, then run this archive's `install`
-script.
+`omp-peer` integrates Oh My Pi with Sessionbus. It was tested with Oh My Pi
+18.1.17 and Bun 1.4.0. Install Oh My Pi and make its Bun runtime available on
+the login `PATH`, then run this archive's `install` script.
 
 Interactive terminal launches retain native OMP arguments and add one managed,
 per-process extension. Wrapper-owned `-g`/`--group` values select Sessionbus

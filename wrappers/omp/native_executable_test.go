@@ -88,9 +88,7 @@ func TestResolveNativeExecutableRejectsPackageDrift(t *testing.T) {
 	manifest := filepath.Join(fixture.root, "package.json")
 	for _, body := range []string{
 		`{"name":"other","version":"18.1.17","bin":{"omp":"dist/cli.js"},"engines":{"bun":">=1.3.14"}}`,
-		`{"name":"@oh-my-pi/pi-coding-agent","version":"18.1.18","bin":{"omp":"dist/cli.js"},"engines":{"bun":">=1.3.14"}}`,
 		`{"name":"@oh-my-pi/pi-coding-agent","version":"18.1.17","bin":{"omp":"src/cli.ts"},"engines":{"bun":">=1.3.14"}}`,
-		`{"name":"@oh-my-pi/pi-coding-agent","version":"18.1.17","bin":{"omp":"dist/cli.js"},"engines":{"bun":">=1.3.15"}}`,
 	} {
 		if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -98,6 +96,18 @@ func TestResolveNativeExecutableRejectsPackageDrift(t *testing.T) {
 		if _, err := ResolveNativeExecutable(fixture.front); err == nil || !strings.Contains(err.Error(), "metadata") {
 			t.Fatalf("metadata %s accepted: %v", body, err)
 		}
+	}
+}
+
+func TestResolveNativeExecutableDoesNotFencePackageOrEngineVersion(t *testing.T) {
+	fixture := newOMPExecutableFixture(t)
+	manifest := filepath.Join(fixture.root, "package.json")
+	body := `{"name":"@oh-my-pi/pi-coding-agent","version":"18.1.18","bin":{"omp":"dist/cli.js"},"engines":{"bun":">=1.3.15"}}`
+	if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveNativeExecutable(fixture.front); err != nil {
+		t.Fatalf("compatible package metadata rejected: %v", err)
 	}
 }
 

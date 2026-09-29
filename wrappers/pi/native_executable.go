@@ -17,7 +17,6 @@ import (
 
 const NativeBinPathEnv = "PI_BIN_PATH"
 const nativePackageName = "@earendil-works/pi-coding-agent"
-const nativePackageVersion = "0.85.1"
 const nativePackageEntry = "dist/bundle/cli.js"
 
 // NativeExecutable identifies Pi's product-native JavaScript entry. It runs in
@@ -28,9 +27,9 @@ type NativeExecutable struct {
 	PackageRoot string
 }
 
-// ResolveNativeExecutable accepts only the pinned published package layout.
+// ResolveNativeExecutable accepts only the published package layout.
 // PI_BIN_PATH is an explicit operator override of the front door, not a bypass
-// of package identity or version validation.
+// of package identity or entry validation.
 func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
 	selected := frontDoor
 	label := "Pi executable"
@@ -63,12 +62,11 @@ func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
 		return NativeExecutable{}, fmt.Errorf("%s: invalid Pi package metadata: %w", label, err)
 	}
 	var manifest struct {
-		Name    string            `json:"name"`
-		Version string            `json:"version"`
-		Bin     map[string]string `json:"bin"`
+		Name string            `json:"name"`
+		Bin  map[string]string `json:"bin"`
 	}
 	if json.Unmarshal(manifestBody, &manifest) != nil ||
-		manifest.Name != nativePackageName || manifest.Version != nativePackageVersion ||
+		manifest.Name != nativePackageName ||
 		filepath.ToSlash(strings.TrimPrefix(manifest.Bin["pi"], "./")) != nativePackageEntry {
 		return NativeExecutable{}, fmt.Errorf("%s: unsupported Pi package metadata", label)
 	}

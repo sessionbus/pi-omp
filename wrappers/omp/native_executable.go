@@ -17,10 +17,8 @@ import (
 
 const NativeBinPathEnv = "OMP_BIN_PATH"
 const nativePackageName = "@oh-my-pi/pi-coding-agent"
-const nativePackageVersion = "18.1.17"
 const nativePackageEntry = "dist/cli.js"
 const nativeRuntimeCommand = "bun"
-const nativeRuntimeEngine = ">=1.3.14"
 
 // NativeExecutable identifies OMP's published command, package entry, and the
 // Bun executable selected by the same PATH inherited by the native child.
@@ -31,7 +29,7 @@ type NativeExecutable struct {
 	PackageRoot string
 }
 
-// ResolveNativeExecutable accepts only the pinned OMP package layout and its
+// ResolveNativeExecutable accepts only the published OMP package layout and its
 // declared Bun entry. OMP_BIN_PATH selects a front door explicitly; it never
 // bypasses package, entry, or runtime validation.
 func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
@@ -66,15 +64,12 @@ func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
 		return NativeExecutable{}, fmt.Errorf("%s: invalid OMP package metadata: %w", label, err)
 	}
 	var manifest struct {
-		Name    string            `json:"name"`
-		Version string            `json:"version"`
-		Bin     map[string]string `json:"bin"`
-		Engines map[string]string `json:"engines"`
+		Name string            `json:"name"`
+		Bin  map[string]string `json:"bin"`
 	}
 	if json.Unmarshal(manifestBody, &manifest) != nil ||
-		manifest.Name != nativePackageName || manifest.Version != nativePackageVersion ||
-		filepath.ToSlash(strings.TrimPrefix(manifest.Bin["omp"], "./")) != nativePackageEntry ||
-		manifest.Engines[nativeRuntimeCommand] != nativeRuntimeEngine {
+		manifest.Name != nativePackageName ||
+		filepath.ToSlash(strings.TrimPrefix(manifest.Bin["omp"], "./")) != nativePackageEntry {
 		return NativeExecutable{}, fmt.Errorf("%s: unsupported OMP package metadata", label)
 	}
 
