@@ -1,0 +1,10 @@
+{
+  "name": "@sessionbus/omp-native",
+  "version": "0.1.0-pre.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@sessionbus/kit": "0.5.9"
+  }
+}

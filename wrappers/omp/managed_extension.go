@@ -12,6 +12,19 @@ import (
 var managedPluginFiles = []string{
 	"omp/extension.mjs",
 	"pifamily/extension/bridge.mjs",
+	"pifamily/extension/inherited.mjs",
+	"package.json",
+	"package-lock.json",
+	"node_modules/.package-lock.json",
+	"node_modules/@sessionbus/kit/package.json",
+	"node_modules/@sessionbus/kit/sdk/go/protocol/session.schema.json",
+	"node_modules/@sessionbus/kit/sdk/js/LICENSE",
+	"node_modules/@sessionbus/kit/sdk/js/TYPES.md",
+	"node_modules/@sessionbus/kit/sdk/js/caller.js",
+	"node_modules/@sessionbus/kit/sdk/js/connection.js",
+	"node_modules/@sessionbus/kit/sdk/js/index.js",
+	"node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
+	"node_modules/@sessionbus/kit/sdk/js/schema.js",
 }
 
 // ResolveManagedExtension locates the fixed extension payload next to an
@@ -35,8 +48,8 @@ func ResolveManagedExtension(peerExecutable string) (string, error) {
 	return filepath.Join(plugin, "omp", "extension.mjs"), nil
 }
 
-// ValidateManagedPlugin checks only the fixed, dependency-free extension
-// files loaded for a managed launch.
+// ValidateManagedPlugin checks only the fixed extension files and bundled kit
+// loaded for a managed launch.
 func ValidateManagedPlugin(directory string) error {
 	if !filepath.IsAbs(directory) {
 		return errors.New("managed OMP plugin directory must be absolute")

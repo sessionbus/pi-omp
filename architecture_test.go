@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -186,7 +187,8 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 	for _, expected := range []string{
 		"wrappers/pi/extension.mjs wrappers/pi/native.mjs",
 		"wrappers/omp/extension.mjs",
-		"wrappers/pifamily/extension/bridge.mjs",
+		"wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs",
+		"npm ci --prefix \"$stage/plugin\" --omit=dev --ignore-scripts",
 		"CGO_ENABLED=0",
 	} {
 		if !bytes.Contains(pack, []byte(expected)) {
@@ -201,9 +203,38 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 			t.Errorf("installer lacks %q", expected)
 		}
 	}
-	for _, removed := range []string{"npm ", "node ", "grok", "qwen", "kilo", "opencode", "claude", "codex", "-peer-mcp"} {
+	if bytes.Contains(installer, []byte("npm ")) || bytes.Contains(installer, []byte("node ")) {
+		t.Error("target installer invokes a JavaScript package manager or sidecar")
+	}
+	for _, removed := range []string{"grok", "qwen", "kilo", "opencode", "claude", "codex", "-peer-mcp"} {
 		if bytes.Contains(pack, []byte(removed)) || bytes.Contains(installer, []byte(removed)) {
 			t.Errorf("package/installer references removed or unnecessary target %q", removed)
+		}
+	}
+	for _, product := range []string{"pi", "omp"} {
+		var manifest struct {
+			Dependencies map[string]string `json:"dependencies"`
+		}
+		if err := json.Unmarshal(read(t, product+"/package.json"), &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.9" {
+			t.Errorf("%s kit dependency = %#v", product, manifest.Dependencies)
+		}
+		var lock struct {
+			Packages map[string]struct {
+				Version   string `json:"version"`
+				Resolved  string `json:"resolved"`
+				Integrity string `json:"integrity"`
+			} `json:"packages"`
+		}
+		if err := json.Unmarshal(read(t, product+"/package-lock.json"), &lock); err != nil {
+			t.Fatal(err)
+		}
+		kit := lock.Packages["node_modules/@sessionbus/kit"]
+		if kit.Version != "0.5.9" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.9.tgz" ||
+			kit.Integrity != "sha512-otC05uCSgqv2wp+sBBr+1n7kA5wZeiATky8FuiGO6sAkoGdR6XVudpu00aU7chnZR6eoZ5Bzoycc1s2gpAsZVw==" {
+			t.Errorf("%s locked kit = %#v", product, kit)
 		}
 	}
 	for _, product := range []string{"pi", "omp"} {
