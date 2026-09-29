@@ -29,6 +29,7 @@ class BunPipeStream extends EventEmitter {
     this.reader = Bun.file(this.readFD).stream().getReader();
     this.writer = Bun.file(this.writeFD).writer();
     this.writeTail = Promise.resolve();
+    this.pendingWrites = new Set();
     this.destroyed = false;
     this.closed = false;
     queueMicrotask(() => this.#read());
@@ -39,16 +40,27 @@ class BunPipeStream extends EventEmitter {
       queueMicrotask(() => callback(new Error("OMP inherited bridge is closed")));
       return false;
     }
-    const payload = Buffer.from(body);
+    const record = { body: Buffer.from(body), callback, settled: false, settle: undefined };
+    record.settle = (error = undefined) => {
+      if (record.settled) return;
+      record.settled = true;
+      record.body = null;
+      const settled = record.callback;
+      record.callback = undefined;
+      this.pendingWrites.delete(record);
+      settled(error);
+    };
+    this.pendingWrites.add(record);
     this.writeTail = this.writeTail.then(async () => {
       if (this.destroyed) throw new Error("OMP inherited bridge is closed");
-      await this.writer.write(payload);
+      await this.writer.write(record.body);
+      record.body = null;
       await this.writer.flush();
     });
     this.writeTail.then(
-      () => callback(),
+      () => record.settle(),
       (error) => {
-        callback(error);
+        record.settle(error);
         this.destroy(error);
       },
     );
@@ -58,6 +70,9 @@ class BunPipeStream extends EventEmitter {
   destroy(error = undefined) {
     if (this.destroyed) return this;
     this.destroyed = true;
+    const reason = error || new Error("OMP inherited bridge is closed");
+    for (const record of [...this.pendingWrites]) record.settle(reason);
+    this.writeTail = Promise.resolve();
     // Bun 1.4 treats numeric Bun.file descriptors as borrowed: cancel/end
     // finalize their JS objects but do not close the OS descriptors. This
     // stream is their sole OS-FD owner and closes each exactly once here.

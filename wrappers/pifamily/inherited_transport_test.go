@@ -57,13 +57,29 @@ if (mode === "framing") {
 } else if (mode === "write-cancel") {
   const stream = openStream();
   const closed = once(stream, "close");
-  let completed = 0;
+  const pending = new Set();
+  const counts = new Array(512).fill(0);
+  const errors = new Array(512);
+  const completions = [];
   const chunk = Buffer.alloc(65536, 0x78);
-  for (let index = 0; index < 512; index += 1) stream.write(chunk, () => { completed += 1; });
+  for (let index = 0; index < 512; index += 1) {
+    pending.add(index);
+    completions.push(new Promise((resolve) => stream.write(chunk, (error) => {
+      counts[index] += 1;
+      errors[index] = error;
+      pending.delete(index);
+      resolve();
+    })));
+  }
   await new Promise((resolve) => setTimeout(resolve, 30));
-  if (completed === 512) throw new Error("inherited write did not remain blocked");
+  if (pending.size === 0) throw new Error("inherited write did not remain blocked");
+  const pendingAtDestroy = new Set(pending);
   stream.destroy();
   await closed;
+  await Promise.all(completions);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let index = 0; index < 512; index += 1) assert.equal(counts[index], 1);
+  for (const index of pendingAtDestroy) assert(errors[index] instanceof Error);
   process.stdout.write("WRITE_CANCEL_OK\n");
 } else if (mode === "read-cancel") {
   const stream = openStream();
