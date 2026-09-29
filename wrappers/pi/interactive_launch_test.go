@@ -35,7 +35,7 @@ func TestPiInteractiveExecPlanIsExactAndLeavesNoLauncherArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Path != "/native/pi" || !reflect.DeepEqual(result.Args, []string{
-		"--extension", "/plugin/pi/extension.mjs", "--model", "fixture/model",
+		"--model", "fixture/model", "--extension", "/plugin/pi/extension.mjs",
 	}) {
 		t.Fatalf("exec plan = %+v", result)
 	}
@@ -64,6 +64,20 @@ func TestPiInteractiveExecPlanIsExactAndLeavesNoLauncherArtifact(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("exec planning created launcher artifacts: before=%v after=%v", before, after)
+	}
+}
+
+func TestPiInteractiveExecPlanPlacesManagedExtensionLastBeforeBoundary(t *testing.T) {
+	result, err := interactiveExecPlanResolved(host.ExecPlan{
+		Args: []string{"--extension", "/ambient.mjs", "--", "prompt"},
+		Env:  []string{host.SocketEnv + "=/bus.sock", host.GroupsEnv + "=[]"},
+	}, "/native/pi", "/plugin/pi/extension.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--extension", "/ambient.mjs", "--extension", "/plugin/pi/extension.mjs", "--", "prompt"}
+	if !reflect.DeepEqual(result.Args, want) {
+		t.Fatalf("exec arguments = %q, want %q", result.Args, want)
 	}
 }
 

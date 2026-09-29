@@ -450,8 +450,10 @@ export function createPiExtension({
     }
 
     pi.on("agent_settled", (_event, ctx) => {
-      // This prefix runs in the first CLI extension before any await or global
-      // settled handler. Pi has already cleared its active flag.
+      // Pi clears its active flag before running settled handlers. Project and
+      // global handlers run before this final explicit extension; if one starts
+      // more work synchronously, its false idle state keeps this boundary open.
+      if (!ctx.isIdle()) return;
       settling = true;
       if (current) current.branchSummaryBusy = false;
       if (launch.topology === "interactive") {

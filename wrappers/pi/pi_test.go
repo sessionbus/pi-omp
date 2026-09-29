@@ -96,8 +96,8 @@ func runPiNativeHelper(mode string) error {
 	}
 	id, name := "pi-fresh", ""
 	arguments := os.Args[slices.Index(os.Args, "--")+1:]
-	if len(arguments) < 4 || arguments[0] != "--extension" || !filepath.IsAbs(arguments[1]) ||
-		arguments[2] != "--mode" || arguments[3] != "rpc" {
+	if len(arguments) < 4 || arguments[len(arguments)-2] != "--extension" || !filepath.IsAbs(arguments[len(arguments)-1]) ||
+		arguments[0] != "--mode" || arguments[1] != "rpc" {
 		return errors.New("helper received invalid managed arguments")
 	}
 	for index := 0; index < len(arguments); index++ {

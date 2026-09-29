@@ -245,6 +245,33 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   assert.equal(owner.closes(), 0);
 });
 
+test("settled witness waits for earlier ambient work while later handlers still run", async () => {
+  const native = nativeFixture();
+  const owner = fakeConnection({ topology: "lane" });
+  let startAmbient = true;
+  const order = [];
+  native.pi.on("agent_settled", () => {
+    order.push("before");
+    if (startAmbient) native.setIdle(false);
+  });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  native.pi.on("agent_settled", () => { order.push("after"); });
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  owner.calls.length = 0;
+
+  await native.emit("agent_settled");
+  assert.deepEqual(order, ["before", "after"]);
+  assert.deepEqual(owner.calls, []);
+
+  startAmbient = false;
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  assert.deepEqual(order, ["before", "after", "before", "after"]);
+  assert.deepEqual(owner.calls, [
+    { method: "run.settling", params: { session_id: "native-1" } },
+  ]);
+});
+
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const queue = [

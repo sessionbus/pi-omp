@@ -85,9 +85,16 @@ func interactiveExecPlanResolved(plan host.ExecPlan, native, extension string) (
 		return strings.HasPrefix(key, "SESSIONBUS_")
 	})
 	environment = append(environment, InteractiveLaunchEnv+"="+string(descriptor))
+	arguments := slices.Clone(plan.Args)
+	managed := []string{"--extension", extension}
+	if boundary := slices.Index(arguments, "--"); boundary >= 0 {
+		arguments = slices.Insert(arguments, boundary, managed...)
+	} else {
+		arguments = append(arguments, managed...)
+	}
 	return host.ExecPlan{
 		Path: native,
-		Args: append([]string{"--extension", extension}, plan.Args...),
+		Args: arguments,
 		Env:  environment,
 	}, nil
 }

@@ -87,10 +87,10 @@ func TestPiTTYRoutesManagedAndNativeInvocations(t *testing.T) {
 		if extension != "/installed/plugin/pi/extension.mjs" || !reflect.DeepEqual(plan.Args, []string{"--model", "fixture"}) {
 			t.Fatalf("managed plan=%+v extension=%q", plan, extension)
 		}
-		return host.ExecPlan{Path: "/native/pi", Args: []string{"--extension", extension, "--model", "fixture"}, Env: []string{"ENV=kept"}}, nil
+		return host.ExecPlan{Path: "/native/pi", Args: []string{"--model", "fixture", "--extension", extension}, Env: []string{"ENV=kept"}}, nil
 	}
 	piExecNative = func(path string, args, env []string) error {
-		if path != "/native/pi" || !reflect.DeepEqual(args, []string{"/native/pi", "--extension", "/installed/plugin/pi/extension.mjs", "--model", "fixture"}) || !reflect.DeepEqual(env, []string{"ENV=kept"}) {
+		if path != "/native/pi" || !reflect.DeepEqual(args, []string{"/native/pi", "--model", "fixture", "--extension", "/installed/plugin/pi/extension.mjs"}) || !reflect.DeepEqual(env, []string{"ENV=kept"}) {
 			t.Fatalf("managed exec path=%q args=%q env=%q", path, args, env)
 		}
 		return errors.New("managed fixture")
