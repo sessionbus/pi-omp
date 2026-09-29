@@ -1,8 +1,8 @@
 # Sessionbus for Pi
 
 This archive installs `pi-peer` and its fixed managed extension beside the
-binary. Install the native `@earendil-works/pi-coding-agent` 0.85.1 package
-first, with its `pi` executable available on the login `PATH`.
+binary. It was tested with native `@earendil-works/pi-coding-agent` 0.85.1.
+Install that package with its `pi` executable available on the login `PATH`.
 
 For a source build:
 

@@ -68,7 +68,6 @@ func TestResolveNativeExecutableRejectsPackageDrift(t *testing.T) {
 	t.Setenv(NativeBinPathEnv, "")
 	for _, body := range []string{
 		`{"name":"other","version":"0.85.1","bin":{"pi":"dist/bundle/cli.js"}}`,
-		`{"name":"@earendil-works/pi-coding-agent","version":"0.85.2","bin":{"pi":"dist/bundle/cli.js"}}`,
 		`{"name":"@earendil-works/pi-coding-agent","version":"0.85.1","bin":{"pi":"dist/cli.js"}}`,
 	} {
 		if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(body), 0o644); err != nil {
@@ -77,6 +76,18 @@ func TestResolveNativeExecutableRejectsPackageDrift(t *testing.T) {
 		if _, err := ResolveNativeExecutable(front); err == nil || !strings.Contains(err.Error(), "metadata") {
 			t.Fatalf("metadata %s accepted: %v", body, err)
 		}
+	}
+}
+
+func TestResolveNativeExecutableDoesNotFencePackageVersion(t *testing.T) {
+	root, front := piExecutableFixture(t)
+	t.Setenv(NativeBinPathEnv, "")
+	body := `{"name":"@earendil-works/pi-coding-agent","version":"0.85.2","bin":{"pi":"dist/bundle/cli.js"}}`
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveNativeExecutable(front); err != nil {
+		t.Fatalf("compatible package version rejected: %v", err)
 	}
 }
 
