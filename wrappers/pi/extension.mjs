@@ -8,6 +8,7 @@ import {
   BridgeProtocolError,
   connectBridge,
 } from "../pifamily/extension/bridge.mjs";
+import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
 import { appendNative, customMessageType, describeNative } from "./native.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
@@ -117,14 +118,23 @@ export function captureLaunch(environment = process.env, parent = process.ppid, 
   } catch {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  exactKeys(launch, ["directory", "owner_pid", "socket", "topology"], "managed launch metadata");
-  if (!Number.isSafeInteger(launch.owner_pid) || launch.owner_pid <= 1 || launch.owner_pid !== parent ||
-      !Object.hasOwn(topologyMode, launch.topology) ||
-      !path.isAbsolute(boundedString(launch.directory, 4096, "managed launch directory")) ||
-      !path.isAbsolute(boundedString(launch.socket, 4096, "managed bridge socket"))) {
+  if (!Object.hasOwn(topologyMode, launch.topology)) {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  validatePhysicalLaunch(launch, fs);
+  if (launch.topology === "lane") {
+    exactKeys(launch, ["bridge_fd", "topology"], "managed launch metadata");
+    if (!Number.isSafeInteger(launch.bridge_fd) || launch.bridge_fd < 3) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+  } else {
+    exactKeys(launch, ["directory", "owner_pid", "socket", "topology"], "managed launch metadata");
+    if (!Number.isSafeInteger(launch.owner_pid) || launch.owner_pid <= 1 || launch.owner_pid !== parent ||
+        !path.isAbsolute(boundedString(launch.directory, 4096, "managed launch directory")) ||
+        !path.isAbsolute(boundedString(launch.socket, 4096, "managed bridge socket"))) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+    validatePhysicalLaunch(launch, fs);
+  }
   return Object.freeze({ ...launch });
 }
 
@@ -174,7 +184,9 @@ function toolParameters() {
 
 export function createPiExtension({
   launch,
-  connect = connectBridge,
+  connect = (endpoint, options) => typeof endpoint === "number"
+    ? connectPiInheritedBridge(endpoint, options)
+    : connectBridge(endpoint, options),
   describe = describeNative,
   append = appendNative,
 } = {}) {
@@ -255,7 +267,7 @@ export function createPiExtension({
     if (!launch) throw new Error("Pi managed launch metadata is missing");
     if (failure) throw failure;
     if (!bridgePromise) {
-      bridgePromise = Promise.resolve(connect(launch.socket, {
+      bridgePromise = Promise.resolve(connect(launch.topology === "lane" ? launch.bridge_fd : launch.socket, {
         role: "native",
         handler: nativeRequest,
         signal: lifetime.signal,
@@ -301,7 +313,6 @@ export function createPiExtension({
     settling = false;
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: current.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });
@@ -312,7 +323,6 @@ export function createPiExtension({
     const { record, info } = live(ctx, pi);
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: record.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });

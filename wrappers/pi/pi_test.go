@@ -61,7 +61,7 @@ func TestPiNativeHelper(t *testing.T) {
 func runPiNativeHelper(mode string) error {
 	var launch piLaunch
 	if json.Unmarshal([]byte(os.Getenv(launchEnvironmentName)), &launch) != nil ||
-		launch.Topology != "lane" || launch.OwnerPID != os.Getppid() {
+		launch.Topology != "lane" || launch.BridgeFD < 3 || launch.OwnerPID != 0 || launch.Directory != "" || launch.Socket != "" {
 		return errors.New("invalid helper launch descriptor")
 	}
 	for _, name := range []string{
@@ -80,7 +80,12 @@ func runPiNativeHelper(mode string) error {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		return nil
 	}
-	connection, err := net.Dial("unix", launch.Socket)
+	bridgeFile := os.NewFile(uintptr(launch.BridgeFD), "pi-test-bridge")
+	if bridgeFile == nil {
+		return errors.New("invalid inherited bridge descriptor")
+	}
+	connection, err := net.FileConn(bridgeFile)
+	_ = bridgeFile.Close()
 	if err != nil {
 		return err
 	}
@@ -121,7 +126,7 @@ func runPiNativeHelper(mode string) error {
 	if err = bridge.Ready(context.Background()); err != nil {
 		return err
 	}
-	ready := piOwnerReady{Topology: "lane", Directory: launch.Directory, SessionID: id, Name: name}
+	ready := piOwnerReady{Topology: "lane", SessionID: id, Name: name}
 	var acknowledged struct {
 		SessionID string `json:"session_id"`
 	}
@@ -360,12 +365,8 @@ func TestPiOwnedOpenCloseFreshAndResume(t *testing.T) {
 			if result.SessionID != test.wantID || wrapper.owner.Name != test.wantName {
 				t.Fatalf("result=%+v owner=%+v", result, wrapper.owner)
 			}
-			launchDirectory := wrapper.process.directory
 			if err = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}); err != nil {
 				t.Fatal(err)
-			}
-			if _, err = os.Stat(launchDirectory); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("private launch directory survived Close: %v", err)
 			}
 			if stats := wrapper.rpc.Stats(); stats.pendingCalls != 0 || stats.pendingWrites != 0 || stats.retainedBytes != 0 {
 				t.Fatalf("native RPC retained work: %+v", stats)
@@ -442,15 +443,11 @@ func TestPiCloseForgetLeavesNativeHistoryToDaemonRowOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := filepath.Join(cwd, "pi-fresh.jsonl")
-	launchDirectory := wrapper.process.directory
 	if err := wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{Forget: true}); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(history); err != nil || string(body) != "owned native history\n" {
 		t.Fatalf("native history after row forget = %q, %v", body, err)
-	}
-	if _, err := os.Stat(launchDirectory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("private launch directory survived Forget Close: %v", err)
 	}
 }
 
@@ -470,11 +467,47 @@ func TestPiOpenFailureJoinsOwnedProcessAndResources(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("owned native process was not joined")
 				}
-				if _, statErr := os.Stat(wrapper.process.directory); !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("private launch directory survived failed Open: %v", statErr)
-				}
 			}
 		})
+	}
+}
+
+func TestPiFailedStartUsesOneFreshAttachmentAndClosesChildCopies(t *testing.T) {
+	previousCommand, previousAttach := piCommand, piAttachInheritedBridge
+	t.Cleanup(func() {
+		piCommand, piAttachInheritedBridge = previousCommand, previousAttach
+	})
+	directory := testsocket.Directory(t)
+	var command *exec.Cmd
+	piCommand = func(string, ...string) *exec.Cmd {
+		command = exec.Command(filepath.Join(directory, "missing-native"))
+		return command
+	}
+	attachments := 0
+	var childCopies []*os.File
+	piAttachInheritedBridge = func(candidate *exec.Cmd) (*pifamily.InheritedBridgeTransport, error) {
+		attachments++
+		if candidate != command {
+			t.Fatal("inherited bridge attached to a different command")
+		}
+		before := len(candidate.ExtraFiles)
+		transport, err := pifamily.AttachPiInheritedBridge(candidate)
+		if err == nil {
+			childCopies = append(childCopies, candidate.ExtraFiles[before:]...)
+		}
+		return transport, err
+	}
+	_, err := startPiProcess(filepath.Join(directory, "daemon.sock"), "failed-start", "/unused", directory, nil)
+	if err == nil {
+		t.Fatal("missing native executable started")
+	}
+	if attachments != 1 || len(childCopies) != 1 {
+		t.Fatalf("attachments=%d child copies=%d", attachments, len(childCopies))
+	}
+	for _, child := range childCopies {
+		if _, statErr := child.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("child bridge copy remained open after failed Start: %v", statErr)
+		}
 	}
 }
 
@@ -485,7 +518,6 @@ func TestPiCancelledCloseForcesAndJoinsExactChild(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	launchDirectory := wrapper.process.directory
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := wrapper.Close(ctx, sessionkit.SessionCloseRequest{})
@@ -496,9 +528,6 @@ func TestPiCancelledCloseForcesAndJoinsExactChild(t *testing.T) {
 	case <-wrapper.process.done:
 	default:
 		t.Fatal("forced child was not joined")
-	}
-	if _, statErr := os.Stat(launchDirectory); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("private launch directory survived forced Close: %v", statErr)
 	}
 }
 
@@ -545,9 +574,6 @@ func TestPiCloseWaitsForStartupResourceAdmission(t *testing.T) {
 	}
 	if wrapper.process == nil {
 		t.Fatal("held process was not published for cleanup")
-	}
-	if _, err := os.Stat(wrapper.process.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("held startup directory survived Close: %v", err)
 	}
 }
 
