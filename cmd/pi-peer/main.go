@@ -21,7 +21,7 @@ import (
 var (
 	piResolveNative    = pi.ResolveNativeExecutable
 	piResolveExtension = pi.ResolveManagedExtension
-	piRunInteractive   = pi.RunInteractive
+	piInteractivePlan  = pi.InteractiveExecPlan
 	piExecNative       = syscall.Exec
 	piExecutable       = os.Executable
 )
@@ -111,7 +111,11 @@ func run(ctx context.Context, arguments []string, stdinTTY, stdoutTTY bool) erro
 		if err != nil {
 			return err
 		}
-		return piRunInteractive(ctx, plan, extension)
+		execPlan, err := piInteractivePlan(plan, extension)
+		if err != nil {
+			return err
+		}
+		return piExecNative(execPlan.Path, append([]string{execPlan.Path}, execPlan.Args...), execPlan.Env)
 	}
 	if len(arguments) != 0 {
 		return errors.New("lane mode accepts no arguments")

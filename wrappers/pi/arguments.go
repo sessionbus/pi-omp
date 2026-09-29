@@ -69,7 +69,7 @@ func launchArguments(open sessionkit.OpenOptions, extension, resume string) ([]s
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"--extension", extension, "--mode", "rpc"}
+	args := []string{"--mode", "rpc"}
 	if resume != "" {
 		args = append(args, "--session", resume)
 	}
@@ -92,5 +92,9 @@ func launchArguments(open sessionkit.OpenOptions, extension, resume string) ([]s
 			args = append(args, value)
 		}
 	}
+	// Native loads project/global extensions before explicit CLI extensions.
+	// Keep the managed extension last so its idle terminal witness observes all
+	// earlier ambient settled handlers.
+	args = append(args, "--extension", extension)
 	return args, nil
 }

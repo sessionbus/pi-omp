@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
-import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import {
   BridgeCallError,
   BridgeClosedError,
-  BridgeProtocolError,
-  connectBridge,
 } from "../pifamily/extension/bridge.mjs";
+import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
 import { appendNative, customMessageType, describeNative } from "./native.mjs";
+import { connectPiInteractivePeer } from "./peer.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
 export const toolName = "sessionbus";
@@ -87,24 +86,10 @@ function combinedSignal(...signals) {
   return AbortSignal.any(present);
 }
 
-function validatePhysicalLaunch(launch, fs = { lstatSync, realpathSync }) {
-  const directory = fs.lstatSync(launch.directory);
-  if (!directory.isDirectory() || directory.isSymbolicLink() ||
-      (directory.mode & 0o777) !== 0o700 || directory.uid !== process.getuid() ||
-      fs.realpathSync(launch.directory) !== launch.directory) {
-    throw new Error("Pi managed launch directory is not private, physical, and owned");
-  }
-  const socket = fs.lstatSync(launch.socket);
-  if (!socket.isSocket() || socket.isSymbolicLink() || socket.uid !== process.getuid() ||
-      path.dirname(launch.socket) !== launch.directory) {
-    throw new Error("Pi managed bridge socket is not physical and owned");
-  }
-}
-
 // Capture and scrub before native tools or nested processes can inherit the
 // owner binding. A missing binding remains inert until Pi tries to load this
 // explicitly managed extension, where it fails closed.
-export function captureLaunch(environment = process.env, parent = process.ppid, fs = { lstatSync, realpathSync }) {
+export function captureLaunch(environment = process.env) {
   const raw = environment[launchEnvironmentName];
   delete environment[launchEnvironmentName];
   if (raw === undefined) return null;
@@ -117,14 +102,23 @@ export function captureLaunch(environment = process.env, parent = process.ppid, 
   } catch {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  exactKeys(launch, ["directory", "owner_pid", "socket", "topology"], "managed launch metadata");
-  if (!Number.isSafeInteger(launch.owner_pid) || launch.owner_pid <= 1 || launch.owner_pid !== parent ||
-      !Object.hasOwn(topologyMode, launch.topology) ||
-      !path.isAbsolute(boundedString(launch.directory, 4096, "managed launch directory")) ||
-      !path.isAbsolute(boundedString(launch.socket, 4096, "managed bridge socket"))) {
+  if (!Object.hasOwn(topologyMode, launch.topology)) {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  validatePhysicalLaunch(launch, fs);
+  if (launch.topology === "lane") {
+    exactKeys(launch, ["bridge_fd", "topology"], "managed launch metadata");
+    if (!Number.isSafeInteger(launch.bridge_fd) || launch.bridge_fd < 3) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+  } else {
+    exactKeys(launch, ["socket", "name", "groups", "topology"], "managed launch metadata");
+    if (!path.isAbsolute(boundedString(launch.socket, 4096, "managed Sessionbus socket")) ||
+        typeof launch.name !== "string" || Buffer.byteLength(launch.name) > 4096 || /\0/u.test(launch.name) ||
+        !Array.isArray(launch.groups) || launch.groups.some((group) =>
+          typeof group !== "string" || group.length === 0 || Buffer.byteLength(group) > 256 || /\0/u.test(group))) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+  }
   return Object.freeze({ ...launch });
 }
 
@@ -174,7 +168,9 @@ function toolParameters() {
 
 export function createPiExtension({
   launch,
-  connect = connectBridge,
+  connect = (endpoint, options) => typeof endpoint === "number"
+    ? connectPiInheritedBridge(endpoint, options)
+    : connectPiInteractivePeer(endpoint, options),
   describe = describeNative,
   append = appendNative,
 } = {}) {
@@ -255,7 +251,7 @@ export function createPiExtension({
     if (!launch) throw new Error("Pi managed launch metadata is missing");
     if (failure) throw failure;
     if (!bridgePromise) {
-      bridgePromise = Promise.resolve(connect(launch.socket, {
+      bridgePromise = Promise.resolve(connect(launch.topology === "lane" ? launch.bridge_fd : launch, {
         role: "native",
         handler: nativeRequest,
         signal: lifetime.signal,
@@ -301,7 +297,6 @@ export function createPiExtension({
     settling = false;
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: current.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });
@@ -312,7 +307,6 @@ export function createPiExtension({
     const { record, info } = live(ctx, pi);
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: record.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });
@@ -456,8 +450,10 @@ export function createPiExtension({
     }
 
     pi.on("agent_settled", (_event, ctx) => {
-      // This prefix runs in the first CLI extension before any await or global
-      // settled handler. Pi has already cleared its active flag.
+      // Pi clears its active flag before running settled handlers. Project and
+      // global handlers run before this final explicit extension; if one starts
+      // more work synchronously, its false idle state keeps this boundary open.
+      if (!ctx.isIdle()) return;
       settling = true;
       if (current) current.branchSummaryBusy = false;
       if (launch.topology === "interactive") {

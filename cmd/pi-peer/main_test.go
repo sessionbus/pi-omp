@@ -17,10 +17,10 @@ import (
 func resetPiCommandHooks(t *testing.T) {
 	t.Helper()
 	resolveNative, resolveExtension := piResolveNative, piResolveExtension
-	runInteractive, execNative, executable := piRunInteractive, piExecNative, piExecutable
+	interactivePlan, execNative, executable := piInteractivePlan, piExecNative, piExecutable
 	t.Cleanup(func() {
 		piResolveNative, piResolveExtension = resolveNative, resolveExtension
-		piRunInteractive, piExecNative, piExecutable = runInteractive, execNative, executable
+		piInteractivePlan, piExecNative, piExecutable = interactivePlan, execNative, executable
 	})
 }
 
@@ -83,9 +83,15 @@ func TestPiTTYRoutesManagedAndNativeInvocations(t *testing.T) {
 		return "/installed/plugin/pi/extension.mjs", nil
 	}
 	piExecutable = func() (string, error) { return "/installed/pi-peer", nil }
-	piRunInteractive = func(_ context.Context, plan host.ExecPlan, extension string) error {
+	piInteractivePlan = func(plan host.ExecPlan, extension string) (host.ExecPlan, error) {
 		if extension != "/installed/plugin/pi/extension.mjs" || !reflect.DeepEqual(plan.Args, []string{"--model", "fixture"}) {
 			t.Fatalf("managed plan=%+v extension=%q", plan, extension)
+		}
+		return host.ExecPlan{Path: "/native/pi", Args: []string{"--model", "fixture", "--extension", extension}, Env: []string{"ENV=kept"}}, nil
+	}
+	piExecNative = func(path string, args, env []string) error {
+		if path != "/native/pi" || !reflect.DeepEqual(args, []string{"/native/pi", "--model", "fixture", "--extension", "/installed/plugin/pi/extension.mjs"}) || !reflect.DeepEqual(env, []string{"ENV=kept"}) {
+			t.Fatalf("managed exec path=%q args=%q env=%q", path, args, env)
 		}
 		return errors.New("managed fixture")
 	}
@@ -109,9 +115,9 @@ func TestPiTTYRejectsDisabledManagedToolBeforeNativeLaunch(t *testing.T) {
 	resetPiCommandHooks(t)
 	unsetPiLaneMode(t)
 	launched := false
-	piRunInteractive = func(context.Context, host.ExecPlan, string) error {
+	piInteractivePlan = func(host.ExecPlan, string) (host.ExecPlan, error) {
 		launched = true
-		return nil
+		return host.ExecPlan{}, nil
 	}
 	piExecNative = func(string, []string, []string) error {
 		launched = true

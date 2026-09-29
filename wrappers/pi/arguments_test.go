@@ -13,13 +13,13 @@ func TestPiLaunchPreservesNativeSelectionAndOptionArity(t *testing.T) {
 		Model: "deepseek/deepseek-v4-pro", ReasoningEffort: "high",
 		Arguments: []string{"--append-system-prompt", "--model=literal data", "--system-prompt=other", "--verbose"},
 	}, "/managed/extension.mjs", "native-existing")
-	want := []string{"--extension", "/managed/extension.mjs", "--mode", "rpc", "--session", "native-existing",
-		"--model", "deepseek/deepseek-v4-pro", "--thinking", "high", "--append-system-prompt", "--model=literal data", "--system-prompt", "other", "--verbose"}
+	want := []string{"--mode", "rpc", "--session", "native-existing",
+		"--model", "deepseek/deepseek-v4-pro", "--thinking", "high", "--append-system-prompt", "--model=literal data", "--system-prompt", "other", "--verbose", "--extension", "/managed/extension.mjs"}
 	if err != nil || !reflect.DeepEqual(args, want) {
 		t.Fatalf("%q, %v", args, err)
 	}
 	fresh, err := launchArguments(sessionkit.OpenOptions{}, "/managed/extension.mjs", "")
-	if err != nil || !reflect.DeepEqual(fresh, want[:4]) {
+	if err != nil || !reflect.DeepEqual(fresh, []string{"--mode", "rpc", "--extension", "/managed/extension.mjs"}) {
 		t.Fatalf("fresh identity and policy must remain native-owned: %q, %v", fresh, err)
 	}
 }

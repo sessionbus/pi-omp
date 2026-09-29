@@ -50,7 +50,6 @@ type Wrapper struct {
 
 type piOwnerReady struct {
 	Topology  string `json:"topology"`
-	Directory string `json:"directory"`
 	SessionID string `json:"session_id"`
 	Name      string `json:"name"`
 }
@@ -171,11 +170,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (res
 	p.workers.Add(1)
 	go p.watchRPC(rpc)
 
-	connection, err := process.accept(startup)
-	if err != nil {
-		return result, fmt.Errorf("accept Pi managed extension: %w", err)
-	}
-	bridge, err := pifamily.NewBridge(connection, pifamily.BridgeHost, p.handleBridge, pifamily.BridgeLimits{})
+	bridge, err := pifamily.NewBridge(process.bridge, pifamily.BridgeHost, p.handleBridge, pifamily.BridgeLimits{})
 	if err != nil {
 		return result, err
 	}
@@ -275,7 +270,7 @@ func (p *Wrapper) handleBridge(ctx context.Context, method string, raw json.RawM
 	switch method {
 	case "owner.ready":
 		var request piOwnerReady
-		if err = decodePiBridge(raw, []string{"topology", "directory", "session_id", "name"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"topology", "session_id", "name"}, &request); err == nil {
 			err = p.recordOwner(request)
 			result = map[string]string{"session_id": request.SessionID}
 		}
@@ -404,7 +399,7 @@ func decodePiBridge(raw json.RawMessage, fields []string, target any) error {
 func (p *Wrapper) recordOwner(request piOwnerReady) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if request.Topology != "lane" || p.process == nil || request.Directory != p.process.directory ||
+	if request.Topology != "lane" || p.process == nil ||
 		!validPiText(request.SessionID, 256, false) || !validPiText(request.Name, 4096, true) ||
 		(p.owner.SessionID != "" && p.owner.SessionID != request.SessionID) {
 		return errors.New("Pi managed owner readiness is invalid")

@@ -45,7 +45,7 @@ func TestPiArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 		"plugin/node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
 		"plugin/node_modules/@sessionbus/kit/sdk/js/schema.js",
 		"plugin/package-lock.json", "plugin/package.json",
-		"plugin/pi/extension.mjs", "plugin/pi/native.mjs",
+		"plugin/pi/extension.mjs", "plugin/pi/native.mjs", "plugin/pi/peer.mjs",
 		"plugin/pifamily/extension/bridge.mjs", "plugin/pifamily/extension/inherited.mjs",
 	}
 	if got := piArchiveFiles(t, extracted); !reflect.DeepEqual(got, wantFiles) {
@@ -54,6 +54,7 @@ func TestPiArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 	for source, installed := range map[string]string{
 		"wrappers/pi/extension.mjs":                 "plugin/pi/extension.mjs",
 		"wrappers/pi/native.mjs":                    "plugin/pi/native.mjs",
+		"wrappers/pi/peer.mjs":                      "plugin/pi/peer.mjs",
 		"wrappers/pifamily/extension/bridge.mjs":    "plugin/pifamily/extension/bridge.mjs",
 		"wrappers/pifamily/extension/inherited.mjs": "plugin/pifamily/extension/inherited.mjs",
 		"pi/package.json":                           "plugin/package.json",

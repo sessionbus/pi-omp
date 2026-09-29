@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import net from "node:net";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 
-import { BridgeCallError, PrivateBridge } from "../pifamily/extension/bridge.mjs";
 import {
   captureLaunch,
   createPiExtension,
@@ -99,7 +95,8 @@ function nativeFixture(id = "native-1", mode = "rpc") {
 }
 
 function launch(topology) {
-  return { directory: "/private/owner", owner_pid: process.ppid, socket: "/private/owner/bridge.sock", topology };
+  if (topology === "lane") return { bridge_fd: 3, topology };
+  return { socket: "/public/bus.sock", name: "managed", groups: ["team"], topology };
 }
 
 function fakeConnection({ topology, queue = [] } = {}) {
@@ -159,31 +156,38 @@ function fakeConnection({ topology, queue = [] } = {}) {
   };
 }
 
-test("launch capture scrubs and binds a private physical socket", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-  const value = { directory, owner_pid: process.ppid, socket, topology: "lane" };
+test("launch capture scrubs and validates inherited lane descriptors", () => {
+  const value = { bridge_fd: 3, topology: "lane" };
   const environment = { [launchEnvironmentName]: JSON.stringify(value) };
   assert.deepEqual(captureLaunch(environment), value);
   assert.equal(Object.hasOwn(environment, launchEnvironmentName), false);
 
   for (const invalid of [
-    { ...value, owner_pid: process.ppid + 1 },
+    { ...value, bridge_fd: 2 },
+    { ...value, bridge_fd: 3.5 },
     { ...value, topology: "other" },
     { ...value, extra: true },
   ]) {
     const candidate = { [launchEnvironmentName]: JSON.stringify(invalid) };
     assert.throws(() => captureLaunch(candidate), /metadata/);
+    assert.equal(Object.hasOwn(candidate, launchEnvironmentName), false);
+  }
+});
+
+test("interactive launch capture scrubs immutable public bootstrap", () => {
+  const value = { socket: "/public/bus.sock", name: "managed", groups: ["team"], topology: "interactive" };
+  const environment = { [launchEnvironmentName]: JSON.stringify(value) };
+  assert.deepEqual(captureLaunch(environment), value);
+  assert.equal(Object.hasOwn(environment, launchEnvironmentName), false);
+
+  for (const invalid of [
+    { ...value, socket: "relative" },
+    { ...value, groups: [""] },
+    { ...value, topology: "other" },
+    { ...value, extra: true },
+  ]) {
+    const candidate = { [launchEnvironmentName]: JSON.stringify(invalid) };
+    assert.throws(() => captureLaunch(candidate), /metadata|socket|groups/);
     assert.equal(Object.hasOwn(candidate, launchEnvironmentName), false);
   }
 });
@@ -200,7 +204,7 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("session_start", { type: "session_start", reason: "startup" });
   assert.deepEqual(owner.calls.shift(), {
     method: "owner.ready",
-    params: { topology: "lane", directory: "/private/owner", session_id: "native-1", name: "Pi title" },
+    params: { topology: "lane", session_id: "native-1", name: "Pi title" },
   });
   assert.deepEqual(await owner.native("native.describe", { session_id: "native-1" }), {
     session_id: "native-1", name: "Pi title", cwd: "/project",
@@ -232,13 +236,40 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("session_info_changed", { type: "session_info_changed", name: undefined });
   assert.deepEqual(owner.calls.splice(0), [
     { method: "tool.call", params: { session_id: "native-1", call_id: "call-1", action: "list", arguments: {} } },
-    { method: "owner.ready", params: { topology: "lane", directory: "/private/owner", session_id: "native-1", name: "" } },
+    { method: "owner.ready", params: { topology: "lane", session_id: "native-1", name: "" } },
   ]);
   await native.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
   assert.deepEqual(owner.calls.shift(), {
     method: "session_end", params: { topology: "lane", session_id: "native-1", reason: "reload" },
   });
   assert.equal(owner.closes(), 0);
+});
+
+test("settled witness waits for earlier ambient work while later handlers still run", async () => {
+  const native = nativeFixture();
+  const owner = fakeConnection({ topology: "lane" });
+  let startAmbient = true;
+  const order = [];
+  native.pi.on("agent_settled", () => {
+    order.push("before");
+    if (startAmbient) native.setIdle(false);
+  });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  native.pi.on("agent_settled", () => { order.push("after"); });
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  owner.calls.length = 0;
+
+  await native.emit("agent_settled");
+  assert.deepEqual(order, ["before", "after"]);
+  assert.deepEqual(owner.calls, []);
+
+  startAmbient = false;
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  assert.deepEqual(order, ["before", "after", "before", "after"]);
+  assert.deepEqual(owner.calls, [
+    { method: "run.settling", params: { session_id: "native-1" } },
+  ]);
 });
 
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {
@@ -411,123 +442,13 @@ test("an idle owner connection ending retires the native session", async () => {
   assert.equal(native.shutdown(), 1);
 });
 
-test("actual Unix bridge supports handshake, nested drain, tool call, and joined quit", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-wire-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const queue = [{ session_id: "wire-native", message_id: "wire-message", body: "wire body" }];
-  let host;
-  const hostReady = deferred();
-  const server = net.createServer((connection) => {
-    host = new PrivateBridge(connection, {
-      role: "host",
-      handler: async ({ method, params, bridge, signal }) => {
-        switch (method) {
-          case "owner.ready": return { session_id: params.session_id };
-          case "session_end": return { session_id: params.session_id };
-          case "tool.call": return { session_id: params.session_id, call_id: params.call_id, result: { peers: [] } };
-          case "owner.drain": {
-            let drained = 0;
-            while (queue.length) {
-              const result = await bridge.call("native.append", queue[0], { signal });
-              if (!result.accepted) break;
-              queue.shift();
-              drained++;
-            }
-            return { session_id: params.session_id, drained };
-          }
-          default: throw new BridgeCallError("method_not_found", "unexpected test method");
-        }
-      },
-    });
-    host.ready().then(hostReady.resolve, hostReady.reject);
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await host?.close().catch(() => {});
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  const native = nativeFixture("wire-native", "tui");
-  createPiExtension({ launch: { directory, owner_pid: process.ppid, socket, topology: "interactive" } })(native.pi);
-  await native.emit("session_start", { type: "session_start", reason: "startup" });
-  await hostReady.promise;
-  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "wire prompt" });
-  assert.equal(queue.length, 0);
-  assert.equal(native.pending().details.message_id, "wire-message");
-  await native.completeMessage();
-  assert.equal(native.leaf().details.message_id, "wire-message");
-  assert.deepEqual(await native.pi.tool.execute("wire-call", { action: "list", arguments: {} }, undefined, undefined, native.ctx), {
-    content: [{ type: "text", text: '{"peers":[]}' }],
-    details: { session_id: "wire-native", call_id: "wire-call", result: { peers: [] } },
-  });
-  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-  await host.done;
-});
-
-test("actual idle Unix EOF retires native ownership", { timeout: 1000 }, async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-eof-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  let host;
-  const hostReady = deferred();
-  const server = net.createServer((connection) => {
-    host = new PrivateBridge(connection, {
-      role: "host",
-      handler: async ({ method, params }) => {
-        if (method !== "owner.ready") throw new BridgeCallError("method_not_found", "unexpected test method");
-        return { session_id: params.session_id };
-      },
-    });
-    host.ready().then(hostReady.resolve, hostReady.reject);
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await host?.close().catch(() => {});
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  const native = nativeFixture("eof-native");
-  createPiExtension({ launch: { directory, owner_pid: process.ppid, socket, topology: "lane" } })(native.pi);
-  await native.emit("session_start", { type: "session_start", reason: "startup" });
-  await hostReady.promise;
-  await host.close();
-  await native.waitShutdown();
-  assert.equal(native.aborted(), 1);
-  assert.equal(native.shutdown(), 1);
-});
-
-test("default managed factory survives real module reevaluation after launch scrub", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-reload-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  process.env[launchEnvironmentName] = JSON.stringify({
-    directory, owner_pid: process.ppid, socket, topology: "lane",
-  });
+test("default managed factory survives real module reevaluation after launch scrub", async () => {
+  process.env[launchEnvironmentName] = JSON.stringify(launch("interactive"));
   const first = await import("./extension.mjs?managed-reload=first");
   assert.equal(Object.hasOwn(process.env, launchEnvironmentName), false);
   const second = await import("./extension.mjs?managed-reload=second");
   assert.strictEqual(second.default, first.default);
 });
-
 
 test("native tool arguments match the shared closed MCP field declaration", () => {
   const native = nativeFixture();
