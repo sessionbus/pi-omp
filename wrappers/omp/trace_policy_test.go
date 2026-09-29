@@ -11,7 +11,7 @@ import (
 )
 
 func TestOwnerRegistrySpawnResultPreservesTrace(t *testing.T) {
-	want := json.RawMessage(`{"session_id":"child@local","policy":{"persistent":false,"auto_close_ms":60000,"idle_message":"run","notify":true,"trace":"content"}}`)
+	want := json.RawMessage(`{"session_id":"child@local","policy":{"persistent":false,"auto_close_ms":60000,"notify":true,"trace":"content"}}`)
 	caller := kit.NewCaller(func(_ context.Context, method string, _ any) (json.RawMessage, error) {
 		if method != "lane.spawn" {
 			t.Errorf("public method = %s", method)
