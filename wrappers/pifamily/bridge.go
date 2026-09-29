@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,7 +131,7 @@ type BridgeStats struct {
 // allowing a handler to call back through the same connection without a
 // deadlock. Close cancels and joins the reader, writer, and all handlers.
 type Bridge struct {
-	conn     net.Conn
+	conn     io.ReadWriteCloser
 	role     BridgeRole
 	peerRole BridgeRole
 	handler  BridgeHandler
@@ -168,7 +167,7 @@ type Bridge struct {
 
 // NewBridge starts a bridge over an already-owned connection. Both endpoints
 // send a versioned hello. Call Ready before Call or relying on incoming work.
-func NewBridge(conn net.Conn, role BridgeRole, handler BridgeHandler, limits BridgeLimits) (*Bridge, error) {
+func NewBridge(conn io.ReadWriteCloser, role BridgeRole, handler BridgeHandler, limits BridgeLimits) (*Bridge, error) {
 	if conn == nil {
 		return nil, errors.New("Pi-family bridge connection is nil")
 	}

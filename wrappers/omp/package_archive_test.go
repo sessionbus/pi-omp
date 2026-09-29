@@ -3,6 +3,7 @@
 package omp
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -33,16 +34,32 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 	}
 	wantFiles := []string{
 		"LICENSE", "README.md", "ROLE", "SOURCE.txt", "THIRD-PARTY-NOTICES.txt", "install", "omp-peer",
-		"plugin/omp/extension.mjs", "plugin/pifamily/extension/bridge.mjs",
+		"plugin/node_modules/.package-lock.json",
+		"plugin/node_modules/@sessionbus/kit/package.json",
+		"plugin/node_modules/@sessionbus/kit/sdk/go/protocol/session.schema.json",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/LICENSE",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/TYPES.md",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/caller.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/connection.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/index.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/schema.js",
+		"plugin/omp/extension.mjs",
+		"plugin/package-lock.json", "plugin/package.json",
+		"plugin/pifamily/extension/bridge.mjs",
+		"plugin/pifamily/extension/inherited.mjs",
 	}
 	if got := ompArchiveFiles(t, extracted); !reflect.DeepEqual(got, wantFiles) {
 		t.Fatalf("archive files = %v, want %v", got, wantFiles)
 	}
 	for source, installed := range map[string]string{
-		"wrappers/omp/extension.mjs":              "plugin/omp/extension.mjs",
-		"wrappers/pifamily/extension/bridge.mjs":  "plugin/pifamily/extension/bridge.mjs",
-		"omp/README.md":                           "README.md",
-		"scripts/release/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
+		"wrappers/omp/extension.mjs":                "plugin/omp/extension.mjs",
+		"wrappers/pifamily/extension/bridge.mjs":    "plugin/pifamily/extension/bridge.mjs",
+		"wrappers/pifamily/extension/inherited.mjs": "plugin/pifamily/extension/inherited.mjs",
+		"omp/package.json":                          "plugin/package.json",
+		"omp/package-lock.json":                     "plugin/package-lock.json",
+		"omp/README.md":                             "README.md",
+		"scripts/release/THIRD-PARTY-NOTICES.txt":   "THIRD-PARTY-NOTICES.txt",
 	} {
 		ompEqualFile(t, filepath.Join(repo, source), filepath.Join(extracted, installed))
 	}
@@ -55,6 +72,9 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 
 	home, tools := testsocket.Directory(t), testsocket.Directory(t)
 	if err := os.WriteFile(filepath.Join(tools, "omp"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "npm"), []byte("#!/bin/sh\necho installer invoked npm >&2\nexit 97\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	unrelated := filepath.Join(home, ".omp", "agent", "settings.json")
@@ -79,11 +99,25 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 		if output, err := install.CombinedOutput(); err != nil {
 			t.Fatalf("install OMP %d: %v\n%s", iteration, err, output)
 		}
-		if got := ompArchiveFiles(t, filepath.Join(permanent, "plugin")); !reflect.DeepEqual(got, []string{"omp/extension.mjs", "pifamily/extension/bridge.mjs"}) {
+		wantPlugin := make([]string, 0, len(wantFiles))
+		for _, name := range wantFiles {
+			if strings.HasPrefix(name, "plugin/") {
+				wantPlugin = append(wantPlugin, strings.TrimPrefix(name, "plugin/"))
+			}
+		}
+		if got := ompArchiveFiles(t, filepath.Join(permanent, "plugin")); !reflect.DeepEqual(got, wantPlugin) {
 			t.Fatalf("installed plugin files = %v", got)
 		}
-		for _, name := range []string{"omp/extension.mjs", "pifamily/extension/bridge.mjs"} {
+		for _, name := range wantPlugin {
 			ompEqualFile(t, filepath.Join(extracted, "plugin", name), filepath.Join(permanent, "plugin", name))
+		}
+		var kit struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		body, err := os.ReadFile(filepath.Join(permanent, "plugin", "node_modules", "@sessionbus", "kit", "package.json"))
+		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.9" {
+			t.Fatalf("installed kit = %#v (%v)", kit, err)
 		}
 	}
 	if body, err := os.ReadFile(unrelated); err != nil || string(body) != "preserve native config\n" {

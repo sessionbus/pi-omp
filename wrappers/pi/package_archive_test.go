@@ -3,6 +3,7 @@
 package pi
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -33,17 +34,32 @@ func TestPiArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 	}
 	wantFiles := []string{
 		"LICENSE", "README.md", "ROLE", "SOURCE.txt", "THIRD-PARTY-NOTICES.txt", "install", "pi-peer",
-		"plugin/pi/extension.mjs", "plugin/pi/native.mjs", "plugin/pifamily/extension/bridge.mjs",
+		"plugin/node_modules/.package-lock.json",
+		"plugin/node_modules/@sessionbus/kit/package.json",
+		"plugin/node_modules/@sessionbus/kit/sdk/go/protocol/session.schema.json",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/LICENSE",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/TYPES.md",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/caller.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/connection.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/index.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/schema.js",
+		"plugin/package-lock.json", "plugin/package.json",
+		"plugin/pi/extension.mjs", "plugin/pi/native.mjs",
+		"plugin/pifamily/extension/bridge.mjs", "plugin/pifamily/extension/inherited.mjs",
 	}
 	if got := piArchiveFiles(t, extracted); !reflect.DeepEqual(got, wantFiles) {
 		t.Fatalf("archive files = %v, want %v", got, wantFiles)
 	}
 	for source, installed := range map[string]string{
-		"wrappers/pi/extension.mjs":               "plugin/pi/extension.mjs",
-		"wrappers/pi/native.mjs":                  "plugin/pi/native.mjs",
-		"wrappers/pifamily/extension/bridge.mjs":  "plugin/pifamily/extension/bridge.mjs",
-		"pi/README.md":                            "README.md",
-		"scripts/release/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
+		"wrappers/pi/extension.mjs":                 "plugin/pi/extension.mjs",
+		"wrappers/pi/native.mjs":                    "plugin/pi/native.mjs",
+		"wrappers/pifamily/extension/bridge.mjs":    "plugin/pifamily/extension/bridge.mjs",
+		"wrappers/pifamily/extension/inherited.mjs": "plugin/pifamily/extension/inherited.mjs",
+		"pi/package.json":                           "plugin/package.json",
+		"pi/package-lock.json":                      "plugin/package-lock.json",
+		"pi/README.md":                              "README.md",
+		"scripts/release/THIRD-PARTY-NOTICES.txt":   "THIRD-PARTY-NOTICES.txt",
 	} {
 		piEqualFile(t, filepath.Join(repo, source), filepath.Join(extracted, installed))
 	}
@@ -56,6 +72,9 @@ func TestPiArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 
 	home, tools := testsocket.Directory(t), testsocket.Directory(t)
 	if err := os.WriteFile(filepath.Join(tools, "pi"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "npm"), []byte("#!/bin/sh\necho installer invoked npm >&2\nexit 97\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	unrelated := filepath.Join(home, ".pi", "agent", "settings.json")
@@ -80,11 +99,25 @@ func TestPiArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 		if output, err := install.CombinedOutput(); err != nil {
 			t.Fatalf("install Pi %d: %v\n%s", iteration, err, output)
 		}
-		if got := piArchiveFiles(t, filepath.Join(permanent, "plugin")); !reflect.DeepEqual(got, []string{"pi/extension.mjs", "pi/native.mjs", "pifamily/extension/bridge.mjs"}) {
+		wantPlugin := make([]string, 0, len(wantFiles))
+		for _, name := range wantFiles {
+			if strings.HasPrefix(name, "plugin/") {
+				wantPlugin = append(wantPlugin, strings.TrimPrefix(name, "plugin/"))
+			}
+		}
+		if got := piArchiveFiles(t, filepath.Join(permanent, "plugin")); !reflect.DeepEqual(got, wantPlugin) {
 			t.Fatalf("installed plugin files = %v", got)
 		}
-		for _, name := range []string{"pi/extension.mjs", "pi/native.mjs", "pifamily/extension/bridge.mjs"} {
+		for _, name := range wantPlugin {
 			piEqualFile(t, filepath.Join(extracted, "plugin", name), filepath.Join(permanent, "plugin", name))
+		}
+		var kit struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		body, err := os.ReadFile(filepath.Join(permanent, "plugin", "node_modules", "@sessionbus", "kit", "package.json"))
+		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.9" {
+			t.Fatalf("installed kit = %#v (%v)", kit, err)
 		}
 	}
 	if body, err := os.ReadFile(unrelated); err != nil || string(body) != "preserve native config\n" {

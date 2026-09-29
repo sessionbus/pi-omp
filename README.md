@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/sessionbus/pi-omp/main/scripts/inst
 curl -fsSL https://raw.githubusercontent.com/sessionbus/pi-omp/main/scripts/install-omp.sh | sh
 ```
 
-No independent release of this extraction has been published yet. Until then, these bootstrap scripts stop before installation. A reviewed archive built from source can be installed through its packaged `install` script. Downloads verify `SHA256SUMS` and the archive's Pi or OMP role before installation. The installed Go peer and maintenance path do not require Node. Pi's extension runs inside Pi's existing Node process; OMP's runs inside OMP's existing Bun process. This repository adds no Node sidecar, npm runtime dependency, or global extension registration.
+No independent release of this extraction has been published yet. Until then, these bootstrap scripts stop before installation. A reviewed archive built from source can be installed through its packaged `install` script. Downloads verify `SHA256SUMS` and the archive's Pi or OMP role before installation. The installed Go peer and maintenance path do not require Node. Pi's extension runs inside Pi's existing Node process; OMP's runs inside OMP's existing Bun process. Each archive bundles the pinned, dependency-free `@sessionbus/kit` 0.5.9 package. This repository adds no Node sidecar, runtime package installation or global extension registration.
 
 The [Pi guide](pi/README.md) and [OMP guide](omp/README.md) cover native launch options and permanent installation. Source and test obligations are tracked in the [stable functionality checklist](docs/migration/FUNCTIONALITY-CHECKLIST.md) and [preservation inventory](docs/migration/PRESERVED-FILES.json). Historical scope and outstanding preview work remain in the [design](docs/designs/pi-omp-0.5.0/DESIGN.md) and [acceptance record](docs/designs/pi-omp-0.5.0/ACCEPTANCE.md). Source preservation is separate from fresh installed acceptance.
 
@@ -29,6 +29,6 @@ scripts/package-product pi ./dist
 scripts/package-product omp ./dist
 ```
 
-Building requires Go 1.24 or newer. Node is used only to execute the four existing native-extension test files; packaging copies their `.mjs` payloads directly and has no npm build step. Shared Go support is pinned to the reviewed `peer-common` module in `go.mod`/`go.sum`. Archives target Linux and macOS on amd64 and arm64. The Pi and OMP peers are preview integrations even when packaged with a stable release; publication remains held during validation.
+Building requires Go 1.24 or newer. Node 24 and npm run the native-extension tests and assemble the archive with the exact published `@sessionbus/kit` tarball recorded in each product lockfile. The target installation performs no npm operation. Shared Go support is pinned to the reviewed `peer-common` module in `go.mod`/`go.sum`. Archives target Linux and macOS on amd64 and arm64. The Pi and OMP peers are preview integrations even when packaged with a stable release; publication remains held during validation.
 
 `pi-peer --version` and `omp-peer --version` report the peer release and source revision without invoking native Pi or OMP. Native versions are recorded as test provenance, not pinned by this extraction.

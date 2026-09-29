@@ -20,12 +20,16 @@ mkdir "$stage/plugin"
 if [ "$product" = pi ]; then
  mkdir -p "$stage/plugin/pi" "$stage/plugin/pifamily/extension"
  cp wrappers/pi/extension.mjs wrappers/pi/native.mjs "$stage/plugin/pi/"
- cp wrappers/pifamily/extension/bridge.mjs "$stage/plugin/pifamily/extension/"
+ cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs "$stage/plugin/pifamily/extension/"
 else
  mkdir -p "$stage/plugin/omp" "$stage/plugin/pifamily/extension"
  cp wrappers/omp/extension.mjs "$stage/plugin/omp/"
- cp wrappers/pifamily/extension/bridge.mjs "$stage/plugin/pifamily/extension/"
+ cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs "$stage/plugin/pifamily/extension/"
 fi
+# npm runs only while assembling the archive. It verifies and stages the exact
+# published kit; the target installer never invokes npm or downloads packages.
+cp "$product/package.json" "$product/package-lock.json" "$stage/plugin/"
+npm ci --prefix "$stage/plugin" --omit=dev --ignore-scripts
 cp scripts/release/THIRD-PARTY-NOTICES.txt LICENSE "$stage/"
 printf '%s\n' "$peer_revision" > "$stage/SOURCE.txt"
 cp scripts/release/install-product "$stage/install"
