@@ -22,7 +22,7 @@ import (
 const (
 	productModule           = "github.com/sessionbus/pi-omp"
 	sdkModule               = "github.com/antst/sessionbus/bus/sdk/go"
-	commonVersion           = "github.com/sessionbus/peer-common v0.0.0-20260928235110-ed8046c9ea51"
+	commonVersion           = "github.com/sessionbus/peer-common v0.0.0-20260929104500-c5551a29654c"
 	citationCount           = 116
 	citationReachabilitySHA = "70a0acc5246af380d8fb221bdd9e1ab8e6b8afa3a48e51c0c99ca58adb6a4550"
 	factsHeader             = "> Historical source note: citations to pre-split Sessionbus paths resolve in\n> the Forgejo `ai/sessionbus` repository through its `legacy-*` branches.\n> Citations to product source resolve in the external repository and full\n> commit recorded by the split archive manifest. Host evidence paths are\n> immutable external artifacts, not repository paths."
@@ -63,7 +63,7 @@ func TestRepositoryBoundary(t *testing.T) {
 
 func TestModuleAndImportBoundary(t *testing.T) {
 	module := read(t, "go.mod")
-	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.8-0.20260928234556-becb15b98893", commonVersion} {
+	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.9", commonVersion} {
 		if !bytes.Contains(module, []byte(expected)) {
 			t.Errorf("go.mod lacks %q", expected)
 		}
