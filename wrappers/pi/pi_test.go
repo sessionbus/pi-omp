@@ -4,6 +4,7 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +29,22 @@ import (
 )
 
 const piNativeHelperEnv = "PI_SESSIONBUS_TEST_NATIVE"
+
+type piGatedReadCloser struct {
+	io.ReadCloser
+	needle           []byte
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (reader *piGatedReadCloser) Read(body []byte) (int, error) {
+	n, err := reader.ReadCloser.Read(body)
+	if bytes.Contains(body[:n], reader.needle) {
+		reader.once.Do(func() { close(reader.entered) })
+		<-reader.release
+	}
+	return n, err
+}
 
 func TestPiNativeHelper(t *testing.T) {
 	mode := os.Getenv(piNativeHelperEnv)
@@ -543,6 +561,96 @@ func TestPiClosePreservesMalformedTerminalWire(t *testing.T) {
 	err := wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{})
 	if !errors.Is(err, errNativeRPCProtocol) {
 		t.Fatalf("Close error %v omitted terminal protocol failure", err)
+	}
+}
+
+func TestPiCloseDrainsMalformedTerminalWireAfterChildExit(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseReader := func() { releaseOnce.Do(func() { close(release) }) }
+	previous := piStartProcess
+	t.Cleanup(func() {
+		releaseReader()
+		piStartProcess = previous
+	})
+
+	wrapper, cwd := newPiTestWrapper(t, "malformed-shutdown")
+	piStartProcess = func(socket, provisional, executable, cwd string, arguments []string) (*piProcess, error) {
+		process, err := previous(socket, provisional, executable, cwd, arguments)
+		if err == nil {
+			process.output = &piGatedReadCloser{
+				ReadCloser: process.output, needle: []byte(`"pi:999"`), entered: entered, release: release,
+			}
+		}
+		return process, err
+	}
+	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{
+		Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RPC reader did not reach the held terminal frame")
+	}
+	select {
+	case <-wrapper.process.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native child did not exit before the reader was released")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before the held RPC reader was released: %v", err)
+	default:
+	}
+	releaseReader()
+	if err := <-closed; !errors.Is(err, errNativeRPCProtocol) {
+		t.Fatalf("Close error %v omitted delayed terminal protocol failure", err)
+	}
+}
+
+func TestPiRPCDrainCancellationClosesAndJoinsHeldOutput(t *testing.T) {
+	inputRead, inputWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputRead.Close()
+	outputRead, outputWrite, err := os.Pipe()
+	if err != nil {
+		_ = inputWrite.Close()
+		t.Fatal(err)
+	}
+	defer outputWrite.Close()
+	rpc, err := newNativeRPC(inputWrite, outputRead, nil, nativeRPCLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rpc.Close()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	drained := make(chan error, 1)
+	go func() { drained <- drainPiNativeRPC(ctx, rpc) }()
+	select {
+	case err = <-drained:
+		t.Fatalf("held stdout drained before cancellation: %v", err)
+	default:
+	}
+	want := errors.New("cancel held Pi stdout")
+	cancel(want)
+	select {
+	case err = <-drained:
+		if !errors.Is(err, want) {
+			t.Fatalf("held stdout cancellation = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("held stdout cancellation did not join native RPC")
+	}
+	select {
+	case <-rpc.Done():
+	default:
+		t.Fatal("held stdout cancellation returned before native RPC joined")
 	}
 }
 
