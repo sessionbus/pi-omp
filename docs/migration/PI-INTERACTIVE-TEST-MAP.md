@@ -49,6 +49,8 @@ the exact test names in the migrated tree.
 | `wrappers/pi/peer.test.mjs`: `direct owner uses the actual kit for hello, delivery, and Caller action` | A daemon delivery sent immediately after the first hello acknowledgement observes the installed native generation and is written rather than falsely rejected. |
 | `wrappers/pi/peer.test.mjs`: `replacement rejects an in-flight busy result from the prior native generation` | A delayed busy response cannot enqueue an old delivery into a different replacement session. |
 | `wrappers/pi/peer.test.mjs`: `same-ID native replacement rotates the Peer and rejects its old generation` | The same durable session ID does not collapse two native owner generations or admit stale work. |
+| `wrappers/pi/extension.test.mjs`: `interactive daemon action rejection is a native tool error on the same admitted Peer` | A daemon rejection of one Caller action on the still-admitted connection and identity is a native `tool_error`; the owner, Peer and connection survive and the next action succeeds. |
+| `wrappers/pi/extension.test.mjs`: `interactive transport loss during an action still ends the native owner` | Losing the carrying connection during an action is not a tool error; it remains fatal to the native owner. |
 
 ## Weaker or structurally removed assertions
 

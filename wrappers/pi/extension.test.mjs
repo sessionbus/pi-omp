@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import fs from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import kit from "../../pi/node_modules/@sessionbus/kit/sdk/js/index.js";
+import { BridgeCallError } from "../pifamily/extension/bridge.mjs";
 import {
   captureLaunch,
   createPiExtension,
   launchEnvironmentName,
   toolName,
 } from "./extension.mjs";
+import { connectPiInteractivePeer } from "./peer.mjs";
 
 function deferred() {
   let resolve;
@@ -421,6 +429,73 @@ test("default managed factory survives real module reevaluation after launch scr
   assert.equal(Object.hasOwn(process.env, launchEnvironmentName), false);
   const second = await import("./extension.mjs?managed-reload=second");
   assert.strictEqual(second.default, first.default);
+});
+
+// One real kit Peer, the real direct owner, and a daemon speaking the real
+// kit wire protocol over one Unix socket.
+async function actualInteractive(t, prefix, handle) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const socket = path.join(directory, "bus.sock");
+  const connections = [];
+  const methods = [];
+  const server = net.createServer((stream) => {
+    const connection = new kit.Connection(stream, false, (request) => {
+      methods.push(request.method);
+      if (request.method === "session.hello") return connection.result(request, {});
+      return handle(connection, request);
+    });
+    connections.push(connection);
+  });
+  server.listen(socket);
+  await once(server, "listening");
+  t.after(async () => {
+    for (const connection of connections) connection.close();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const native = nativeFixture(`${prefix}native`, "tui");
+  createPiExtension({
+    launch: { socket, name: "managed", groups: ["team"], topology: "interactive" },
+    // No kit reconnect: a failed assertion must not leave a retry loop behind.
+    connect: (endpoint, options) => connectPiInteractivePeer(endpoint, {
+      ...options, connectPeer: kit.connectPeer, peerOptions: { schedule: () => () => {} },
+    }),
+  })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const call = (callID, action, args) => native.pi.tool.execute(callID, { action, arguments: args }, undefined, undefined, native.ctx);
+  return { native, connections, methods, call };
+}
+
+test("interactive daemon action rejection is a native tool error on the same admitted Peer", { timeout: 5000 }, async (t) => {
+  const f = await actualInteractive(t, "pi-tool-error-", (connection, request) => {
+    if (request.method === "message.send") return connection.error(request, -32001);
+    if (request.method === "session.list") return connection.result(request, { sessions: [] });
+    return connection.error(request, -32600);
+  });
+  await assert.rejects(f.call("send-call", "send", { target: "missing", message: "hello" }), (error) =>
+    error instanceof BridgeCallError && error.code === "tool_error" && error.message === "unknown_session");
+  assert.equal(f.native.aborted(), 0);
+  assert.equal(f.native.shutdown(), 0);
+  const result = await f.call("list-call", "list", {});
+  assert.deepEqual(result.details, { session_id: "pi-tool-error-native", call_id: "list-call", result: { sessions: [] } });
+  assert.equal(f.connections.length, 1);
+  assert.deepEqual(f.methods, ["session.hello", "message.send", "session.list"]);
+  await f.native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
+
+test("interactive transport loss during an action still ends the native owner", { timeout: 5000 }, async (t) => {
+  const held = deferred();
+  const f = await actualInteractive(t, "pi-tool-loss-", (connection, request) => {
+    if (request.method === "session.list") { held.resolve(); return; }
+    return connection.error(request, -32600);
+  });
+  const action = f.call("held-call", "list", {});
+  await held.promise;
+  f.connections[0].close();
+  await assert.rejects(action, (error) => !(error instanceof BridgeCallError) && /closed/.test(error.message));
+  await f.native.waitShutdown();
+  assert.equal(f.native.shutdown(), 1);
+  assert.ok(f.native.aborted() >= 1);
 });
 
 test("native tool arguments match the shared closed MCP field declaration", () => {

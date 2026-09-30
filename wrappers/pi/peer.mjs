@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import { BridgeCallError } from "../pifamily/extension/bridge.mjs";
 
 const maxQueueItems = 256;
 const maxQueueBytes = 8 << 20;
@@ -11,6 +12,14 @@ function deferred() {
 }
 
 function clean(error) { return String(error?.message || error || "Pi interactive owner failed"); }
+// A Caller rejection whose admitted connection and identity generation are
+// still live. The action failed; the owner did not.
+class ActionError extends Error {
+  constructor(cause) {
+    super(clean(cause), { cause });
+    this.name = "ActionError";
+  }
+}
 function validText(value, limit, empty = false) {
   return typeof value === "string" && (empty || value.length > 0) && Buffer.byteLength(value) <= limit && !/\0/u.test(value);
 }
@@ -157,7 +166,17 @@ class OwnedPeer {
     return this.#track(async () => {
       const cancel = combinedSignal(signal, this.signal);
       await this.ready(cancel);
-      return this.#peer.caller.action(action, args, cancel);
+      const { connection, identityController } = this.#peer;
+      try {
+        return await this.#peer.caller.action(action, args, cancel);
+      } catch (error) {
+        // Only a rejection that leaves this exact connection and identity
+        // generation admitted is action-local. Loss, supersession, replacement
+        // or reconnect rethrows the original failure, which stays fatal.
+        if (this.#live() && this.#peer.connection === connection &&
+            this.#peer.identityController === identityController) throw new ActionError(error);
+        throw error;
+      }
     });
   }
   rehello(name, info, signal) {
@@ -309,8 +328,19 @@ export class PiInteractiveOwner {
         !validText(params.call_id, 256) || !validText(params.action, 64) || !params.arguments || typeof params.arguments !== "object") {
       throw new Error("invalid Pi interactive tool call");
     }
-    const result = await this.#peer.action(params.action, params.arguments, signal);
-    if (params.session_id !== this.#session) throw new Error("Pi tool call crossed a native session replacement");
+    const peer = this.#peer;
+    let result;
+    try {
+      result = await peer.action(params.action, params.arguments, signal);
+    } catch (error) {
+      if (!(error instanceof ActionError)) throw error;
+      if (this.#peer !== peer || params.session_id !== this.#session) throw error.cause;
+      throw new BridgeCallError("tool_error", clean(error.cause));
+    }
+    // A same-ID native reload rotates the Peer, so the ID alone is not enough.
+    if (this.#peer !== peer || params.session_id !== this.#session) {
+      throw new Error("Pi tool call crossed a native session replacement");
+    }
     return { session_id: params.session_id, call_id: params.call_id, result };
   }
 
