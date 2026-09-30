@@ -85,6 +85,10 @@ func interactiveExecPlanResolved(plan host.ExecPlan, native, extension string) (
 		return strings.HasPrefix(key, "SESSIONBUS_")
 	})
 	environment = append(environment, InteractiveLaunchEnv+"="+string(descriptor))
+	// Pi loads explicit CLI --extension paths first, in CLI order, then
+	// discovered project and global extensions. Putting the managed extension
+	// ahead of every user CLI extension makes it capture and scrub this
+	// descriptor before any other extension module is evaluated.
 	return host.ExecPlan{
 		Path: native,
 		Args: append([]string{"--extension", extension}, plan.Args...),

@@ -87,8 +87,11 @@ function combinedSignal(...signals) {
 }
 
 // Capture and scrub before native tools or nested processes can inherit the
-// owner binding. A missing binding remains inert until Pi tries to load this
-// explicitly managed extension, where it fails closed.
+// owner binding. The launcher passes this extension first among CLI
+// --extension paths, and Pi evaluates CLI extensions in CLI order before
+// discovered ones, so no other extension module observes the descriptor.
+// A missing binding remains inert until Pi tries to load this explicitly
+// managed extension, where it fails closed.
 export function captureLaunch(environment = process.env) {
   const raw = environment[launchEnvironmentName];
   delete environment[launchEnvironmentName];

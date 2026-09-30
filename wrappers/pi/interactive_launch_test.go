@@ -67,6 +67,26 @@ func TestPiInteractiveExecPlanIsExactAndLeavesNoLauncherArtifact(t *testing.T) {
 	}
 }
 
+func TestPiInteractiveManagedExtensionPrecedesUserExtensions(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	user := []string{"--extension", "/user/first.mjs", "-g", "team", "--model", "fixture/model", "-e", "/user/second.mjs"}
+	plan, passthrough, err := InteractivePlan(user, []string{host.SocketEnv + "=/bus.sock"})
+	if err != nil || passthrough {
+		t.Fatalf("plan=%+v passthrough=%v err=%v", plan, passthrough, err)
+	}
+	result, err := interactiveExecPlanResolved(plan, "/native/pi", "/plugin/pi/extension.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--extension", "/plugin/pi/extension.mjs",
+		"--extension", "/user/first.mjs", "--model", "fixture/model", "-e", "/user/second.mjs",
+	}
+	if !reflect.DeepEqual(result.Args, want) {
+		t.Fatalf("args = %q, want %q", result.Args, want)
+	}
+}
+
 func TestPiInteractiveExecPlanRejectsInvalidBootstrap(t *testing.T) {
 	base := host.ExecPlan{Env: []string{
 		host.SocketEnv + "=/bus.sock", host.NameEnv + "=name", host.GroupsEnv + "=[]",
