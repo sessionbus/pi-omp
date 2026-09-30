@@ -453,8 +453,13 @@ export function createPiExtension({
     }
 
     pi.on("agent_settled", (_event, ctx) => {
-      // This prefix runs in the first CLI extension before any await or global
-      // settled handler. Pi has already cleared its active flag.
+      // Pi clears its active flag, then runs agent_settled handlers in
+      // extension order: CLI first, then discovered. The managed extension is
+      // first, so this prefix marks settling before any await and before every
+      // other settled handler. It does not observe those later handlers: an
+      // ambient one can still start more native work after this witness. The
+      // lane currently rejects such work as outside the owned Run; whether it
+      // should is an open owner decision, and this handler does not change it.
       settling = true;
       if (current) current.branchSummaryBusy = false;
       if (launch.topology === "interactive") {
