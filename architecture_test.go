@@ -32,7 +32,7 @@ const (
 func TestRepositoryBoundary(t *testing.T) {
 	allowed := map[string]bool{
 		".forgejo": true, ".git": true, ".github": true, ".gitignore": true,
-		".golangci.yml": true, "LICENSE": true, "README.md": true, "RELEASE_VERSION": true,
+		".golangci.yml": true, "AGENTS.md": true, "LICENSE": true, "README.md": true, "RELEASE_VERSION": true,
 		"architecture_test.go": true, "version_test.go": true, "cmd": true,
 		"docs": true, "go.mod": true, "go.sum": true, "pi": true, "omp": true,
 		"scripts": true, "wrappers": true,
