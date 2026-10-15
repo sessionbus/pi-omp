@@ -353,6 +353,9 @@ export class PiInteractiveOwner {
       }
       throw new BridgeCallError("tool_error", clean(error));
     }
+    // A takeover that crossed a successful reply answers as a takeover too. An
+    // ordinary rotation stays stale_session below.
+    if (this.#supersede(peer)) throw new BridgeCallError("tool_error", supersededText);
     // A same-ID native reload rotates the Peer, so the ID alone is not enough.
     if (this.#peer !== peer || params.session_id !== this.#session) {
       throw staleToolCall("Pi tool call crossed a native owner generation");

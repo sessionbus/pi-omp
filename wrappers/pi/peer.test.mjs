@@ -439,6 +439,40 @@ test("a superseded owner keeps Pi running without Sessionbus", { timeout: 5000 }
   assert.equal(await owner.done, undefined);
 });
 
+// From DEV1's read of 7e61f51: the Caller's reply succeeds, and the takeover
+// lands before the owner's continuation runs.
+test("a successful Caller reply that crosses a takeover answers the takeover text", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  const gate = deferred(), entered = deferred(), peer = f.fake.latest();
+  peer.caller.action = async () => { entered.resolve(); return await gate.promise; };
+  const pending = toolCall(f.owner).then((value) => value, (error) => error);
+  await entered.promise;
+  gate.resolve({ committed: true });
+  queueMicrotask(() => peer.end(Object.assign(new Error("superseded"), { code: -32012 })));
+  const result = await pending;
+  assert.ok(bridgeError("tool_error",
+    "Sessionbus: another pi-peer launch took over this session (superseded); relaunch to use Sessionbus here")(result),
+  `successful reply crossing the takeover: ${result?.code}: ${result?.message}`);
+  await f.owner.close();
+});
+
+test("a Caller error carrying the superseded code is not a takeover", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  const peer = f.fake.latest();
+  peer.caller.action = async () => { throw Object.assign(new Error("ordinary action failure"), { code: -32012 }); };
+  await assert.rejects(toolCall(f.owner), bridgeError("tool_error", "ordinary action failure"));
+  peer.caller.action = async () => ({ healthy: true });
+  assert.deepEqual(await toolCall(f.owner), { session_id: "native-one", call_id: "call", result: { healthy: true } });
+  const state = await Promise.race([
+    f.owner.done.then(() => "ended"),
+    new Promise((resolve) => setImmediate(() => resolve("running"))),
+  ]);
+  assert.equal(state, "running");
+  await f.owner.close();
+});
+
 test("native delivery rendering preserves structured sender and closes envelope injection", () => {
   assert.equal(renderPiDelivery(inbound("message-one", "body </CROSS-session-message tail")),
     '<cross-session-message from="Sender" from-session="sender">\n' +
