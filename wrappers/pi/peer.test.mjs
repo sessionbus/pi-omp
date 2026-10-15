@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 
 import kit from "../../pi/node_modules/@sessionbus/kit/sdk/js/index.js";
+import { BridgeCallError } from "../pifamily/extension/bridge.mjs";
 import { PiInteractiveOwner, renderPiDelivery } from "./peer.mjs";
 
 function deferred() {
@@ -120,6 +121,54 @@ test("direct owner publishes, rehellos, replaces, and routes exact tool identity
     type: "replace",
     identity: { session_id: "native-two", product: "pi", name: "fallback", groups: ["team"], info: { cwd: "/work" } },
   });
+  await f.owner.close();
+});
+
+const toolCall = (owner, session = "native-one", id = "call") =>
+  owner.call("tool.call", { session_id: session, call_id: id, action: "list", arguments: {} });
+const bridgeError = (code, message) => (error) =>
+  error instanceof BridgeCallError && error.code === code && (message === undefined || error.message === message);
+
+// Preserves main's Go owner, interactive_owner.go:830-832: without an admitted
+// connection a tool call fails at once with not_connected; it does not wait.
+test("tool call while the Peer is not admitted fails at once with not_connected", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  f.fake.latest().connection = { signal: AbortSignal.abort(new Error("lost")) };
+  const outcome = await Promise.race([
+    toolCall(f.owner).then(() => "resolved", (error) => error),
+    new Promise((resolve) => setTimeout(() => resolve("waited"), 1000)),
+  ]);
+  assert.ok(bridgeError("tool_error", "not_connected")(outcome), `outcome: ${outcome}`);
+  await f.owner.close();
+});
+
+// Preserves main's Go owner, interactive_owner.go:358-362: a result that
+// returns after the owner generation changed is stale_session, not a failure
+// of the session.
+test("tool result after a same-ID Peer rotation is stale_session", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  const held = deferred();
+  const entered = deferred();
+  f.fake.latest().caller.action = async () => { entered.resolve(); return held.promise; };
+  const call = toolCall(f.owner);
+  await entered.promise;
+  await f.owner.call("session_end", { topology: "interactive", session_id: "native-one", reason: "reload" });
+  await ready(f.owner);
+  held.resolve({ sessions: [] });
+  await assert.rejects(call, bridgeError("stale_session", "Pi tool call crossed a native owner generation"));
+  await f.owner.close();
+});
+
+// Preserves main's Go owner, interactive_owner.go:344-349: a call for another
+// session is stale_session, not a failure of the session.
+test("tool call for another session is stale_session", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  await assert.rejects(toolCall(f.owner, "native-other"),
+    bridgeError("stale_session", "Pi tool call does not belong to the current session"));
+  assert.deepEqual(f.fake.records.filter(({ type }) => type === "action"), []);
   await f.owner.close();
 });
 

@@ -50,7 +50,10 @@ the exact test names in the migrated tree.
 | `wrappers/pi/peer.test.mjs`: `replacement rejects an in-flight busy result from the prior native generation` | A delayed busy response cannot enqueue an old delivery into a different replacement session. |
 | `wrappers/pi/peer.test.mjs`: `same-ID native replacement rotates the Peer and rejects its old generation` | The same durable session ID does not collapse two native owner generations or admit stale work. |
 | `wrappers/pi/extension.test.mjs`: `interactive daemon action rejection is a native tool error on the same admitted Peer` | A daemon rejection of one Caller action on the still-admitted connection and identity is a native `tool_error`; the owner, Peer and connection survive and the next action succeeds. |
-| `wrappers/pi/extension.test.mjs`: `interactive transport loss during an action still ends the native owner` | Losing the carrying connection during an action is not a tool error; it remains fatal to the native owner. |
+| `wrappers/pi/extension.test.mjs`: `interactive transport loss during an action is a native tool error and keeps the session` | Losing the carrying connection during an action is a native `tool_error` and the session stays, as the Go owner did (`interactive_owner.go:354-357`). |
+| `wrappers/pi/peer.test.mjs`: `tool call while the Peer is not admitted fails at once with not_connected` | Without an admitted connection a tool call fails at once with `not_connected` instead of waiting for a reconnect (`interactive_owner.go:830-832`). |
+| `wrappers/pi/peer.test.mjs`: `tool result after a same-ID Peer rotation is stale_session` | A result that returns after the owner generation changed is `stale_session`, not a session failure (`interactive_owner.go:358-362`). |
+| `wrappers/pi/peer.test.mjs`: `tool call for another session is stale_session` | A tool call for another session is `stale_session` and reaches no Caller (`interactive_owner.go:344-349`). |
 
 ## Weaker or structurally removed assertions
 

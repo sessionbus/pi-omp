@@ -483,7 +483,9 @@ test("interactive daemon action rejection is a native tool error on the same adm
   await f.native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 });
 
-test("interactive transport loss during an action still ends the native owner", { timeout: 5000 }, async (t) => {
+// Preserves main's Go owner, interactive_owner.go:354-357: every Caller.Action
+// failure, a lost connection included, is a tool_error and the session stays.
+test("interactive transport loss during an action is a native tool error and keeps the session", { timeout: 5000 }, async (t) => {
   const held = deferred();
   const f = await actualInteractive(t, "pi-tool-loss-", (connection, request) => {
     if (request.method === "session.list") { held.resolve(); return; }
@@ -492,10 +494,10 @@ test("interactive transport loss during an action still ends the native owner", 
   const action = f.call("held-call", "list", {});
   await held.promise;
   f.connections[0].close();
-  await assert.rejects(action, (error) => !(error instanceof BridgeCallError) && /closed/.test(error.message));
-  await f.native.waitShutdown();
-  assert.equal(f.native.shutdown(), 1);
-  assert.ok(f.native.aborted() >= 1);
+  await assert.rejects(action, (error) => error instanceof BridgeCallError && error.code === "tool_error");
+  assert.equal(f.native.aborted(), 0);
+  assert.equal(f.native.shutdown(), 0);
+  await f.native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 });
 
 test("native tool arguments match the shared closed MCP field declaration", () => {

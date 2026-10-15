@@ -12,14 +12,9 @@ function deferred() {
 }
 
 function clean(error) { return String(error?.message || error || "Pi interactive owner failed"); }
-// A Caller rejection whose admitted connection and identity generation are
-// still live. The action failed; the owner did not.
-class ActionError extends Error {
-  constructor(cause) {
-    super(clean(cause), { cause });
-    this.name = "ActionError";
-  }
-}
+// A tool call that does not belong to the current native owner generation.
+// The Go owner answered this as stale_session (interactive_owner.go:349, :362).
+function staleToolCall(message) { return new BridgeCallError("stale_session", message); }
 function validText(value, limit, empty = false) {
   return typeof value === "string" && (empty || value.length > 0) && Buffer.byteLength(value) <= limit && !/\0/u.test(value);
 }
@@ -164,19 +159,10 @@ class OwnedPeer {
   }
   action(action, args, signal) {
     return this.#track(async () => {
-      const cancel = combinedSignal(signal, this.signal);
-      await this.ready(cancel);
-      const { connection, identityController } = this.#peer;
-      try {
-        return await this.#peer.caller.action(action, args, cancel);
-      } catch (error) {
-        // Only a rejection that leaves this exact connection and identity
-        // generation admitted is action-local. Loss, supersession, replacement
-        // or reconnect rethrows the original failure, which stays fatal.
-        if (this.#live() && this.#peer.connection === connection &&
-            this.#peer.identityController === identityController) throw new ActionError(error);
-        throw error;
-      }
+      // As the Go owner (interactive_owner.go:830-832), a call while the Peer
+      // is not admitted fails at once rather than waiting for a reconnect.
+      if (!this.#live()) throw new Error("not_connected");
+      return this.#peer.caller.action(action, args, combinedSignal(signal, this.signal));
     });
   }
   rehello(name, info, signal) {
@@ -324,22 +310,26 @@ export class PiInteractiveOwner {
   }
 
   async #toolCall(params, signal) {
-    if (!exact(params, ["session_id", "call_id", "action", "arguments"]) || params.session_id !== this.#session ||
+    if (!exact(params, ["session_id", "call_id", "action", "arguments"]) ||
         !validText(params.call_id, 256) || !validText(params.action, 64) || !params.arguments || typeof params.arguments !== "object") {
       throw new Error("invalid Pi interactive tool call");
     }
     const peer = this.#peer;
+    if (!peer || params.session_id !== this.#session) throw staleToolCall("Pi tool call does not belong to the current session");
     let result;
     try {
       result = await peer.action(params.action, params.arguments, signal);
     } catch (error) {
-      if (!(error instanceof ActionError)) throw error;
-      if (this.#peer !== peer || params.session_id !== this.#session) throw error.cause;
-      throw new BridgeCallError("tool_error", clean(error.cause));
+      // As the Go owner (interactive_owner.go:354-357), a failed action,
+      // including a lost connection, is a tool error; the native session stays.
+      if (this.#peer !== peer || params.session_id !== this.#session) {
+        throw staleToolCall("Pi tool call crossed a native owner generation");
+      }
+      throw new BridgeCallError("tool_error", clean(error));
     }
     // A same-ID native reload rotates the Peer, so the ID alone is not enough.
     if (this.#peer !== peer || params.session_id !== this.#session) {
-      throw new Error("Pi tool call crossed a native session replacement");
+      throw staleToolCall("Pi tool call crossed a native owner generation");
     }
     return { session_id: params.session_id, call_id: params.call_id, result };
   }
