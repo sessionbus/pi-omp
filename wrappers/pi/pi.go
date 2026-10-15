@@ -366,28 +366,35 @@ func (p *Wrapper) handleBridge(ctx context.Context, method string, raw json.RawM
 	case "run.start":
 		var request struct {
 			SessionID string          `json:"session_id"`
-			Run       string          `json:"run"`
+			Run       json.RawMessage `json:"run"`
 			Settling  json.RawMessage `json:"settling"`
 		}
 		if err = decodePiBridge(raw, []string{"session_id", "run", "settling"}, &request); err == nil {
 			var settling bool
-			settling, err = piBridgeBool(request.Settling)
+			var token string
+			token, err = piBridgeToken(request.Run)
 			if err == nil {
-				err = p.recordRunStart(request.SessionID, request.Run, settling)
+				settling, err = piBridgeBool(request.Settling)
+			}
+			if err == nil {
+				err = p.recordRunStart(request.SessionID, token, settling)
 			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
 	case "run.settling":
 		var request struct {
 			SessionID string          `json:"session_id"`
-			Run       string          `json:"run"`
+			Run       json.RawMessage `json:"run"`
 			Leaf      json.RawMessage `json:"leaf"`
 		}
 		if err = decodePiBridge(raw, []string{"session_id", "run", "leaf"}, &request); err == nil {
-			var leaf string
-			leaf, err = entryReference(request.Leaf)
+			var leaf, token string
+			token, err = piBridgeToken(request.Run)
 			if err == nil {
-				err = p.recordRunSettling(request.SessionID, request.Run, leaf)
+				leaf, err = entryReference(request.Leaf)
+			}
+			if err == nil {
+				err = p.recordRunSettling(request.SessionID, token, leaf)
 			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
@@ -411,6 +418,17 @@ func piBridgeBool(raw json.RawMessage) (bool, error) {
 		return false, nil
 	}
 	return false, errors.New("Pi bridge boolean is invalid")
+}
+
+// piBridgeToken reads a Run token in the shape newPiRunToken mints: 32
+// lowercase hex digits. JSON null decodes into a string without error, so a
+// malformed token is refused here, before any rule for Pi's own work sees it.
+func piBridgeToken(raw json.RawMessage) (string, error) {
+	var token string
+	if json.Unmarshal(raw, &token) != nil || len(token) != 32 || strings.Trim(token, "0123456789abcdef") != "" {
+		return "", errors.New("Pi bridge Run token is invalid")
+	}
+	return token, nil
 }
 
 // JSON null decodes into an int without error, so it is refused first.

@@ -67,6 +67,8 @@ the exact test names in the migrated tree.
 | `wrappers/pi/run_test.go`: `TestPiLaneSteersDeliveryIntoActiveRun` | Through the real SDK Worker, a delivery during the Worker's admitted Run is steered with that Run's token and answered `injected`; without a running Run it is NotRunning; the Run still ends by interrupt. |
 | `wrappers/pi/run_test.go`: `TestPiOldRunSteerCarriesItsRunToken` | A steer held in transport until a later Run holds the native session carries its own Run's token and is NotRunning. |
 | `wrappers/pi/run_test.go`: `TestPiLaneKeepsPiOwnWorkOutOfItsRuns` | A run of Pi's own after the owned settle, before the owned preflight, with stdout read after that preflight, or raising a dialog after the owned settle neither ends the lane nor reaches either Run's result; the dialog is cancelled. |
+| `wrappers/pi/run_test.go`: `TestPiMalformedRunTokenIsNotPiOwnWork` | A start or settling witness whose Run token is null, empty, not 32 lowercase hex digits or not a string is a protocol error even after an owned Run settled; a well-formed token of another run is still Pi's own work. |
+| `wrappers/pi/run_test.go`: `TestPiOwnDialogWithoutOwnedTurnIsCancelled` | A dialog that Pi's own work raises with no owned turn open is cancelled and does not end the lane. |
 | `wrappers/pi/run_test.go`: `TestPiNextRunWaitsForPiOwnRun` | The next Run waits for Pi's own run to settle before it reads history and sends its prompt; a refusal that still comes ends the Run without failing the lane. |
 | `wrappers/pi/run_test.go`: `TestPiRefusedPromptEndsOnlyItsRun` | Pi refusing a Run's prompt makes that Run's record unavailable with Pi's answer; the following Run completes on the same lane. |
 

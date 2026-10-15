@@ -436,6 +436,54 @@ func TestPiLaneKeepsPiOwnWorkOutOfItsRuns(t *testing.T) {
 	}
 }
 
+// A start or settling witness must carry a Run token in the shape Go mints.
+// A malformed one is a protocol error even after an owned Run settled, when a
+// well-formed token of another run is Pi's own work and is ignored. (From
+// DEV1's review case REVIEW-TOKEN.)
+func TestPiMalformedRunTokenIsNotPiOwnWork(t *testing.T) {
+	other := strings.Repeat("ab", 16)
+	for _, test := range []struct {
+		name, method, params string
+		valid                bool
+	}{
+		{"start null", "run.start", `{"session_id":"native","run":null,"settling":false}`, false},
+		{"start empty", "run.start", `{"session_id":"native","run":"","settling":false}`, false},
+		{"start upper hex", "run.start", `{"session_id":"native","run":"` + strings.ToUpper(other) + `","settling":false}`, false},
+		{"start number", "run.start", `{"session_id":"native","run":7,"settling":false}`, false},
+		{"settling null", "run.settling", `{"session_id":"native","run":null,"leaf":null}`, false},
+		{"settling short", "run.settling", `{"session_id":"native","run":"abc","leaf":null}`, false},
+		{"start other run", "run.start", `{"session_id":"native","run":"` + other + `","settling":false}`, true},
+		{"settling other run", "run.settling", `{"session_id":"native","run":"` + other + `","leaf":null}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			wrapper := &Wrapper{ctx: ctx, cancel: cancel, opened: true, id: "native", ownWork: true}
+			result, err := wrapper.handleBridge(ctx, test.method, json.RawMessage(test.params))
+			if test.valid && err != nil {
+				t.Fatalf("well-formed token of Pi's own run = %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("malformed Run token acknowledged as Pi's own work: %s", result)
+			}
+		})
+	}
+}
+
+// A dialog that Pi's own work raises when no owned turn is open is cancelled
+// without ending the lane. (From DEV1's review case REVIEW-UI.)
+func TestPiOwnDialogWithoutOwnedTurnIsCancelled(t *testing.T) {
+	rpc, peer := newNativeRPCTest(t, nil, nativeRPCLimits{})
+	wrapper := &Wrapper{ctx: context.Background(), rpc: rpc, opened: true, ownWork: true}
+	if err := wrapper.observeNativeUI(json.RawMessage(`{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue?"}`)); err != nil {
+		t.Fatalf("dialog of Pi's own work with no owned turn = %v", err)
+	}
+	command := peer.read(t)
+	if nativeRPCField(t, command, "type") != "extension_ui_response" || nativeRPCField(t, command, "id") != "own-dialog" || string(command["cancelled"]) != "true" {
+		t.Fatalf("dialog cancellation = %#v", command)
+	}
+}
+
 // Pi refuses a prompt while it runs work of its own, so the next Run waits
 // for that run to settle before it reads history and sends its prompt. A
 // refusal that still comes ends the Run without failing the lane.
