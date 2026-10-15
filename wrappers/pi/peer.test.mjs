@@ -220,6 +220,39 @@ test("a session end during a drain append ends the drain without a fault", async
   await owner.close();
 });
 
+// A same-ID reload makes a fresh owner generation current before the old
+// drain's append returns; the old drain still ends quietly and does not fault
+// the fresh generation.
+test("a same-ID reload during a drain append ends the old drain without a fault", async () => {
+  const fake = fakeKit();
+  const gate = deferred(), entered = deferred();
+  let busy = true;
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.append") {
+      if (busy) return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+      entered.resolve();
+      await gate.promise;
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  const old = fake.latest();
+  assert.deepEqual(await old.deliver(inbound("held")), { disposition: "queued_for_next_turn" });
+  busy = false;
+  const drained = owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" });
+  await entered.promise;
+  await owner.call("session_end", { topology: "interactive", session_id: "native-one", reason: "reload" });
+  await ready(owner);
+  assert.notStrictEqual(fake.latest(), old);
+  gate.resolve();
+  assert.deepEqual(await drained, { session_id: "native-one", drained: 0 });
+  assert.deepEqual(await fake.latest().deliver(inbound("fresh")), { disposition: "written" });
+  await owner.close();
+});
+
 test("direct owner preserves FIFO busy wake, capacity, and tree gate", async () => {
   const f = ownerFixture({ busy: true });
   await ready(f.owner);

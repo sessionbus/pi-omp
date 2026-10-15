@@ -58,6 +58,7 @@ the exact test names in the migrated tree.
 | `wrappers/pi/extension.test.mjs`: `interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the rest queued` | Pi 1.2.0 defers a send made during `agent_settled` and stays idle; the settled drain accepts one such send and keeps the rest queued. |
 | `wrappers/pi/extension.test.mjs`: `interactive idle delivery that Pi defers outside the settled drain is accepted` | An idle delivery that Pi defers while later settled handlers run is accepted and does not end the session. |
 | `wrappers/pi/peer.test.mjs`: `a session end during a drain append ends the drain without a fault` | A session that ends while a drain append is in flight ends the drain quietly; no identity or queue fault ends the native session. |
+| `wrappers/pi/peer.test.mjs`: `a same-ID reload during a drain append ends the old drain without a fault` | A same-ID reload that installs a fresh owner generation while an old drain append is in flight ends the old drain quietly; the fresh generation keeps working. |
 | `wrappers/pi/extension.test.mjs`: `lane native.steer steers into the running task and refuses an idle session` | A lane steers a peer message into Pi's steering queue only while its own run is active; the steered message's events match its admitted delivery; idle answers `idle`. |
 | `wrappers/pi/run_test.go`: `TestPiLaneSteersDeliveryIntoActiveRun` | While the Run's native prompt is admitted, a delivery is steered through the extension and answered `injected`; without an active Run it is NotRunning. |
 
