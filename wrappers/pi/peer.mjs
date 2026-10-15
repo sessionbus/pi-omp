@@ -4,6 +4,9 @@ import { BridgeCallError } from "../pifamily/extension/bridge.mjs";
 const maxQueueItems = 256;
 const maxQueueBytes = 8 << 20;
 const maxTextBytes = 1 << 20;
+// The owner-approved tool text for a session another launch took over, in
+// Kilo's form (2026-10-15).
+const supersededText = "Sessionbus: another pi-peer launch took over this session (superseded); relaunch to use Sessionbus here";
 
 function deferred() {
   let resolve;
@@ -229,6 +232,7 @@ export class PiInteractiveOwner {
   #queueBytes = 0;
   #treeBusy = false;
   #closed = false;
+  #superseded = false;
   #done = deferred();
   #closing;
 
@@ -263,6 +267,11 @@ export class PiInteractiveOwner {
         !validText(native.name, 4096, true) || !validText(native.cwd, 32 << 10)) {
       throw new Error("Pi native description contradicted owner readiness");
     }
+    // After a takeover a later Pi session stays off Sessionbus too.
+    if (this.#superseded) {
+      this.#session = native.session_id;
+      return { session_id: native.session_id };
+    }
     const identity = {
       session_id: native.session_id,
       product: "pi",
@@ -283,19 +292,24 @@ export class PiInteractiveOwner {
     // Install the native generation before hello acknowledgement can admit a
     // daemon delivery. Peer admission and its first delivery may share a turn.
     this.#session = identity.session_id;
-    if (!this.#peer) {
-      const token = {};
-      this.#peerToken = token;
-      const peer = new OwnedPeer(this.#connectPeer, identity, (cancel, request, admitted) => this.#deliver(token, cancel, request, admitted), this.#launch.socket, this.#peerOptions);
-      this.#peer = peer;
-      void peer.closed.then(() => {
-        if (this.#peer === peer) this.#finish(peer.error || new Error("Sessionbus peer closed"));
-      });
-      await peer.ready(signal);
-    } else if (this.#peer.id === identity.session_id) {
-      await this.#peer.rehello(identity.name, identity.info, signal);
-    } else {
-      await this.#peer.replace(identity, signal);
+    try {
+      if (!this.#peer) {
+        const token = {};
+        this.#peerToken = token;
+        const peer = new OwnedPeer(this.#connectPeer, identity, (cancel, request, admitted) => this.#deliver(token, cancel, request, admitted), this.#launch.socket, this.#peerOptions);
+        this.#peer = peer;
+        void peer.closed.then(() => {
+          if (this.#peer === peer && !this.#supersede(peer)) this.#finish(peer.error || new Error("Sessionbus peer closed"));
+        });
+        await peer.ready(signal);
+      } else if (this.#peer.id === identity.session_id) {
+        await this.#peer.rehello(identity.name, identity.info, signal);
+      } else {
+        await this.#peer.replace(identity, signal);
+      }
+    } catch (error) {
+      // A takeover that crossed this hello leaves Pi running without Sessionbus.
+      if (!this.#supersede(this.#peer)) throw error;
     }
     return { session_id: identity.session_id };
   }
@@ -324,12 +338,14 @@ export class PiInteractiveOwner {
         !validText(params.call_id, 256) || !validText(params.action, 64) || !params.arguments || typeof params.arguments !== "object") {
       throw new Error("invalid Pi interactive tool call");
     }
+    if (this.#superseded) throw new BridgeCallError("tool_error", supersededText);
     const peer = this.#peer;
     if (!peer || params.session_id !== this.#session) throw staleToolCall("Pi tool call does not belong to the current session");
     let result;
     try {
       result = await peer.action(params.action, params.arguments, signal);
     } catch (error) {
+      if (this.#supersede(peer)) throw new BridgeCallError("tool_error", supersededText);
       // As the Go owner (interactive_owner.go:354-357), a failed action,
       // including a lost connection, is a tool error; the native session stays.
       if (this.#peer !== peer || params.session_id !== this.#session) {
@@ -443,6 +459,23 @@ export class PiInteractiveOwner {
     this.#queue.push(item);
     this.#queueBytes += item.bytes;
     return { disposition: "queued_for_next_turn" };
+  }
+
+  // Another pi-peer launch took over this session (kit superseded, -32012).
+  // As with Kilo, Pi keeps running without Sessionbus: no presence and no
+  // delivery, and every later tool call answers the takeover text. Waiting
+  // deliveries are dropped, as when the owner ends. A hello refusal or any
+  // other Peer end still ends the owner.
+  #supersede(peer) {
+    if (this.#superseded) return true;
+    if (this.#closed || !peer || peer !== this.#peer || peer.error?.code !== -32012) return false;
+    this.#superseded = true;
+    this.#peer = undefined;
+    this.#peerToken = undefined;
+    this.#queue = [];
+    this.#queueBytes = 0;
+    this.#treeBusy = false;
+    return true;
   }
 
   #finish(error) {

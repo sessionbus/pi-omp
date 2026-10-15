@@ -62,8 +62,8 @@ function fakeKit() {
         connectionController.abort(new Error("closed"));
         closed.resolve();
       },
-      supersede() {
-        this.error = new Error("superseded");
+      end(error) {
+        this.error = error;
         this.shutdown();
       },
       deliver(request, signal = identityController.signal) { return deliver(signal, request, this.admitted); },
@@ -344,12 +344,99 @@ test("canceled and poisoned delivery cannot corrupt retained FIFO", async () => 
   await f.owner.close();
 });
 
-test("supersession and close join the direct owner lifetime", async () => {
+test("a Peer that ends for another reason than a takeover still ends the owner", async () => {
   const f = ownerFixture();
   await ready(f.owner);
-  f.fake.latest().supersede();
-  assert.match(String(await f.owner.done), /superseded/);
+  const refused = Object.assign(new Error("invalid_hello"), { code: -32602 });
+  f.fake.latest().end(refused);
+  assert.equal(await f.owner.done, refused);
+  await assert.rejects(toolCall(f.owner), /Pi interactive owner is closed/);
   await f.owner.close();
+});
+
+// Owner decision 2026-10-15: as with Kilo, a Pi session that another launch
+// took over keeps running without Sessionbus, and its tool answers the takeover.
+test("a superseded owner keeps Pi running without Sessionbus", { timeout: 5000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pi-superseded-peer-"));
+  const socket = path.join(directory, "bus.sock");
+  const helloHeld = deferred();
+  const listHeld = deferred();
+  let daemon;
+  let streamClosed;
+  let hellos = 0;
+  const methods = [];
+  const server = net.createServer((stream) => {
+    streamClosed = once(stream, "close");
+    daemon = new kit.Connection(stream, false, async (request) => {
+      methods.push(request.method);
+      // The rename's hello and the list call stay unanswered across the takeover.
+      if (request.method === "session.hello") return ++hellos === 1 ? daemon.result(request, {}) : helloHeld.resolve();
+      if (request.method === "session.list") return listHeld.resolve();
+      return daemon.error(request, -32600);
+    });
+  });
+  server.listen(socket);
+  await once(server, "listening");
+  t.after(async () => {
+    daemon?.close();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  let busy = true;
+  let nativeID = "taken-native";
+  let nativeName = "Taken";
+  const appended = [];
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: nativeID, name: nativeName, cwd: "/work" };
+    if (method === "native.steer") return idleSteer(nativeID, params);
+    if (method === "native.append") {
+      if (busy) return { session_id: nativeID, message_id: params.message_id, accepted: false, reason: "busy" };
+      appended.push(params);
+      return { session_id: nativeID, message_id: params.message_id, accepted: true };
+    }
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner({ ...launch, socket }, native, kit.connectPeer);
+  t.after(() => owner.close());
+  await ready(owner, "taken-native", "Taken");
+  assert.deepEqual(await daemon.call("message.deliver", inbound("waiting")), { disposition: "queued_for_next_turn" });
+
+  const call = toolCall(owner, "taken-native", "in-flight").then(() => "resolved", (error) => error);
+  nativeName = "Renamed";
+  const renamed = ready(owner, "taken-native", "Renamed").then((value) => value, (error) => error);
+  await listHeld.promise;
+  await helloHeld.promise;
+  await daemon.call("session.superseded", {}).catch(() => {});
+  await streamClosed;
+
+  const takeover = bridgeError("tool_error",
+    "Sessionbus: another pi-peer launch took over this session (superseded); relaunch to use Sessionbus here");
+  const inFlight = await call;
+  assert.ok(takeover(inFlight), `in-flight call: ${inFlight}`);
+  assert.deepEqual(await renamed, { session_id: "taken-native" });
+  await assert.rejects(toolCall(owner, "taken-native", "later"), takeover);
+  const state = await Promise.race([
+    owner.done.then(() => "ended"),
+    new Promise((resolve) => setImmediate(() => resolve("running"))),
+  ]);
+  assert.equal(state, "running");
+
+  // The waiting message went with the Peer; Pi itself stays usable.
+  busy = false;
+  assert.deepEqual(await owner.call("owner.drain", { session_id: "taken-native", witness: "agent_settled" }),
+    { session_id: "taken-native", drained: 0 });
+  assert.deepEqual(appended, []);
+  assert.deepEqual(await owner.call("owner.before_tree", { session_id: "taken-native" }),
+    { session_id: "taken-native", pending: false });
+  await owner.call("session_end", { topology: "interactive", session_id: "taken-native", reason: "new" });
+  nativeID = "later-native";
+  assert.deepEqual(await ready(owner, "later-native", "Renamed"), { session_id: "later-native" });
+  await assert.rejects(toolCall(owner, "later-native", "after-new"), takeover);
+  assert.deepEqual([...methods].sort(), ["session.hello", "session.hello", "session.list"]);
+
+  await owner.call("session_end", { topology: "interactive", session_id: "later-native", reason: "quit" });
+  assert.equal(await owner.done, undefined);
 });
 
 test("native delivery rendering preserves structured sender and closes envelope injection", () => {

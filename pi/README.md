@@ -36,6 +36,13 @@ history lock. Managed lanes retain the Go Worker, native RPC pipes, history
 lock, and direct native child; their extension bridge is an inherited anonymous
 socketpair rather than a filesystem endpoint.
 
+If another `pi-peer` launch takes over the same Pi session, the first Pi keeps
+running without Sessionbus: it has no presence, receives no deliveries, drops
+messages still waiting in its FIFO, and its Sessionbus tool answers
+`Sessionbus: another pi-peer launch took over this session (superseded); relaunch to use Sessionbus here`.
+Both windows can write to the session, as with two plain Pi windows. A daemon
+refusal of the Peer's hello still ends Pi.
+
 In a managed interactive terminal, a peer message that arrives while Pi is
 running a task goes into Pi's own steering queue, which the task reads at its
 next boundary; its receipt is `injected`. An idle session starts a turn with
