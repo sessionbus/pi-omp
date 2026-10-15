@@ -23,7 +23,9 @@ var interactiveValueOptions = []string{
 	"--tui-mode",
 }
 
-var passthroughCommands = []string{"install", "remove", "uninstall", "update", "list", "config", "auth"}
+// Native Pi's own first-word commands, which it handles before any session
+// starts (Pi 1.2.0 dist/main.js: auth, package commands, config, mcp at :486).
+var passthroughCommands = []string{"install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"}
 
 // InteractivePlan classifies native maintenance/help before adding managed
 // identity. Passthrough retains the original argv and environment byte values.

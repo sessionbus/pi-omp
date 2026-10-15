@@ -57,6 +57,8 @@ func TestInteractivePlanNativeMaintenancePassthroughIsBytePreserving(t *testing.
 	for _, args := range [][]string{
 		{"--help", "-g"},
 		{"install", "-g", "package"},
+		// Pi 1.2.0 added the mcp command (dist/main.js:486).
+		{"mcp", "list", "-g"},
 		{"--print", "-g"},
 		{"-p", "prompt", "-g"},
 		{"--export", "session.jsonl", "output.html"},
