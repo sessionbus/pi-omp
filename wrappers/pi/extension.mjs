@@ -258,18 +258,20 @@ export function createPiExtension({
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
       case "native.steer": {
-        // Interactive delivery goes through native.append.
-        if (launch.topology !== "lane") {
-          throw new BridgeCallError("method_not_found", "Pi native.steer is unavailable in interactive topology");
-        }
         exactKeys(params, ["session_id", "message_id", "body", "run"], "native.steer parameters");
         if (params.session_id !== record.session_id) {
           throw new BridgeCallError("stale_session", "Pi native session identity does not match");
         }
+        // An interactive session has no Run: a steer goes into whatever
+        // native run is active, and its owner shares this process.
+        if (launch.topology === "interactive" && params.run !== null) {
+          throw new Error("Pi interactive native.steer run must be null");
+        }
         throwIfAborted(signal);
-        // The Run's token, Pi's run state and the send are one synchronous
+        // A lane's Run token, Pi's run state and the send are one synchronous
         // step, so a steer made for an earlier Run never enters a later one.
-        const owned = typeof params.run === "string" && params.run === record.runToken;
+        const owned = launch.topology === "interactive" ||
+          (typeof params.run === "string" && params.run === record.runToken);
         const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };
         throwIfAborted(signal);
         if (result.accepted === false) {

@@ -34,6 +34,16 @@ function validateAppend(result, sessionID, messageID) {
   }
   return result;
 }
+function validateSteer(result, sessionID, messageID) {
+  if (!result || result.session_id !== sessionID || result.message_id !== messageID || typeof result.accepted !== "boolean") {
+    throw new Error("Pi native steer response changed identity");
+  }
+  if (result.accepted ? !exact(result, ["session_id", "message_id", "accepted"])
+                      : !exact(result, ["session_id", "message_id", "accepted", "reason"]) || result.reason !== "idle") {
+    throw new Error("Pi native steer answer is invalid");
+  }
+  return result;
+}
 function combinedSignal(...signals) {
   const present = signals.filter(Boolean);
   if (present.length === 0) return undefined;
@@ -349,19 +359,31 @@ export class PiInteractiveOwner {
       const item = this.#queue[0];
       const session = this.#session;
       const queue = this.#queue;
-      const answer = await this.#native({
-        method: "native.append",
-        params: { session_id: session, message_id: item.message_id, body: item.body },
+      // A session end or close during a native call replaces the queue, also
+      // when a same-ID reload has already made a fresh owner generation
+      // current. That ends this drain without a fault.
+      const ended = () => this.#closed || this.#queue !== queue || this.#session !== session;
+      // The same steer-first path as a delivery: at before_agent_start Pi is
+      // already running, so waiting messages go into that run in order; at a
+      // settle they are appended and start the next turn.
+      const steered = await this.#native({
+        method: "native.steer",
+        params: { session_id: session, message_id: item.message_id, body: item.body, run: null },
         signal,
       });
-      // A session end or close during the append replaces the queue, also when
-      // a same-ID reload has already made a fresh owner generation current.
-      // That ends this drain without a fault.
-      if (this.#closed || this.#queue !== queue || this.#session !== session) break;
-      const result = validateAppend(answer, session, item.message_id);
-      if (result.accepted !== true) {
-        if (result.reason !== "busy" && result.reason !== "branch_summary_busy") throw new Error("Pi queued delivery rejection is invalid");
-        break;
+      if (ended()) break;
+      if (validateSteer(steered, session, item.message_id).accepted !== true) {
+        const answer = await this.#native({
+          method: "native.append",
+          params: { session_id: session, message_id: item.message_id, body: item.body },
+          signal,
+        });
+        if (ended()) break;
+        const result = validateAppend(answer, session, item.message_id);
+        if (result.accepted !== true) {
+          if (result.reason !== "busy" && result.reason !== "branch_summary_busy") throw new Error("Pi queued delivery rejection is invalid");
+          break;
+        }
       }
       if (this.#queue[0] !== item) throw new Error("Pi delivery queue changed during drain");
       this.#queue.shift();
@@ -378,6 +400,23 @@ export class PiInteractiveOwner {
     const sessionID = this.#session;
     const body = renderPiDelivery(request);
     if (this.#treeBusy && this.#queue.length) return { disposition: "rejected", reason: "native_branch_summary_busy" };
+    if (this.#queue.length) return this.#enqueue(request.message_id, body);
+    // While Pi runs a task the message goes into Pi's steering queue, which
+    // the task reads at its next boundary: injected, not yet seen by the
+    // model. Otherwise it is appended as before.
+    const steered = validateSteer(await this.#native({
+      method: "native.steer",
+      params: { session_id: sessionID, message_id: request.message_id, body, run: null },
+      signal,
+    }), sessionID, request.message_id);
+    if (steered.accepted === true) {
+      // As for an accepted append: a running task means no branch summary.
+      if (this.#session === sessionID && this.#treeBusy) this.#treeBusy = false;
+      return { disposition: "injected" };
+    }
+    if (token !== this.#peerToken || signal.aborted || this.#session !== sessionID) {
+      return { disposition: "rejected", reason: "native owner closed" };
+    }
     if (this.#queue.length) return this.#enqueue(request.message_id, body);
     const result = validateAppend(await this.#native({
       method: "native.append",

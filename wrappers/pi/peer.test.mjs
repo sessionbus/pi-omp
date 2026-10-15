@@ -81,11 +81,22 @@ const inbound = (id, body = "hello") => ({
   from: { session_id: "sender", product: "fixture", name: "Sender", groups: ["team"] },
 });
 
-function ownerFixture({ busy = false } = {}) {
+// Pi is not running a task: the steer is refused and the owner appends.
+function idleSteer(sessionID, params) {
+  return { session_id: sessionID, message_id: params.message_id, accepted: false, reason: "idle" };
+}
+
+function ownerFixture({ busy = false, running = false } = {}) {
   const fake = fakeKit();
-  let id = "native-one", name = "Native", appended = [];
+  let id = "native-one", name = "Native", appended = [], steered = [];
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: id, name, cwd: "/work" };
+    if (method === "native.steer") {
+      assert.equal(params.run, null);
+      if (!running) return idleSteer(id, params);
+      steered.push(params);
+      return { session_id: id, message_id: params.message_id, accepted: true };
+    }
     if (method === "native.append") {
       if (busy) return { session_id: id, message_id: params.message_id, accepted: false, reason: "busy" };
       appended.push(params);
@@ -94,7 +105,11 @@ function ownerFixture({ busy = false } = {}) {
     throw new Error("unexpected native method");
   };
   const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
-  return { owner, fake, appended: () => appended, setBusy: (value) => { busy = value; }, setIdentity: (next, title = "") => { id = next; name = title; } };
+  return {
+    owner, fake, appended: () => appended, steered: () => steered,
+    setBusy: (value) => { busy = value; }, setRunning: (value) => { running = value; },
+    setIdentity: (next, title = "") => { id = next; name = title; },
+  };
 }
 
 async function ready(owner, id = "native-one", name = "Native") {
@@ -200,6 +215,7 @@ test("a session end during a drain append ends the drain without a fault", async
   let busy = true;
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") return idleSteer("native-one", params);
     if (method === "native.append") {
       if (busy) return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
       entered.resolve();
@@ -229,6 +245,7 @@ test("a same-ID reload during a drain append ends the old drain without a fault"
   let busy = true;
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") return idleSteer("native-one", params);
     if (method === "native.append") {
       if (busy) return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
       entered.resolve();
@@ -274,6 +291,40 @@ test("direct owner preserves FIFO busy wake, capacity, and tree gate", async () 
   assert.deepEqual(await f.fake.latest().deliver(inbound("overflow")), {
     disposition: "rejected", reason: "Pi delivery queue is full",
   });
+  await f.owner.close();
+});
+
+// While Pi runs a task a delivery goes into Pi's steering queue and is
+// answered injected; an idle session still starts a turn with it.
+test("a delivery while Pi runs a task is steered into it and answered injected", async () => {
+  const f = ownerFixture({ busy: true, running: true });
+  await ready(f.owner);
+  assert.deepEqual(await f.fake.latest().deliver(inbound("steer")), { disposition: "injected" });
+  assert.deepEqual(f.steered().map((item) => item.message_id), ["steer"]);
+  assert.deepEqual(f.appended(), []);
+  f.setRunning(false);
+  f.setBusy(false);
+  assert.deepEqual(await f.fake.latest().deliver(inbound("idle")), { disposition: "written" });
+  assert.deepEqual(f.appended().map((item) => item.message_id), ["idle"]);
+  await f.owner.close();
+});
+
+// Messages that waited while Pi was busy without a task (compaction) go into
+// the next task at its start, in order; a delivery that arrives while they
+// still wait keeps its place behind them.
+test("messages held while Pi was busy without a task are steered into the next task in order", async () => {
+  const f = ownerFixture({ busy: true });
+  await ready(f.owner);
+  assert.deepEqual(await f.fake.latest().deliver(inbound("one")), { disposition: "queued_for_next_turn" });
+  assert.deepEqual(await f.fake.latest().deliver(inbound("two")), { disposition: "queued_for_next_turn" });
+  f.setRunning(true);
+  assert.deepEqual(await f.fake.latest().deliver(inbound("three")), { disposition: "queued_for_next_turn" });
+  assert.deepEqual(await f.owner.call("owner.drain", {
+    session_id: "native-one", witness: "before_agent_start",
+  }), { session_id: "native-one", drained: 3 });
+  assert.deepEqual(f.steered().map((item) => item.message_id), ["one", "two", "three"]);
+  assert.deepEqual(f.appended(), []);
+  assert.deepEqual(await f.fake.latest().deliver(inbound("four")), { disposition: "injected" });
   await f.owner.close();
 });
 
@@ -346,6 +397,7 @@ test("direct owner uses the actual kit for hello, delivery, and Caller action", 
   let nativeID = "actual-native";
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: nativeID, name: "Actual", cwd: "/work" };
+    if (method === "native.steer") return idleSteer(nativeID, params);
     if (method === "native.append") {
       appended.push(params);
       return { session_id: nativeID, message_id: params.message_id, accepted: true };
@@ -384,6 +436,7 @@ test("replacement rejects an in-flight busy result from the prior native generat
   let id = "native-one";
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: id, name: "Native", cwd: "/work" };
+    if (method === "native.steer") return idleSteer(params.session_id, params);
     if (method === "native.append") {
       appendEntered.resolve();
       await releaseAppend.promise;
@@ -456,6 +509,7 @@ test("actual kit reconnect gates Caller work and never replays retained delivery
   const appended = [];
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: "reconnect-native", name: "Reconnect", cwd: "/work" };
+    if (method === "native.steer") return idleSteer("reconnect-native", params);
     if (method === "native.append") {
       if (busy) return { session_id: "reconnect-native", message_id: params.message_id, accepted: false, reason: "busy" };
       appended.push(params.message_id);

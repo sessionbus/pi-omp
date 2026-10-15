@@ -358,6 +358,36 @@ test("lane reports only its own rpc run, with the settle count and leaves", asyn
   assert.equal(native.aborted(), 0);
 });
 
+// An interactive session has no Run: a peer message goes into Pi's steering
+// queue while a native run is active (before_agent_start to agent_settled),
+// and run must be null.
+test("interactive native.steer steers into the running task and refuses an idle session", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const steer = (id, run = null) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: "peer", run });
+  const idle = (id) => ({ session_id: "interactive-1", message_id: id, accepted: false, reason: "idle" });
+  assert.deepEqual(await steer("early"), idle("early"));
+
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("steer-1"), { session_id: "interactive-1", message_id: "steer-1", accepted: true });
+  assert.deepEqual(sends, [{
+    message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
+    options: { triggerTurn: true, deliverAs: "steer" },
+  }]);
+  await assert.rejects(steer("token", runToken(1)), /run must be null/);
+
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  assert.deepEqual(await steer("late"), idle("late"));
+  assert.equal(sends.length, 1);
+  assert.equal(native.shutdown(), 0);
+});
+
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const queue = [

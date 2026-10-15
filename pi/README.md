@@ -36,6 +36,17 @@ history lock. Managed lanes retain the Go Worker, native RPC pipes, history
 lock, and direct native child; their extension bridge is an inherited anonymous
 socketpair rather than a filesystem endpoint.
 
+In a managed interactive terminal, a peer message that arrives while Pi is
+running a task goes into Pi's own steering queue, which the task reads at its
+next boundary; its receipt is `injected`. An idle session starts a turn with
+it (`written`). While Pi is busy without a task, for example compacting, the
+message waits in the extension's FIFO (`queued_for_next_turn`) and goes into
+the next task, in order. Pressing Escape in Pi's terminal aborts the task and
+clears Pi's queues (Pi 1.2.0 `interactive-mode.js:3891-3908`,
+`agent-session.js:1914-1922`). Typed messages return to the editor, but a
+steered peer message is dropped: its receipt stays `injected` and the message
+is not delivered again. This is accepted for now, as for Grok.
+
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:
 `--no-tools` without an overriding `--tools` list containing `sessionbus`, an
