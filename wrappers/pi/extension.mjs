@@ -6,7 +6,7 @@ import {
   BridgeClosedError,
 } from "../pifamily/extension/bridge.mjs";
 import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
-import { appendNative, customMessageType, describeNative, steerNative } from "./native.mjs";
+import { appendNative, customMessageType, describeNative, nativeLeaf, steerNative } from "./native.mjs";
 import { connectPiInteractivePeer } from "./peer.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
@@ -185,6 +185,9 @@ export function createPiExtension({
   let current;
   let failure;
   let settling = false;
+  // Pi runs one at a time and ends each with one agent_settled; this counts
+  // them so Go can tell the owned run's stdout frames from Pi's own.
+  let settledRuns = 0;
 
   function stop(ctx, error) {
     if (failure) return;
@@ -255,17 +258,19 @@ export function createPiExtension({
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
       case "native.steer": {
-        // Lane only for now: an interactive steer would sit in Pi's own queue,
-        // which the TUI clears on Escape; that is an open owner decision.
+        // Interactive delivery goes through native.append.
         if (launch.topology !== "lane") {
           throw new BridgeCallError("method_not_found", "Pi native.steer is unavailable in interactive topology");
         }
-        exactKeys(params, ["session_id", "message_id", "body"], "native.steer parameters");
+        exactKeys(params, ["session_id", "message_id", "body", "run"], "native.steer parameters");
         if (params.session_id !== record.session_id) {
           throw new BridgeCallError("stale_session", "Pi native session identity does not match");
         }
         throwIfAborted(signal);
-        const result = steer(record.pi, record.ctx, params, record.running);
+        // The Run's token, Pi's run state and the send are one synchronous
+        // step, so a steer made for an earlier Run never enters a later one.
+        const owned = typeof params.run === "string" && params.run === record.runToken;
+        const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };
         throwIfAborted(signal);
         if (result.accepted === false) {
           exactKeys(result, ["accepted", "reason"], "native.steer result");
@@ -327,7 +332,7 @@ export function createPiExtension({
     current = {
       pi, ctx, session_id: nativeID(info.session_id),
       controller: new AbortController(), branchSummaryBusy: false,
-      admittedMessages: new Map(), running: false,
+      admittedMessages: new Map(), running: false, runToken: null,
     };
     settling = false;
     const result = await hostCall(ctx, "owner.ready", {
@@ -375,6 +380,26 @@ export function createPiExtension({
     const { record } = live(ctx);
     const result = await hostCall(ctx, method, { session_id: record.session_id, ...params });
     validateEcho(result, record.session_id);
+  }
+
+  // Go answers the owned run's preflight with its token, and Pi's own work
+  // with null. Pi awaits this hook before the run goes on, so the record's
+  // run is still this one when the answer arrives.
+  async function lanePreflight(ctx, event) {
+    const { record } = live(ctx);
+    const result = await hostCall(ctx, "run.preflight", {
+      session_id: record.session_id,
+      prompt: boundedString(event.prompt, 1 << 20, "native preflight prompt", { empty: true }),
+      settling,
+      leaf: nativeLeaf(ctx),
+      settled: settledRuns,
+    });
+    exactKeys(result, ["session_id", "run"], "run.preflight response");
+    if (result.session_id !== record.session_id ||
+        (result.run !== null && (typeof result.run !== "string" || !/^[0-9a-f]{32}$/u.test(result.run)))) {
+      throw new Error("Pi run.preflight response is invalid");
+    }
+    if (current === record && record.running) record.runToken = result.run;
   }
 
   return function sessionbusPiExtension(pi) {
@@ -425,8 +450,10 @@ export function createPiExtension({
     });
 
     pi.on("input", (event, ctx) => {
-      if (launch.topology !== "lane") return { action: "continue" };
-      if (event.source === "rpc") settling = false;
+      // Only the lane's own rpc prompt starts its Run; other input is Pi's
+      // own work and is not reported.
+      if (launch.topology !== "lane" || event.source !== "rpc") return { action: "continue" };
+      settling = false;
       return (async () => {
         try {
           if (event.images?.length) throw new Error("Pi lane input does not support images");
@@ -443,22 +470,25 @@ export function createPiExtension({
       })();
     });
 
-    pi.on("before_agent_start", (_event, ctx) => {
+    pi.on("before_agent_start", (event, ctx) => {
       // Pi marks its run active before this hook and clears it only at
       // agent_settled (Pi 1.2.0 agent-session.js:1392, :686).
-      if (current) { current.branchSummaryBusy = false; current.running = true; }
+      if (current) { current.branchSummaryBusy = false; current.running = true; current.runToken = null; }
       if (launch.topology === "interactive") {
         return drain(ctx, "before_agent_start").catch((error) => stop(ctx, error));
       }
-      return laneWitness(ctx, "run.preflight", {
-        prompt: boundedString(_event.prompt, 1 << 20, "native preflight prompt", { empty: true }),
-        settling,
-      }).catch((error) => stop(ctx, error));
+      // A lane's Run is the run of its own rpc prompt: one started by a user
+      // message after that prompt's input and before the next settle. Any
+      // other run, including one a custom message starts, is Pi's own work:
+      // it gets no token and is not reported.
+      if (settling || event.messageType === "custom") return;
+      return lanePreflight(ctx, event).catch((error) => stop(ctx, error));
     });
 
     pi.on("agent_start", (_event, ctx) => {
-      if (launch.topology !== "lane") return;
-      return laneWitness(ctx, "run.start", { settling }).catch((error) => stop(ctx, error));
+      const token = current?.runToken;
+      if (launch.topology !== "lane" || !token) return;
+      return laneWitness(ctx, "run.start", { run: token, settling }).catch((error) => stop(ctx, error));
     });
 
     for (const type of ["message_start", "message_end"]) {
@@ -489,21 +519,26 @@ export function createPiExtension({
     pi.on("agent_settled", (_event, ctx) => {
       // Pi clears its active flag, then runs agent_settled handlers in
       // extension order: CLI first, then discovered. The managed extension is
-      // first, so this prefix marks settling before any await and before every
-      // other settled handler. It does not observe those later handlers: an
-      // ambient one can still start more native work after this witness. The
-      // lane currently rejects such work as outside the owned Run; whether it
-      // should is an open owner decision, and this handler does not change it.
+      // first, so this prefix counts the settle and marks settling before any
+      // await and before every other settled handler. Pi has saved the run's
+      // messages by now (agent-core awaits its listeners), so the leaf read
+      // here is the run's last entry. Work another handler starts after this
+      // is Pi's own: by owner decision a lane's Run ends when Pi settles.
+      settledRuns += 1;
       settling = true;
-      if (current) { current.branchSummaryBusy = false; current.running = false; }
+      const record = current;
+      const token = record?.runToken ?? null;
+      if (record) { record.branchSummaryBusy = false; record.running = false; record.runToken = null; }
       if (launch.topology === "interactive") {
-        const record = current;
         if (record) record.settledAppend = "open";
         return drain(ctx, "agent_settled").catch((error) => stop(ctx, error)).finally(() => {
           if (record) record.settledAppend = undefined;
         });
       }
-      return laneWitness(ctx, "run.settling", {}).catch((error) => stop(ctx, error));
+      if (!token) return;
+      let leaf;
+      try { leaf = nativeLeaf(ctx); } catch (error) { stop(ctx, error); return; }
+      return laneWitness(ctx, "run.settling", { run: token, leaf }).catch((error) => stop(ctx, error));
     });
 
     pi.on("session_before_tree", async (_event, ctx) => {

@@ -55,3 +55,10 @@ steering queue, which the running task reads at its next boundary (after the
 current tool calls, before its next model request). Its receipt is
 `injected`: handed to the running task, not yet seen by the model. Without
 an active Run the lane is not running and the daemon starts a later Run.
+
+A lane's Run ends when Pi settles its run. Pi can then run work of its own,
+for example a run another extension starts; that work is not part of the
+caller's Run, is not in its result and does not end the lane. A later Run
+waits for such work to settle. If Pi still refuses the Run's prompt, that
+Run is unavailable with Pi's answer and the lane stays open. Dialogs that
+Pi's own work raises in a lane are cancelled, as the lane's own are.

@@ -10,6 +10,17 @@ function nativeIdentity(ctx) {
   return id;
 }
 
+// The session leaf: the last entry of the current branch, or null before the
+// first one. A lane has no branch navigation, so it is also the last saved.
+export function nativeLeaf(ctx) {
+  const leaf = ctx.sessionManager.getLeafId();
+  if (leaf === null) return null;
+  if (typeof leaf !== "string" || !leaf.length || Buffer.byteLength(leaf) > 256 || /[\s\0]/u.test(leaf)) {
+    throw new Error("Pi native session leaf is invalid");
+  }
+  return leaf;
+}
+
 export function describeNative(pi, ctx) {
   const session_id = nativeIdentity(ctx);
   const name = pi.getSessionName() ?? "";

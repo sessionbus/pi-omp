@@ -11,12 +11,15 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
 	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 func TestPiOwnedRunJoinsNativeWitnessesAndCurrentHistory(t *testing.T) {
@@ -110,38 +113,407 @@ func TestPiOwnedInterruptJoinsAbortAndNativeTerminal(t *testing.T) {
 	}
 }
 
-// While its Run's native prompt is admitted, the lane steers a delivery into
-// that running task through the managed extension instead of answering
-// NotRunning; without an active Run it is still not running.
-func TestPiLaneSteersDeliveryIntoActiveRun(t *testing.T) {
-	wrapper, cwd := newPiTestWrapper(t, "run-abort")
-	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
-	delivery := sessionkit.DeliveryRequest{MessageID: "steer-1", Body: "peer note",
-		From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"}}
-	run := &sessionkit.Run{}
-	var notRunning *sessionkit.ProtocolError
-	if _, err := wrapper.Deliver(context.Background(), delivery, run); !errors.As(err, &notRunning) || notRunning.Code != -32004 {
-		t.Fatalf("delivery without an active Run = %v", err)
-	}
-	turn, err := wrapper.startNativeTurn(context.Background(), run, "owned prompt")
+// piSDKLane drives a Pi lane through the real SDK Worker, as the daemon does,
+// so its Runs are the Worker's own.
+type piSDKLane struct {
+	t       *testing.T
+	wrapper *Wrapper
+	conn    net.Conn
+	reader  *bufio.Reader
+}
+
+func newPiSDKLane(t *testing.T, mode string) *piSDKLane {
+	t.Helper()
+	wrapper, cwd := newPiTestWrapper(t, mode)
+	listener, err := net.Listen("unix", wrapper.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper.mu.Lock()
-	wrapper.run = run
-	wrapper.mu.Unlock()
-	receipt, err := wrapper.Deliver(context.Background(), delivery, run)
-	if err != nil || receipt.Disposition != "injected" {
-		t.Fatalf("delivery into the active Run = %+v, %v", receipt, err)
-	}
-	if err = turn.Interrupt(context.Background()); err != nil {
+	t.Cleanup(func() { _ = listener.Close() })
+	t.Setenv(host.SocketEnv, wrapper.socket)
+	t.Setenv(host.TokenEnv, "pi-worker-token")
+	t.Setenv(host.LocalKeyEnv, "")
+	worker := sessionkit.NewWorker(wrapper)
+	wrapper.SetCaller(worker.Caller())
+	wrapper.SetShutdown(worker.Shutdown)
+	go func() { _ = worker.Serve(context.Background()) }()
+	connection, err := listener.Accept()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := turn.Wait(context.Background()); err != nil || result.Outcome != "interrupted" {
-		t.Fatalf("interrupted result = %+v, %v", result, err)
+	t.Cleanup(func() {
+		_ = connection.Close()
+		worker.Shutdown()
+		<-worker.Closed()
+		if wrapper.process != nil {
+			wrapper.process.Force()
+			_ = wrapper.process.Wait()
+			_ = wrapper.process.Cleanup()
+		}
+	})
+	lane := &piSDKLane{t: t, wrapper: wrapper, conn: connection, reader: bufio.NewReader(connection)}
+	hello := lane.read()
+	if hello.Method != "session.hello" {
+		t.Fatalf("first Worker frame = %+v", hello)
+	}
+	lane.answer(hello)
+	lane.request(1, "session.open", sessionkit.OpenRequest{Name: "managed@local", Groups: []string{}, Open: sessionkit.OpenOptions{Cwd: cwd}})
+	if opened := lane.read(); opened.ID != 1 || opened.Error != nil {
+		t.Fatalf("Open response = %+v", opened)
+	}
+	return lane
+}
+
+func (lane *piSDKLane) request(id int64, method string, params any) {
+	lane.t.Helper()
+	body, err := protocol.RequestBytes(id, method, params)
+	if err == nil {
+		_, err = lane.conn.Write(body)
+	}
+	if err != nil {
+		lane.t.Fatal(err)
+	}
+}
+
+func (lane *piSDKLane) answer(frame protocol.Frame) {
+	lane.t.Helper()
+	body, err := protocol.ResultBytes(frame.ID, frame.Method, struct{}{})
+	if err == nil {
+		_, err = lane.conn.Write(body)
+	}
+	if err != nil {
+		lane.t.Fatal(err)
+	}
+}
+
+func (lane *piSDKLane) read() protocol.Frame {
+	lane.t.Helper()
+	if err := lane.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		lane.t.Fatal(err)
+	}
+	line, err := lane.reader.ReadBytes('\n')
+	if err != nil {
+		lane.t.Fatal(err)
+	}
+	frame, err := protocol.DecodeFrame(line[:len(line)-1])
+	if err != nil {
+		lane.t.Fatal(err)
+	}
+	return frame
+}
+
+// terminal reads until the Run's turn.ready, acknowledges it and returns its
+// state, outcome and reason. Responses read meanwhile go to responses.
+func (lane *piSDKLane) terminal(responses map[int64]protocol.Frame) (string, string, string) {
+	lane.t.Helper()
+	for {
+		frame := lane.read()
+		if frame.Method != "turn.ready" {
+			responses[frame.ID] = frame
+			continue
+		}
+		var ready struct {
+			State   string `json:"state"`
+			Outcome string `json:"outcome"`
+			Reason  string `json:"reason"`
+		}
+		if json.Unmarshal(frame.Params, &ready) != nil {
+			lane.t.Fatalf("turn.ready = %s", frame.Params)
+		}
+		lane.answer(frame)
+		return ready.State, ready.Outcome, ready.Reason
+	}
+}
+
+// The lane steers a delivery into its running Run: the Worker's own admitted
+// Run, whose steer carries the token Go got at that Run's preflight. Without
+// a running Run it is not running, and the Run still ends by interrupt.
+func TestPiLaneSteersDeliveryIntoActiveRun(t *testing.T) {
+	lane := newPiSDKLane(t, "run-abort")
+	delivery := sessionkit.DeliveryRequest{MessageID: "steer-1", Body: "peer note",
+		From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}}}
+	var notRunning *sessionkit.ProtocolError
+	if _, err := lane.wrapper.Deliver(context.Background(), delivery, nil); !errors.As(err, &notRunning) || notRunning.Code != -32004 {
+		t.Fatalf("delivery without an active Run = %v", err)
+	}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "owned prompt"})
+	if executing := lane.read(); executing.ID != 2 || executing.Error != nil {
+		t.Fatalf("execute response = %+v", executing)
+	}
+	deadline := nativeRPCTestContext(t)
+	for admitted := false; !admitted; {
+		lane.wrapper.mu.Lock()
+		turn := lane.wrapper.active
+		lane.wrapper.mu.Unlock()
+		if turn != nil {
+			turn.mu.Lock()
+			admitted = turn.admitted
+			turn.mu.Unlock()
+		}
+		select {
+		case <-deadline.Done():
+			t.Fatal("owned Run was not admitted")
+		default:
+		}
+	}
+	lane.request(3, "message.deliver", delivery)
+	steered := lane.read()
+	var receipt sessionkit.DeliveryReceipt
+	if steered.ID != 3 || steered.Error != nil || protocol.UnmarshalResult("message.deliver", steered.Result, &receipt) != nil ||
+		receipt.Disposition != "injected" {
+		t.Fatalf("delivery into the active Run = %+v, decoded %+v", steered, receipt)
+	}
+	lane.request(4, "turn.interrupt", map[string]string{"session_id": "pi-fresh@local"})
+	responses := map[int64]protocol.Frame{}
+	if state, outcome, _ := lane.terminal(responses); state != "done" || outcome != "interrupted" {
+		t.Fatalf("interrupted terminal = %s, %s", state, outcome)
+	}
+	interrupted, ok := responses[4]
+	if !ok {
+		interrupted = lane.read()
+	}
+	if interrupted.ID != 4 || interrupted.Error != nil {
+		t.Fatalf("interrupt response = %+v", interrupted)
+	}
+	if _, err := lane.wrapper.Deliver(context.Background(), delivery, nil); !errors.As(err, &notRunning) || notRunning.Code != -32004 {
+		t.Fatalf("delivery after the Run = %v", err)
+	}
+}
+
+type piHeldConn struct {
+	net.Conn
+	armed            atomic.Bool
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (connection *piHeldConn) Read(body []byte) (int, error) {
+	n, err := connection.Conn.Read(body)
+	if n > 0 && connection.armed.Load() {
+		connection.once.Do(func() { close(connection.entered) })
+		<-connection.release
+	}
+	return n, err
+}
+
+// The worker dispatches a delivery apart from its Run, so a steer for one Run
+// can reach the extension after a later Run holds the same native session.
+// The steer carries its own Run's token and the extension, which holds the
+// later Run's, refuses it.
+func TestPiOldRunSteerCarriesItsRunToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	left, right := net.Pipe()
+	held := &piHeldConn{Conn: right, entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held.release) }) }
+	defer release()
+	oldRun, nextRun := &sessionkit.Run{}, &sessionkit.Run{}
+	oldTurn := &piNativeTurn{admitted: true, token: "old-run-token"}
+	wrapper := &Wrapper{opened: true, ctx: ctx, id: "native", run: oldRun, active: oldTurn}
+	var tokenMu sync.Mutex
+	extensionToken := "old-run-token"
+	received := make(chan string, 1)
+	hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, nil, pifamily.BridgeLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeBridge, err := pifamily.NewBridge(held, pifamily.BridgeNative, func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+		var steer struct {
+			SessionID string `json:"session_id"`
+			MessageID string `json:"message_id"`
+			Run       string `json:"run"`
+		}
+		if method != "native.steer" || json.Unmarshal(raw, &steer) != nil {
+			return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected method")
+		}
+		received <- steer.Run
+		tokenMu.Lock()
+		current := extensionToken
+		tokenMu.Unlock()
+		if steer.Run != current {
+			return json.Marshal(map[string]any{"session_id": steer.SessionID, "message_id": steer.MessageID, "accepted": false, "reason": "idle"})
+		}
+		return json.Marshal(map[string]any{"session_id": steer.SessionID, "message_id": steer.MessageID, "accepted": true})
+	}, pifamily.BridgeLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		release()
+		_ = hostBridge.Close()
+		_ = nativeBridge.Close()
+	}()
+	if err = hostBridge.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = nativeBridge.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wrapper.bridge = hostBridge
+	held.armed.Store(true)
+	type outcome struct {
+		receipt sessionkit.DeliveryReceipt
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		receipt, err := wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "old-run-message", Body: "note",
+			From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"}}, oldRun)
+		done <- outcome{receipt, err}
+	}()
+	select {
+	case <-held.entered:
+	case <-ctx.Done():
+		t.Fatal("steer frame was not held", ctx.Err())
+	}
+	oldTurn.mu.Lock()
+	oldTurn.nativeSettled = true
+	oldTurn.mu.Unlock()
+	wrapper.mu.Lock()
+	wrapper.run, wrapper.active = nextRun, &piNativeTurn{admitted: true, token: "next-run-token"}
+	wrapper.mu.Unlock()
+	tokenMu.Lock()
+	extensionToken = "next-run-token"
+	tokenMu.Unlock()
+	release()
+	var result outcome
+	select {
+	case result = <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	select {
+	case token := <-received:
+		if token != "old-run-token" {
+			t.Fatalf("steer for the old Run carried token %q", token)
+		}
+	case <-ctx.Done():
+		t.Fatal("steer was not dispatched", ctx.Err())
+	}
+	var notRunning *sessionkit.ProtocolError
+	if !errors.As(result.err, &notRunning) || notRunning.Code != -32004 {
+		t.Fatalf("old Run steer during a later Run = %+v, %v", result.receipt, result.err)
+	}
+}
+
+// Owner decision: a lane's Run ends when Pi settles, and work Pi runs of its
+// own neither ends the lane nor reaches a Run's result. Each mode puts a run
+// of Pi's own where it can cross into a Run: after its settle (its entries are
+// saved before the Run's history is read), before its preflight (a send
+// another extension deferred during the last settle goes first), with stdout
+// frames read only after its preflight, and asking for a dialog after the
+// owned settle, which the lane cancels as it cancels its own run's dialogs.
+func TestPiLaneKeepsPiOwnWorkOutOfItsRuns(t *testing.T) {
+	for _, test := range []struct{ name, mode string }{
+		{"after the owned settle", "run-own-after"},
+		{"before the owned preflight", "run-own-before"},
+		{"stdout read after the owned preflight", "run-own-lag"},
+		{"dialog after the owned settle", "run-own-dialog"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wrapper, cwd := newPiTestWrapper(t, test.mode)
+			if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			for run := 1; run <= 2; run++ {
+				turn, err := wrapper.startNativeTurn(ctx, nil, fmt.Sprintf("owned prompt %d", run))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := turn.Wait(ctx)
+				if want := fmt.Sprintf("native answer %d", run); err != nil || result.Outcome != "completed" || result.Result != want {
+					t.Fatalf("Run %d result = %+v, %v", run, result, err)
+				}
+			}
+			if err := wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Pi refuses a prompt while it runs work of its own, so the next Run waits
+// for that run to settle before it reads history and sends its prompt. A
+// refusal that still comes ends the Run without failing the lane.
+func TestPiNextRunWaitsForPiOwnRun(t *testing.T) {
+	rpc, peer := newNativeRPCTest(t, nil, nativeRPCLimits{})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test complete")) })
+	wrapper := &Wrapper{ctx: ctx, cancel: cancel, rpc: rpc, opened: true, id: "native", extension: "/managed.mjs", ownWork: true}
+	if err := wrapper.observeRunEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan error, 1)
+	go func() {
+		_, err := wrapper.startNativeTurn(context.Background(), nil, "owned prompt")
+		started <- err
+	}()
+	deadline := nativeRPCTestContext(t)
+	for parked := false; !parked; {
+		wrapper.mu.Lock()
+		parked = wrapper.nativeChanged != nil
+		wrapper.mu.Unlock()
+		select {
+		case <-deadline.Done():
+			t.Fatal("next Run did not wait for Pi's own run")
+		case err := <-started:
+			t.Fatalf("next Run went on during Pi's own run: %v", err)
+		default:
+		}
+	}
+	if err := wrapper.observeRunEvent("agent_settled", json.RawMessage(`{"type":"agent_settled"}`)); err != nil {
+		t.Fatal(err)
+	}
+	request := peer.read(t)
+	if nativeRPCField(t, request, "type") != "get_entries" {
+		t.Fatalf("first command after Pi's own run = %#v", request)
+	}
+	peer.write(t, `{"id":"`+nativeRPCField(t, request, "id")+`","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}`)
+	request = peer.read(t)
+	if nativeRPCField(t, request, "type") != "prompt" {
+		t.Fatalf("second command = %#v", request)
+	}
+	peer.write(t, `{"id":"`+nativeRPCField(t, request, "id")+`","type":"response","command":"prompt","success":false,"error":"Agent is already processing."}`)
+	var refusal *piPromptRefusal
+	if err := <-started; !errors.As(err, &refusal) || !strings.Contains(err.Error(), "Agent is already processing") {
+		t.Fatalf("refused prompt = %v", err)
+	}
+	wrapper.mu.Lock()
+	active, failure := wrapper.active, wrapper.failure
+	wrapper.mu.Unlock()
+	if active != nil || failure != nil {
+		t.Fatalf("refused prompt left turn %v, lane failure %v", active, failure)
+	}
+}
+
+// Pi refuses the next Run's prompt while it runs work of its own. That Run's
+// record is unavailable with Pi's answer, and the lane stays open for the
+// following Run.
+func TestPiRefusedPromptEndsOnlyItsRun(t *testing.T) {
+	lane := newPiSDKLane(t, "run-refuse")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "refused prompt"})
+	if state, _, reason := lane.terminal(responses); state != "unavailable" || !strings.Contains(reason, "Agent is already processing") {
+		t.Fatalf("refused Run = %s, %q", state, reason)
+	}
+	lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "owned prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("Run after the refusal = %s, %s, %q", state, outcome, reason)
+	}
+	for _, id := range []int64{2, 3} {
+		if frame, ok := responses[id]; !ok || frame.Error != nil {
+			t.Fatalf("execute %d response = %+v", id, frame)
+		}
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after a refused prompt: %v", failure)
 	}
 }
 
@@ -396,7 +768,7 @@ func TestPiRunAllowsLaterNativeUsersAndFiltersExtensionErrors(t *testing.T) {
 	if err := turn.recordInput("rpc", "original", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := turn.recordPreflight("expanded", false); err != nil {
+	if _, err := turn.recordPreflight("expanded", false, "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := turn.recordStart(false); err != nil {
@@ -428,7 +800,7 @@ func TestPiReconcilesCrossTransportStartAtSettledBoundary(t *testing.T) {
 	if err := turn.recordInput("rpc", "original", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := turn.recordPreflight("expanded", false); err != nil {
+	if _, err := turn.recordPreflight("expanded", false, "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := turn.recordStart(false); err != nil {
@@ -436,7 +808,7 @@ func TestPiReconcilesCrossTransportStartAtSettledBoundary(t *testing.T) {
 	}
 	// The bridge settling witness can be dispatched before Go reads an earlier
 	// stdout start. Pi's source order is reconciled where stdout itself settles.
-	if err := turn.recordSettling(); err != nil {
+	if err := turn.recordSettling(""); err != nil {
 		t.Fatal(err)
 	}
 	if err := turn.recordEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
@@ -453,13 +825,13 @@ func TestPiReconcilesCrossTransportStartAtSettledBoundary(t *testing.T) {
 	if err := missing.recordInput("rpc", "original", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := missing.recordPreflight("expanded", false); err != nil {
+	if _, err := missing.recordPreflight("expanded", false, "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := missing.recordStart(false); err != nil {
 		t.Fatal(err)
 	}
-	if err := missing.recordSettling(); err != nil {
+	if err := missing.recordSettling(""); err != nil {
 		t.Fatal(err)
 	}
 	if err := missing.recordEvent("agent_settled", json.RawMessage(`{"type":"agent_settled"}`)); err == nil {

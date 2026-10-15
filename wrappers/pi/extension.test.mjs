@@ -83,6 +83,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     setID(value) { id = value; },
     setName(value) { name = value; },
     setIdle(value) { idle = value; },
+    setLeaf(value) { leaf = value === null ? undefined : { id: value }; },
     pending: () => pending,
     async completeMessage() {
       assert.ok(pending);
@@ -107,8 +108,14 @@ function launch(topology) {
   return { socket: "/public/bus.sock", name: "managed", groups: ["team"], topology };
 }
 
-function fakeConnection({ topology, queue = [] } = {}) {
+// A run token as Go mints it: 32 hex digits.
+function runToken(index) {
+  return index.toString(16).padStart(32, "0");
+}
+
+function fakeConnection({ topology, queue = [], preflightRuns } = {}) {
   const calls = [];
+  let preflights = 0;
   const done = deferred();
   let nativeHandler;
   let closes = 0;
@@ -118,10 +125,12 @@ function fakeConnection({ topology, queue = [] } = {}) {
       if (signal?.aborted) throw signal.reason;
       calls.push({ method, params });
       switch (method) {
+        case "run.preflight":
+          preflights++;
+          return { session_id: params.session_id, run: preflightRuns ? preflightRuns.shift() : runToken(preflights) };
         case "owner.ready":
         case "session_end":
         case "run.input":
-        case "run.preflight":
         case "run.start":
         case "run.settling":
           return { session_id: params.session_id };
@@ -225,13 +234,13 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("before_agent_start", { type: "before_agent_start", prompt: "expanded" });
   await native.emit("agent_start");
   await native.emit("agent_settled");
+  // Work that starts after the settle is Pi's own and is not reported.
   await native.emit("agent_start");
   assert.deepEqual(owner.calls.splice(0), [
     { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "original", settling: false } },
-    { method: "run.preflight", params: { session_id: "native-1", prompt: "expanded", settling: false } },
-    { method: "run.start", params: { session_id: "native-1", settling: false } },
-    { method: "run.settling", params: { session_id: "native-1" } },
-    { method: "run.start", params: { session_id: "native-1", settling: true } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "expanded", settling: false, leaf: null, settled: 0 } },
+    { method: "run.start", params: { session_id: "native-1", run: runToken(1), settling: false } },
+    { method: "run.settling", params: { session_id: "native-1", run: runToken(1), leaf: null } },
   ]);
 
   const result = await native.pi.tool.execute("call-1", { action: "list", arguments: {} }, undefined, undefined, native.ctx);
@@ -254,22 +263,25 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
 });
 
 // A lane puts a peer message in Pi's steering queue only while its own run is
-// active (before_agent_start to agent_settled); the steered message's events
-// match its admitted delivery. Pi reads that queue at the running task's next
+// active (before_agent_start to agent_settled) and only for that run's token,
+// checked in the same step as the send; the steered message's events match
+// its admitted delivery. Pi reads that queue at the running task's next
 // boundary (agent-core agent-loop.js:183-195).
-test("lane native.steer steers into the running task and refuses an idle session", async () => {
+test("lane native.steer steers only for the running Run's token", async () => {
   const native = nativeFixture();
   const sends = [];
   native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
   const owner = fakeConnection({ topology: "lane" });
   createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
   await native.emit("session_start", { type: "session_start", reason: "startup" });
-  const steer = (id) => owner.native("native.steer", { session_id: "native-1", message_id: id, body: "peer" });
-  assert.deepEqual(await steer("early"), { session_id: "native-1", message_id: "early", accepted: false, reason: "idle" });
+  const steer = (id, run) => owner.native("native.steer", { session_id: "native-1", message_id: id, body: "peer", run });
+  const idle = (id) => ({ session_id: "native-1", message_id: id, accepted: false, reason: "idle" });
+  assert.deepEqual(await steer("early", runToken(1)), idle("early"));
 
-  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "expanded" });
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
   native.setIdle(false);
-  assert.deepEqual(await steer("steer-1"), { session_id: "native-1", message_id: "steer-1", accepted: true });
+  assert.deepEqual(await steer("steer-1", runToken(1)), { session_id: "native-1", message_id: "steer-1", accepted: true });
   assert.deepEqual(sends, [{
     message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
     options: { triggerTurn: true, deliverAs: "steer" },
@@ -282,8 +294,68 @@ test("lane native.steer steers into the running task and refuses an idle session
 
   native.setIdle(true);
   await native.emit("agent_settled");
-  assert.deepEqual(await steer("late"), { session_id: "native-1", message_id: "late", accepted: false, reason: "idle" });
-  assert.equal(sends.length, 1);
+  assert.deepEqual(await steer("late", runToken(1)), idle("late"));
+
+  // A steer made for the first Run that arrives during the next Run is
+  // refused; the next Run's own steer is accepted.
+  await native.emit("input", { type: "input", source: "rpc", text: "second" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "second" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("stale", runToken(1)), idle("stale"));
+  assert.deepEqual(await steer("steer-2", runToken(2)), { session_id: "native-1", message_id: "steer-2", accepted: true });
+  assert.deepEqual(sends.map(({ message: sent }) => sent.details.message_id), ["steer-1", "steer-2"]);
+  await assert.rejects(owner.native("native.steer", { session_id: "native-1", message_id: "no-run", body: "peer" }), /fields are invalid/);
+});
+
+// Only the lane's own rpc prompt starts its Run (owner decision: the Run ends
+// when Pi settles). Input from elsewhere, a run a custom message starts, and
+// any run after a settle until the next rpc prompt are Pi's own work: none is
+// reported or gets a token, and a run Go answers null for is not reported
+// further. The preflight carries the leaf and the count of settled Pi runs;
+// the settle carries the leaf where the owned run ended.
+test("lane reports only its own rpc run, with the settle count and leaves", async () => {
+  const native = nativeFixture();
+  const owner = fakeConnection({ topology: "lane", preflightRuns: [runToken(1), null] });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  owner.calls.splice(0);
+
+  native.setLeaf("before-run");
+  await native.emit("input", { type: "input", source: "rpc", text: "owned" });
+  assert.deepEqual(await native.emit("input", { type: "input", source: "extension", text: "mid-run" }), { action: "continue" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "owned" });
+  await native.emit("agent_start");
+  native.setLeaf("owned-answer");
+  await native.emit("agent_settled");
+
+  assert.deepEqual(await native.emit("input", { type: "input", source: "extension", text: "own" }), { action: "continue" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "own" });
+  await native.emit("agent_start");
+  await native.emit("agent_settled");
+  await native.emit("before_agent_start", {
+    type: "before_agent_start", messageType: "custom", message: { role: "custom", customType: "other", content: "own" },
+  });
+  await native.emit("agent_start");
+  native.setLeaf("own-answer");
+  await native.emit("agent_settled");
+  assert.deepEqual(owner.calls.splice(0), [
+    { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "owned", settling: false } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "owned", settling: false, leaf: "before-run", settled: 0 } },
+    { method: "run.start", params: { session_id: "native-1", run: runToken(1), settling: false } },
+    { method: "run.settling", params: { session_id: "native-1", run: runToken(1), leaf: "owned-answer" } },
+  ]);
+
+  // The next preflight counts every settled run, the lane's and Pi's own.
+  await native.emit("input", { type: "input", source: "rpc", text: "next" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "next" });
+  await native.emit("agent_start");
+  await native.emit("agent_settled");
+  assert.deepEqual(owner.calls.splice(0), [
+    { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "next", settling: false } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "next", settling: false, leaf: "own-answer", settled: 3 } },
+  ]);
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
 });
 
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {

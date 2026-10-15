@@ -46,6 +46,14 @@ type Wrapper struct {
 	closeOnce    sync.Once
 	closeErr     error
 	workers      sync.WaitGroup
+
+	// Stdout run state: whether a Pi run is between agent_start and its
+	// agent_settled, how many have settled, and whether Pi can run work of
+	// its own (an owned run settled or Pi refused an owned prompt).
+	nativeRunning bool
+	nativeSettles int
+	nativeChanged chan struct{}
+	ownWork       bool
 }
 
 type piOwnerReady struct {
@@ -328,34 +336,59 @@ func (p *Wrapper) handleBridge(ctx context.Context, method string, raw json.RawM
 			SessionID string          `json:"session_id"`
 			Prompt    string          `json:"prompt"`
 			Settling  json.RawMessage `json:"settling"`
+			Leaf      json.RawMessage `json:"leaf"`
+			Settled   json.RawMessage `json:"settled"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id", "prompt", "settling"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"session_id", "prompt", "settling", "leaf", "settled"}, &request); err == nil {
 			var settling bool
+			var leaf, token string
+			var settled int
 			settling, err = piBridgeBool(request.Settling)
 			if err == nil {
-				err = p.recordRunPreflight(request.SessionID, request.Prompt, settling)
+				leaf, err = entryReference(request.Leaf)
 			}
-			result = map[string]string{"session_id": request.SessionID}
+			if err == nil {
+				settled, err = piBridgeCount(request.Settled)
+			}
+			if err == nil {
+				token, err = p.recordRunPreflight(request.SessionID, request.Prompt, settling, leaf, settled)
+			}
+			// A null run is Pi's own work, not this lane's Run.
+			var run *string
+			if token != "" {
+				run = &token
+			}
+			result = struct {
+				SessionID string  `json:"session_id"`
+				Run       *string `json:"run"`
+			}{request.SessionID, run}
 		}
 	case "run.start":
 		var request struct {
 			SessionID string          `json:"session_id"`
+			Run       string          `json:"run"`
 			Settling  json.RawMessage `json:"settling"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id", "settling"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"session_id", "run", "settling"}, &request); err == nil {
 			var settling bool
 			settling, err = piBridgeBool(request.Settling)
 			if err == nil {
-				err = p.recordRunStart(request.SessionID, settling)
+				err = p.recordRunStart(request.SessionID, request.Run, settling)
 			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
 	case "run.settling":
 		var request struct {
-			SessionID string `json:"session_id"`
+			SessionID string          `json:"session_id"`
+			Run       string          `json:"run"`
+			Leaf      json.RawMessage `json:"leaf"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id"}, &request); err == nil {
-			err = p.recordRunSettling(request.SessionID)
+		if err = decodePiBridge(raw, []string{"session_id", "run", "leaf"}, &request); err == nil {
+			var leaf string
+			leaf, err = entryReference(request.Leaf)
+			if err == nil {
+				err = p.recordRunSettling(request.SessionID, request.Run, leaf)
+			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
 	default:
@@ -378,6 +411,15 @@ func piBridgeBool(raw json.RawMessage) (bool, error) {
 		return false, nil
 	}
 	return false, errors.New("Pi bridge boolean is invalid")
+}
+
+// JSON null decodes into an int without error, so it is refused first.
+func piBridgeCount(raw json.RawMessage) (int, error) {
+	var count int
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &count) != nil || count < 0 {
+		return 0, errors.New("Pi bridge count is invalid")
+	}
+	return count, nil
 }
 
 func decodePiBridge(raw json.RawMessage, fields []string, target any) error {
@@ -587,7 +629,10 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 // Deliver steers a message into the lane's running task: while this Run's
 // native prompt is admitted and not settled, the managed extension puts it in
 // Pi's steering queue, which the running task reads at its next boundary.
-// Otherwise the lane is not running and the daemon starts a later Run.
+// The steer carries the Run's token; the extension checks it, Pi's run state
+// and sends in one synchronous step, so a steer for this Run cannot enter a
+// later one. Otherwise the lane is not running and the daemon starts a later
+// Run.
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	body, err := host.RenderNativeMessage(request)
 	if err != nil {
@@ -609,8 +654,9 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	}
 	turn.mu.Lock()
 	running := turn.admitted && !turn.nativeSettled
+	token := turn.token
 	turn.mu.Unlock()
-	if !running {
+	if !running || token == "" {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
 	var answer struct {
@@ -619,7 +665,7 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		Accepted  bool   `json:"accepted"`
 		Reason    string `json:"reason"`
 	}
-	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body}, &answer); err != nil {
+	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}, &answer); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	if answer.SessionID != id || answer.MessageID != request.MessageID {
