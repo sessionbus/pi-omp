@@ -146,18 +146,38 @@ test("tool call while the Peer is not admitted fails at once with not_connected"
 // Preserves main's Go owner, interactive_owner.go:358-362: a result that
 // returns after the owner generation changed is stale_session, not a failure
 // of the session.
+// A same-ID reload retires the old Peer and joins its work before the new Peer
+// is installed, so the held result returns while no Peer is current.
 test("tool result after a same-ID Peer rotation is stale_session", async () => {
   const f = ownerFixture();
   await ready(f.owner);
-  const held = deferred();
-  const entered = deferred();
-  f.fake.latest().caller.action = async () => { entered.resolve(); return held.promise; };
+  const old = f.fake.latest();
+  const held = deferred(), entered = deferred(), retiring = deferred();
+  old.caller.action = async () => { entered.resolve(); return held.promise; };
+  const shutdown = old.shutdown.bind(old);
+  old.shutdown = () => { retiring.resolve(); shutdown(); };
   const call = toolCall(f.owner);
   await entered.promise;
   await f.owner.call("session_end", { topology: "interactive", session_id: "native-one", reason: "reload" });
-  await ready(f.owner);
+  const rotated = ready(f.owner);
+  await retiring.promise;
   held.resolve({ sessions: [] });
   await assert.rejects(call, bridgeError("stale_session", "Pi tool call crossed a native owner generation"));
+  await rotated;
+  assert.notStrictEqual(f.fake.latest(), old);
+  await f.owner.close();
+});
+
+// A malformed session id is a protocol error, as on the successor base; only
+// a well-formed id of another generation is stale_session.
+test("tool call with a malformed session id stays a protocol error", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  for (const session of [null, 7, {}, [], "", "bad\0id", "x".repeat(257)]) {
+    await assert.rejects(toolCall(f.owner, session),
+      (error) => !(error instanceof BridgeCallError) && /invalid Pi interactive tool call/.test(error.message));
+  }
+  assert.deepEqual(f.fake.records.filter(({ type }) => type === "action"), []);
   await f.owner.close();
 });
 
@@ -396,15 +416,30 @@ test("actual kit reconnect gates Caller work and never replays retained delivery
   assert.deepEqual(await firstConnection.call("message.deliver", inbound("retained-reconnect")), { disposition: "queued_for_next_turn" });
   firstConnection.close();
   await retry.promise;
-  const action = owner.call("tool.call", {
-    session_id: "reconnect-native", call_id: "after-reconnect", action: "list", arguments: {},
-  });
+  // As main's Go owner (interactive_owner.go:830-832), a call while the Peer is
+  // reconnecting fails at once with not_connected; it does not wait.
+  await assert.rejects(owner.call("tool.call", {
+    session_id: "reconnect-native", call_id: "while-disconnected", action: "list", arguments: {},
+  }), (error) => error instanceof BridgeCallError && error.code === "tool_error" && error.message === "not_connected");
   scheduled();
   await secondHello.promise;
   assert.equal(listCount, 0);
   assert.deepEqual(appended, []);
   releaseSecond.resolve();
-  assert.deepEqual((await action).result, { sessions: [] });
+  // Fresh calls until the Peer is admitted again: earlier ones fail with
+  // not_connected without reaching the daemon, so exactly one list arrives.
+  let fresh;
+  for (let attempt = 0; attempt < 200 && fresh === undefined; attempt++) {
+    try {
+      fresh = await owner.call("tool.call", {
+        session_id: "reconnect-native", call_id: `after-reconnect-${attempt}`, action: "list", arguments: {},
+      });
+    } catch (error) {
+      assert.ok(error instanceof BridgeCallError && error.code === "tool_error" && error.message === "not_connected", String(error));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  assert.deepEqual(fresh?.result, { sessions: [] });
   assert.equal(listCount, 1);
   busy = false;
   assert.equal((await owner.call("owner.drain", { session_id: "reconnect-native", witness: "agent_settled" })).drained, 1);

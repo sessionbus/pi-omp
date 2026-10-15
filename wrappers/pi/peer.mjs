@@ -310,7 +310,7 @@ export class PiInteractiveOwner {
   }
 
   async #toolCall(params, signal) {
-    if (!exact(params, ["session_id", "call_id", "action", "arguments"]) ||
+    if (!exact(params, ["session_id", "call_id", "action", "arguments"]) || !validText(params.session_id, 256) ||
         !validText(params.call_id, 256) || !validText(params.action, 64) || !params.arguments || typeof params.arguments !== "object") {
       throw new Error("invalid Pi interactive tool call");
     }
