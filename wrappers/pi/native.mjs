@@ -30,7 +30,7 @@ export function describeNative(pi, ctx) {
 // (agent-session.js:1836-1838, run at :696-703). Such a send is accepted by
 // that contract (deferred). If it then fails to start, the error leaves
 // _emitAgentSettled; no extension event reports it.
-export function appendNative(pi, ctx, delivery, { deferred = false } = {}) {
+function validDelivery(ctx, delivery) {
   if (!delivery || delivery.session_id !== nativeIdentity(ctx)) {
     throw new Error("Pi delivery belongs to a different native session");
   }
@@ -39,15 +39,37 @@ export function appendNative(pi, ctx, delivery, { deferred = false } = {}) {
       typeof delivery.body !== "string" || Buffer.byteLength(delivery.body) > (1 << 20)) {
     throw new Error("invalid Pi native delivery");
   }
-  if (!ctx.isIdle()) return { accepted: false, reason: "busy" };
-  pi.sendMessage({
+}
+
+function nativeMessage(delivery) {
+  return {
     customType: customMessageType,
     content: delivery.body,
     display: true,
     details: { message_id: delivery.message_id },
-  }, { triggerTurn: true });
+  };
+}
+
+export function appendNative(pi, ctx, delivery, { deferred = false } = {}) {
+  validDelivery(ctx, delivery);
+  if (!ctx.isIdle()) return { accepted: false, reason: "busy" };
+  pi.sendMessage(nativeMessage(delivery), { triggerTurn: true });
   if (!deferred && ctx.isIdle()) {
     throw new Error("Pi did not start the native message turn");
   }
+  return { accepted: true };
+}
+
+// While a native run is active Pi puts a triggerTurn custom message in its
+// steering queue synchronously (Pi 1.2.0 agent-session.js:1824-1835). The
+// agent loop reads that queue after each turn's tool results and adds it
+// before the next model request of the same run (agent-core
+// agent-loop.js:183-195). Nothing acknowledges consumption; the message's own
+// message_start/message_end show it. An idle session is not steered: that
+// would start a run of its own.
+export function steerNative(pi, ctx, delivery, running) {
+  validDelivery(ctx, delivery);
+  if (!running || ctx.isIdle()) return { accepted: false, reason: "idle" };
+  pi.sendMessage(nativeMessage(delivery), { triggerTurn: true, deliverAs: "steer" });
   return { accepted: true };
 }

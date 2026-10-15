@@ -56,6 +56,8 @@ the exact test names in the migrated tree.
 | `wrappers/pi/peer.test.mjs`: `tool call with a malformed session id stays a protocol error` | A malformed session id (null, number, object, array, empty, NUL, over 256 bytes) is still a protocol error and reaches no Caller; only a well-formed id of another generation is `stale_session`. |
 | `wrappers/pi/peer.test.mjs`: `tool call for another session is stale_session` | A tool call for another session is `stale_session` and reaches no Caller (`interactive_owner.go:344-349`). |
 | `wrappers/pi/extension.test.mjs`: `interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the rest queued` | Pi 1.2.0 defers a send made during `agent_settled` and stays idle; the settled drain accepts one such send without the busy check, keeps the rest queued, and the busy check still applies outside that drain. |
+| `wrappers/pi/extension.test.mjs`: `lane native.steer steers into the running task and refuses an idle session` | A lane steers a peer message into Pi's steering queue only while its own run is active; the steered message's events match its admitted delivery; idle answers `idle`. |
+| `wrappers/pi/run_test.go`: `TestPiLaneSteersDeliveryIntoActiveRun` | While the Run's native prompt is admitted, a delivery is steered through the extension and answered `injected`; without an active Run it is NotRunning. |
 
 ## Weaker or structurally removed assertions
 

@@ -584,20 +584,54 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	if _, err := host.RenderNativeMessage(request); err != nil {
+// Deliver steers a message into the lane's running task: while this Run's
+// native prompt is admitted and not settled, the managed extension puts it in
+// Pi's steering queue, which the running task reads at its next boundary.
+// Otherwise the lane is not running and the daemon starts a later Run.
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
+	body, err := host.RenderNativeMessage(request)
+	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	p.mu.Lock()
 	available := p.opened && !p.closing && p.failure == nil && p.ctx.Err() == nil
+	turn, bridge, id := p.active, p.bridge, p.id
+	current := run != nil && p.run == run && turn != nil && bridge != nil
 	p.mu.Unlock()
 	if !available {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "lane_unavailable"}, nil
 	}
-	return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	if !current {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	turn.mu.Lock()
+	running := turn.admitted && !turn.nativeSettled
+	turn.mu.Unlock()
+	if !running {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	var answer struct {
+		SessionID string `json:"session_id"`
+		MessageID string `json:"message_id"`
+		Accepted  bool   `json:"accepted"`
+		Reason    string `json:"reason"`
+	}
+	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body}, &answer); err != nil {
+		return sessionkit.DeliveryReceipt{}, err
+	}
+	if answer.SessionID != id || answer.MessageID != request.MessageID {
+		return sessionkit.DeliveryReceipt{}, errors.New("Pi native steer answer changed identity")
+	}
+	if !answer.Accepted {
+		if answer.Reason != "idle" {
+			return sessionkit.DeliveryReceipt{}, errors.New("Pi native steer rejection is invalid")
+		}
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
 
 func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {

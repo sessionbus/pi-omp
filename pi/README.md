@@ -49,3 +49,9 @@ Daemon-owned lanes are selected by the Sessionbus launch token and accept no
 command-line arguments. The lane exposes the standard Sessionbus tool from the
 real native Pi session through the per-launch extension. Installation alone
 does not create a native session or make a model request.
+
+A peer message that arrives while a lane's Run is active goes into Pi's own
+steering queue, which the running task reads at its next boundary (after the
+current tool calls, before its next model request). Its receipt is
+`injected`: handed to the running task, not yet seen by the model. Without
+an active Run the lane is not running and the daemon starts a later Run.

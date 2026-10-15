@@ -6,7 +6,7 @@ import {
   BridgeClosedError,
 } from "../pifamily/extension/bridge.mjs";
 import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
-import { appendNative, customMessageType, describeNative } from "./native.mjs";
+import { appendNative, customMessageType, describeNative, steerNative } from "./native.mjs";
 import { connectPiInteractivePeer } from "./peer.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
@@ -176,6 +176,7 @@ export function createPiExtension({
     : connectPiInteractivePeer(endpoint, options),
   describe = describeNative,
   append = appendNative,
+  steer = steerNative,
 } = {}) {
   const lifetime = new AbortController();
   let bridgePromise;
@@ -253,6 +254,29 @@ export function createPiExtension({
         record.admittedMessages.set(params.message_id, { body: params.body, started: false });
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
+      case "native.steer": {
+        // Lane only for now: an interactive steer would sit in Pi's own queue,
+        // which the TUI clears on Escape; that is an open owner decision.
+        if (launch.topology !== "lane") {
+          throw new BridgeCallError("method_not_found", "Pi native.steer is unavailable in interactive topology");
+        }
+        exactKeys(params, ["session_id", "message_id", "body"], "native.steer parameters");
+        if (params.session_id !== record.session_id) {
+          throw new BridgeCallError("stale_session", "Pi native session identity does not match");
+        }
+        throwIfAborted(signal);
+        const result = steer(record.pi, record.ctx, params, record.running);
+        throwIfAborted(signal);
+        if (result.accepted === false) {
+          exactKeys(result, ["accepted", "reason"], "native.steer result");
+          if (result.reason !== "idle") throw new Error("Pi native steer rejection is invalid");
+          return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "idle" };
+        }
+        exactKeys(result, ["accepted"], "native.steer result");
+        if (result.accepted !== true) throw new Error("Pi native steer result is invalid");
+        record.admittedMessages.set(params.message_id, { body: params.body, started: false });
+        return { session_id: record.session_id, message_id: params.message_id, accepted: true };
+      }
       default:
         throw new BridgeCallError("method_not_found", "Pi bridge method is unavailable");
     }
@@ -303,7 +327,7 @@ export function createPiExtension({
     current = {
       pi, ctx, session_id: nativeID(info.session_id),
       controller: new AbortController(), branchSummaryBusy: false,
-      admittedMessages: new Map(),
+      admittedMessages: new Map(), running: false,
     };
     settling = false;
     const result = await hostCall(ctx, "owner.ready", {
@@ -420,7 +444,9 @@ export function createPiExtension({
     });
 
     pi.on("before_agent_start", (_event, ctx) => {
-      if (current) current.branchSummaryBusy = false;
+      // Pi marks its run active before this hook and clears it only at
+      // agent_settled (Pi 1.2.0 agent-session.js:1392, :686).
+      if (current) { current.branchSummaryBusy = false; current.running = true; }
       if (launch.topology === "interactive") {
         return drain(ctx, "before_agent_start").catch((error) => stop(ctx, error));
       }
@@ -469,7 +495,7 @@ export function createPiExtension({
       // lane currently rejects such work as outside the owned Run; whether it
       // should is an open owner decision, and this handler does not change it.
       settling = true;
-      if (current) current.branchSummaryBusy = false;
+      if (current) { current.branchSummaryBusy = false; current.running = false; }
       if (launch.topology === "interactive") {
         const record = current;
         if (record) record.settledAppend = "open";

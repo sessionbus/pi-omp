@@ -115,6 +115,16 @@ func runPiNativeHelper(mode string) error {
 			switch method {
 			case "native.describe":
 				return json.Marshal(piNativeDescription{SessionID: id, Name: name, Cwd: cwd})
+			case "native.steer":
+				var steer struct {
+					SessionID string `json:"session_id"`
+					MessageID string `json:"message_id"`
+					Body      string `json:"body"`
+				}
+				if mode != "run-abort" || json.Unmarshal(raw, &steer) != nil || steer.SessionID != id || steer.MessageID == "" || steer.Body == "" {
+					return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected helper method")
+				}
+				return json.Marshal(map[string]any{"session_id": id, "message_id": steer.MessageID, "accepted": true})
 			default:
 				return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected helper method")
 			}

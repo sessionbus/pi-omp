@@ -110,6 +110,41 @@ func TestPiOwnedInterruptJoinsAbortAndNativeTerminal(t *testing.T) {
 	}
 }
 
+// While its Run's native prompt is admitted, the lane steers a delivery into
+// that running task through the managed extension instead of answering
+// NotRunning; without an active Run it is still not running.
+func TestPiLaneSteersDeliveryIntoActiveRun(t *testing.T) {
+	wrapper, cwd := newPiTestWrapper(t, "run-abort")
+	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+	delivery := sessionkit.DeliveryRequest{MessageID: "steer-1", Body: "peer note",
+		From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"}}
+	run := &sessionkit.Run{}
+	var notRunning *sessionkit.ProtocolError
+	if _, err := wrapper.Deliver(context.Background(), delivery, run); !errors.As(err, &notRunning) || notRunning.Code != -32004 {
+		t.Fatalf("delivery without an active Run = %v", err)
+	}
+	turn, err := wrapper.startNativeTurn(context.Background(), run, "owned prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper.mu.Lock()
+	wrapper.run = run
+	wrapper.mu.Unlock()
+	receipt, err := wrapper.Deliver(context.Background(), delivery, run)
+	if err != nil || receipt.Disposition != "injected" {
+		t.Fatalf("delivery into the active Run = %+v, %v", receipt, err)
+	}
+	if err = turn.Interrupt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := turn.Wait(context.Background()); err != nil || result.Outcome != "interrupted" {
+		t.Fatalf("interrupted result = %+v, %v", result, err)
+	}
+}
+
 func TestPiSDKInterruptCancelsHeldNativeAdmission(t *testing.T) {
 	t.Run("execute", func(t *testing.T) {
 		testPiSDKInterruptCancelsHeldNativeAdmission(t, false, false)

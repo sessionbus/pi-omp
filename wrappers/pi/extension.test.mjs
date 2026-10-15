@@ -253,6 +253,39 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   assert.equal(owner.closes(), 0);
 });
 
+// A lane puts a peer message in Pi's steering queue only while its own run is
+// active (before_agent_start to agent_settled); the steered message's events
+// match its admitted delivery. Pi reads that queue at the running task's next
+// boundary (agent-core agent-loop.js:183-195).
+test("lane native.steer steers into the running task and refuses an idle session", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const steer = (id) => owner.native("native.steer", { session_id: "native-1", message_id: id, body: "peer" });
+  assert.deepEqual(await steer("early"), { session_id: "native-1", message_id: "early", accepted: false, reason: "idle" });
+
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "expanded" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("steer-1"), { session_id: "native-1", message_id: "steer-1", accepted: true });
+  assert.deepEqual(sends, [{
+    message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
+    options: { triggerTurn: true, deliverAs: "steer" },
+  }]);
+  const message = { role: "custom", customType: "sessionbus.message", content: "peer", details: { message_id: "steer-1" } };
+  await native.emit("message_start", { type: "message_start", message });
+  await native.emit("message_end", { type: "message_end", message });
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
+
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  assert.deepEqual(await steer("late"), { session_id: "native-1", message_id: "late", accepted: false, reason: "idle" });
+  assert.equal(sends.length, 1);
+});
+
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const queue = [
