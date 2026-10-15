@@ -54,6 +54,7 @@ the exact test names in the migrated tree.
 | `wrappers/pi/peer.test.mjs`: `tool call while the Peer is not admitted fails at once with not_connected` | Without an admitted connection a tool call fails at once with `not_connected` instead of waiting for a reconnect (`interactive_owner.go:830-832`). |
 | `wrappers/pi/peer.test.mjs`: `tool result after a same-ID Peer rotation is stale_session` | A result that returns after the owner generation changed is `stale_session`, not a session failure (`interactive_owner.go:358-362`). |
 | `wrappers/pi/peer.test.mjs`: `tool call for another session is stale_session` | A tool call for another session is `stale_session` and reaches no Caller (`interactive_owner.go:344-349`). |
+| `wrappers/pi/extension.test.mjs`: `interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the rest queued` | Pi 1.2.0 defers a send made during `agent_settled` and stays idle; the settled drain accepts one such send without the busy check, keeps the rest queued, and the busy check still applies outside that drain. |
 
 ## Weaker or structurally removed assertions
 

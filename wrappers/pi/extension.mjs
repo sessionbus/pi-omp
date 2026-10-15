@@ -233,7 +233,14 @@ export function createPiExtension({
             accepted: false, reason: "branch_summary_busy",
           };
         }
-        const result = append(record.pi, record.ctx, params);
+        // During this extension's agent_settled drain Pi defers the send (see
+        // appendNative): accept one without the busy check and answer busy
+        // after it, so one held message starts the next turn, as on Pi 0.85.1.
+        if (record.settledAppend === "sent") {
+          return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "busy" };
+        }
+        const deferred = record.settledAppend === "open";
+        const result = append(record.pi, record.ctx, params, { deferred });
         throwIfAborted(signal);
         if (result.accepted === false) {
           exactKeys(result, ["accepted", "reason"], "native.append result");
@@ -242,6 +249,7 @@ export function createPiExtension({
         }
         exactKeys(result, ["accepted"], "native.append result");
         if (result.accepted !== true) throw new Error("Pi native append result is invalid");
+        if (deferred) record.settledAppend = "sent";
         record.admittedMessages.set(params.message_id, { body: params.body, started: false });
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
@@ -463,7 +471,11 @@ export function createPiExtension({
       settling = true;
       if (current) current.branchSummaryBusy = false;
       if (launch.topology === "interactive") {
-        return drain(ctx, "agent_settled").catch((error) => stop(ctx, error));
+        const record = current;
+        if (record) record.settledAppend = "open";
+        return drain(ctx, "agent_settled").catch((error) => stop(ctx, error)).finally(() => {
+          if (record) record.settledAppend = undefined;
+        });
       }
       return laneWitness(ctx, "run.settling", {}).catch((error) => stop(ctx, error));
     });

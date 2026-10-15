@@ -292,6 +292,32 @@ test("interactive drains before a prompt and after a settled turn through nested
   assert.equal(owner.closes(), 1);
 });
 
+// Pi 1.2.0 defers a triggerTurn send made during agent_settled handlers and
+// stays idle until they finish (agent-session.js:1836-1838). The settled drain
+// accepts one such send and keeps the rest queued, as Pi 0.85.1 did; outside
+// that drain the busy check still applies.
+test("interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the rest queued", async () => {
+  const native = nativeFixture("interactive-defer", "tui");
+  const send = native.pi.sendMessage;
+  native.pi.sendMessage = (message, options) => { send(message, options); native.setIdle(true); };
+  const queue = [
+    { session_id: "interactive-defer", message_id: "first", body: "one" },
+    { session_id: "interactive-defer", message_id: "second", body: "two" },
+  ];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("agent_settled");
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
+  assert.equal(native.pending().details.message_id, "first");
+  assert.deepEqual(queue.map(({ message_id }) => message_id), ["second"]);
+  await assert.rejects(owner.native("native.append", {
+    session_id: "interactive-defer", message_id: "outside", body: "after settle",
+  }), /did not start the native message turn/);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
+
 test("interactive wakes after manual compaction and brackets unobservable branch summaries", async () => {
   const native = nativeFixture("interactive-compact", "tui");
   const queue = [];
