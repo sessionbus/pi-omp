@@ -24,12 +24,6 @@ export function describeNative(pi, ctx) {
 // distinguishes a definite pre-submission refusal from native ownership. The
 // custom message is persisted later, after its asynchronous message_end event;
 // an old session leaf is not an admission signal.
-//
-// Pi 1.2.0 defers a triggerTurn send made during agent_settled handlers until
-// every settled handler has finished and stays idle until then
-// (agent-session.js:1836-1838, run at :696-703). Such a send is accepted by
-// that contract (deferred). If it then fails to start, the error leaves
-// _emitAgentSettled; no extension event reports it.
 function validDelivery(ctx, delivery) {
   if (!delivery || delivery.session_id !== nativeIdentity(ctx)) {
     throw new Error("Pi delivery belongs to a different native session");
@@ -50,13 +44,17 @@ function nativeMessage(delivery) {
   };
 }
 
-export function appendNative(pi, ctx, delivery, { deferred = false } = {}) {
+// Pi 1.2.0 defers a triggerTurn send made during agent_settled handlers until
+// every settled handler has finished and stays idle until then
+// (agent-session.js:1836-1838, run at :696-703); outside that dispatch the
+// send sets the run flag before returning. Still idle after the send therefore
+// means deferred, and the delivery is accepted, inside or outside this
+// extension's own settled drain. If a deferred send then fails to start, the
+// error leaves _emitAgentSettled; no extension event reports it.
+export function appendNative(pi, ctx, delivery) {
   validDelivery(ctx, delivery);
   if (!ctx.isIdle()) return { accepted: false, reason: "busy" };
   pi.sendMessage(nativeMessage(delivery), { triggerTurn: true });
-  if (!deferred && ctx.isIdle()) {
-    throw new Error("Pi did not start the native message turn");
-  }
   return { accepted: true };
 }
 

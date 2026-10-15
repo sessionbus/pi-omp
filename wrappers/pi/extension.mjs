@@ -235,13 +235,13 @@ export function createPiExtension({
           };
         }
         // During this extension's agent_settled drain Pi defers the send (see
-        // appendNative): accept one without the busy check and answer busy
-        // after it, so one held message starts the next turn, as on Pi 0.85.1.
+        // appendNative): accept one and answer busy after it, so one held
+        // message starts the next turn, as on Pi 0.85.1.
         if (record.settledAppend === "sent") {
           return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "busy" };
         }
         const deferred = record.settledAppend === "open";
-        const result = append(record.pi, record.ctx, params, { deferred });
+        const result = append(record.pi, record.ctx, params);
         throwIfAborted(signal);
         if (result.accepted === false) {
           exactKeys(result, ["accepted", "reason"], "native.append result");

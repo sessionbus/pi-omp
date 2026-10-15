@@ -45,9 +45,12 @@ test("busy context retains wrapper ownership and makes no native submission", ()
   assert.equal(f.sends(), 0);
 });
 
-test("void API return without native ownership is a definite pre-submission failure", () => {
+// Pi 1.2.0 leaves the session idle after a triggerTurn send only when it
+// defers the send during settled dispatch (agent-session.js:1836-1838); the
+// send then runs after the settled handlers, so it is accepted.
+test("a send that Pi leaves idle is deferred by Pi and accepted", () => {
   const f = fixture({ starts: false });
-  assert.throws(() => appendNative(f.pi, f.ctx, delivery), /did not start/);
+  assert.deepEqual(appendNative(f.pi, f.ctx, delivery), { accepted: true });
   assert.equal(f.sends(), 1);
 });
 

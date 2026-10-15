@@ -347,11 +347,16 @@ export class PiInteractiveOwner {
     while (this.#queue.length) {
       if (signal?.aborted) throw signal.reason;
       const item = this.#queue[0];
-      const result = validateAppend(await this.#native({
+      const session = this.#session;
+      const answer = await this.#native({
         method: "native.append",
-        params: { session_id: this.#session, message_id: item.message_id, body: item.body },
+        params: { session_id: session, message_id: item.message_id, body: item.body },
         signal,
-      }), this.#session, item.message_id);
+      });
+      // A session end or close during the append clears the queue; that ends
+      // this drain without a fault.
+      if (this.#closed || this.#session !== session) break;
+      const result = validateAppend(answer, session, item.message_id);
       if (result.accepted !== true) {
         if (result.reason !== "busy" && result.reason !== "branch_summary_busy") throw new Error("Pi queued delivery rejection is invalid");
         break;

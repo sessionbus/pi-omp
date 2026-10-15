@@ -345,9 +345,24 @@ test("interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the
   assert.equal(native.aborted(), 0);
   assert.equal(native.pending().details.message_id, "first");
   assert.deepEqual(queue.map(({ message_id }) => message_id), ["second"]);
-  await assert.rejects(owner.native("native.append", {
-    session_id: "interactive-defer", message_id: "outside", body: "after settle",
-  }), /did not start the native message turn/);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
+
+// An idle delivery that lands while Pi still runs later settled handlers is
+// deferred by Pi too (agent-session.js:1836-1838). It is accepted and does not
+// end the session.
+test("interactive idle delivery that Pi defers outside the settled drain is accepted", async () => {
+  const native = nativeFixture("interactive-window", "tui");
+  const send = native.pi.sendMessage;
+  native.pi.sendMessage = (message, options) => { send(message, options); native.setIdle(true); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  assert.deepEqual(await owner.native("native.append", {
+    session_id: "interactive-window", message_id: "window", body: "during later handlers",
+  }), { session_id: "interactive-window", message_id: "window", accepted: true });
+  assert.equal(native.pending().details.message_id, "window");
+  assert.equal(native.shutdown(), 0);
   await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 });
 
