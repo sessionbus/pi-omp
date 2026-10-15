@@ -25,6 +25,11 @@ var interactiveValueOptions = []string{
 
 // Native Pi's own first-word commands, which it handles before any session
 // starts (Pi 1.2.0 dist/main.js: auth, package commands, config, mcp at :486).
+// Pi recognises a command only as the first argument, and a managed launch
+// puts --extension first (interactive_launch.go), while Pi's command parsers
+// reject an --extension after the command. A first word that is not a command
+// is a prompt, so no general rule replaces this list: these go to native Pi
+// unchanged.
 var passthroughCommands = []string{"install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"}
 
 // InteractivePlan classifies native maintenance/help before adding managed
