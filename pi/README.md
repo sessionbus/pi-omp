@@ -15,7 +15,8 @@ sh /tmp/sessionbus-pi/install
 
 The installer writes the permanent package to
 `~/.local/libexec/sessionbus/pi`, links `~/.local/bin/pi-peer`, and validates
-the three managed extension files through the installed Go command. It does
+the managed extension payload and bundled Sessionbus kit through the installed
+Go command. It does
 not add Pi extensions to user or project configuration. `pi-peer` supplies the
 extension only for its own interactive and lane launches, so ordinary `pi`
 invocations remain ordinary.
@@ -26,6 +27,14 @@ Sessionbus groups. Wrapper `-n`/`--peer-name` selects the initial Peer name;
 Pi's native `--name` option remains available for the native session title.
 Native maintenance, help, version, print/export commands, and non-terminal
 stdin or stdout run directly without managed ownership.
+
+For a managed interactive terminal, `pi-peer` validates the native and fixed
+payload and then execs Pi. The in-process extension owns the Sessionbus Peer,
+tool caller, reconnects, session replacement, and bounded busy-delivery FIFO.
+This adds no sidecar process, private socket, launch directory, or interactive
+history lock. Managed lanes retain the Go Worker, native RPC pipes, history
+lock, and direct native child; their extension bridge is an inherited anonymous
+socketpair rather than a filesystem endpoint.
 
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:

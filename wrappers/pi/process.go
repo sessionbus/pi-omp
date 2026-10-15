@@ -3,43 +3,38 @@
 package pi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/sessionbus/peer-common/host"
+	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
 const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH"
 
 var piCommand = exec.Command
+var piAttachInheritedBridge = pifamily.AttachPiInheritedBridge
 var piStartProcess = startPiProcess
 
 type piLaunch struct {
-	Directory string `json:"directory"`
-	OwnerPID  int    `json:"owner_pid"`
-	Socket    string `json:"socket"`
-	Topology  string `json:"topology"`
+	BridgeFD int    `json:"bridge_fd"`
+	Topology string `json:"topology"`
 }
 
 type piProcess struct {
-	command   *exec.Cmd
-	lock      *host.SessionLock
-	listener  *net.UnixListener
-	directory string
-	socket    string
-	input     *os.File
-	output    io.ReadCloser
-	stderr    *piLog
-	done      chan struct{}
+	command *exec.Cmd
+	lock    *host.SessionLock
+	bridge  io.ReadWriteCloser
+	input   *os.File
+	output  io.ReadCloser
+	stderr  *piLog
+	done    chan struct{}
 
 	mu       sync.Mutex
 	waitErr  error
@@ -83,36 +78,6 @@ func startPiProcess(socket, provisional, executable, cwd string, arguments []str
 			_ = lock.Close()
 		}
 	}()
-	parent, err := filepath.EvalSymlinks(filepath.Dir(socket))
-	if err != nil {
-		return nil, err
-	}
-	directory, err := os.MkdirTemp(parent, ".pi-")
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if failed {
-			_ = os.RemoveAll(directory)
-		}
-	}()
-	bridgePath := filepath.Join(directory, "bridge.sock")
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: bridgePath, Net: "unix"})
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if failed {
-			_ = listener.Close()
-		}
-	}()
-	if err = os.Chmod(bridgePath, 0o600); err != nil {
-		return nil, err
-	}
-	launchBody, err := json.Marshal(piLaunch{Directory: directory, OwnerPID: os.Getpid(), Socket: bridgePath, Topology: "lane"})
-	if err != nil {
-		return nil, err
-	}
 	stdin, input, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -138,18 +103,38 @@ func startPiProcess(socket, provisional, executable, cwd string, arguments []str
 	command.Dir = cwd
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, log
 	command.ExtraFiles = append(command.ExtraFiles, lock.File())
+	transport, err := piAttachInheritedBridge(command)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if failed {
+			_ = transport.Close()
+		}
+	}()
+	launchBody, err := json.Marshal(piLaunch{BridgeFD: transport.ChildReadFD(), Topology: "lane"})
+	if err != nil {
+		return nil, err
+	}
 	command.Env = scrubPiEnvironment(os.Environ(),
 		host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv,
 		host.NameEnv, host.GroupsEnv, launchEnvironmentName, "SESSIONBUS_OMP_LAUNCH")
 	command.Env = append(command.Env, launchEnvironmentName+"="+string(launchBody))
-	if err = command.Start(); err != nil {
-		return nil, err
+	startErr := command.Start()
+	childCloseErr := transport.CloseChildCopies()
+	if startErr != nil {
+		return nil, errors.Join(startErr, childCloseErr)
+	}
+	if childCloseErr != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return nil, childCloseErr
 	}
 	_ = stdin.Close()
 	_ = stdout.Close()
 	process := &piProcess{
-		command: command, lock: lock, listener: listener, directory: directory,
-		socket: bridgePath, input: input, output: output, stderr: log,
+		command: command, lock: lock, bridge: transport.Parent,
+		input: input, output: output, stderr: log,
 		done: make(chan struct{}),
 	}
 	go func() {
@@ -173,21 +158,6 @@ func scrubPiEnvironment(environment []string, names ...string) []string {
 	return result
 }
 
-func (process *piProcess) accept(ctx context.Context) (net.Conn, error) {
-	stop := context.AfterFunc(ctx, func() { _ = process.listener.Close() })
-	connection, err := process.listener.AcceptUnix()
-	stop()
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, err
-	}
-	_ = process.listener.Close()
-	_ = os.Remove(process.socket)
-	return connection, nil
-}
-
 func (process *piProcess) Wait() error {
 	<-process.done
 	process.mu.Lock()
@@ -200,7 +170,7 @@ func (process *piProcess) Force() {
 		if process.command.Process != nil {
 			_ = process.command.Process.Kill()
 		}
-		_ = process.listener.Close()
+		_ = process.bridge.Close()
 		_ = process.input.Close()
 		_ = process.output.Close()
 	})
@@ -208,10 +178,10 @@ func (process *piProcess) Force() {
 
 func (process *piProcess) Cleanup() error {
 	process.clean.Do(func() {
-		_ = process.listener.Close()
+		_ = process.bridge.Close()
 		_ = process.input.Close()
 		_ = process.output.Close()
-		process.cleanErr = errors.Join(process.lock.Close(), os.RemoveAll(process.directory))
+		process.cleanErr = process.lock.Close()
 	})
 	return process.cleanErr
 }

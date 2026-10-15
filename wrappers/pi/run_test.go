@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -353,12 +352,6 @@ func testPiSDKInterruptCancelsHeldNativeAdmission(t *testing.T, deliverySeed, ho
 	case <-wrapper.process.done:
 	default:
 		t.Fatal("interrupted native child was not joined")
-	}
-	if _, err = net.Dial("unix", wrapper.process.socket); err == nil {
-		t.Fatal("interrupted private extension socket remained reachable")
-	}
-	if _, err = os.Stat(wrapper.process.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("interrupted private launch directory survived: %v", err)
 	}
 }
 

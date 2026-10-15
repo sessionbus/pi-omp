@@ -185,7 +185,7 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 		t.Fatal("package or installer accepts unsupported product")
 	}
 	for _, expected := range []string{
-		"wrappers/pi/extension.mjs wrappers/pi/native.mjs",
+		"wrappers/pi/extension.mjs wrappers/pi/native.mjs wrappers/pi/peer.mjs",
 		"wrappers/omp/extension.mjs",
 		"wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs",
 		"npm ci --prefix \"$stage/plugin\" --omit=dev --ignore-scripts",
