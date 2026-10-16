@@ -441,8 +441,9 @@ test("a superseded owner keeps Pi running without Sessionbus", { timeout: 5000 }
 
 // The daemon writes session.superseded and closes its end at once, without
 // waiting for a reply (bus internal/daemon/session.go supersede). The kit's
-// courtesy reply then fails to write. Kit 0.5.9 left that failure unhandled,
-// which ended Pi (exit 129); kit 0.5.12 handles it, and Pi keeps running.
+// courtesy reply then fails to write. Kit 0.5.9 left that failure unhandled;
+// kit 0.5.12 handles it, and Pi keeps running. This is source and local
+// evidence only: the cause of the live takeover's wrapper exit 129 is unknown.
 test("a takeover the daemon closes at once leaves no unhandled rejection", { timeout: 5000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pi-superseded-close-"));
   const socket = path.join(directory, "bus.sock");
