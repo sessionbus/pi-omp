@@ -82,10 +82,30 @@ func (e *nativeRPCError) Error() string {
 	return fmt.Sprintf("OMP native %s: %s", e.Command, e.Message)
 }
 
+// nativePromptRefusal is OMP's error answer as the first response to our own
+// prompt. OMP 18.11.0 answers so before admission, for example with
+// AgentBusyError while its own work runs (agent-session.ts:7356-7364), so the
+// prompt never reached the agent.
+type nativePromptRefusal struct{ err error }
+
+func (refusal *nativePromptRefusal) Error() string { return refusal.err.Error() }
+func (refusal *nativePromptRefusal) Unwrap() error { return refusal.err }
+
+// nativeRefusedPrompt is the one prompt whose first response was an error.
+// OMP 18.11.0 still writes a success response for the same id and then a
+// prompt_result with agentInvoked:false (rpc-prompt-results.ts:286-296,
+// rpc-mode.ts:1835-1882). Each may be absorbed once, by that exact id.
+type nativeRefusedPrompt struct {
+	id            string
+	success       bool
+	noAgentResult bool
+}
+
 type nativeRPCResult struct {
-	data  json.RawMessage
-	err   error
-	bytes int
+	data    json.RawMessage
+	err     error
+	bytes   int
+	refusal bool
 }
 
 type nativeRPCPending struct {
@@ -168,6 +188,7 @@ type nativeRPC struct {
 	chunks         *nativeRPCChunks
 	nextID         uint64
 	pending        map[string]*nativeRPCPending
+	refused        nativeRefusedPrompt
 	retainedBytes  int
 	pendingWrites  int
 	pendingBytes   int
@@ -334,6 +355,12 @@ func (rpc *nativeRPC) StartPrompt(ctx context.Context, message string) (*nativeP
 }
 
 func (rpc *nativeRPC) completePromptStart(id string, pending *nativeRPCPending, completed nativeRPCResult) (*nativePrompt, bool, error) {
+	if completed.refusal {
+		// The refusal was the first response and removed the correlation, so
+		// no late result can be retained for it.
+		_ = rpc.consumeResult(completed, nil)
+		return nil, true, &nativePromptRefusal{err: completed.err}
+	}
 	agentInvoked, known, err := rpc.consumePromptStart(completed)
 	if err != nil {
 		var late nativeRPCResult
@@ -729,6 +756,7 @@ func (rpc *nativeRPC) stop(err error, intentional bool) {
 	}
 	rpc.stopped = true
 	rpc.intentional = intentional
+	rpc.refused = nativeRefusedPrompt{}
 	if err != nil && !intentional {
 		rpc.failure = err
 	}
@@ -968,6 +996,9 @@ func (rpc *nativeRPC) acceptLogicalFrame(line []byte) error {
 	if kind == "response" {
 		return rpc.acceptResponse(object, line)
 	}
+	if kind == "prompt_result" && rpc.absorbRefusedPromptResult(object) {
+		return nil
+	}
 	if !negotiated {
 		// OMP can publish startup metadata after ready and before the
 		// negotiation response. These are valid protocol-v1 physical events.
@@ -1131,6 +1162,11 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 	rpc.mu.Lock()
 	pending := rpc.pending[id]
 	if pending == nil {
+		if success && command == "prompt" && rpc.refused.success && rpc.refused.id == id {
+			rpc.refused.success = false
+			rpc.mu.Unlock()
+			return nil
+		}
 		rpc.mu.Unlock()
 		return fmt.Errorf("%w: unknown or duplicate response id %q", errNativeRPCProtocol, id)
 	}
@@ -1169,6 +1205,10 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 			pending.responded = true
 			if !success {
 				delete(rpc.pending, id)
+				completed.refusal = true
+				rpc.refused = nativeRefusedPrompt{id: id, success: true, noAgentResult: true}
+			} else {
+				rpc.refused = nativeRefusedPrompt{}
 			}
 			pending.result <- completed
 			rpc.mu.Unlock()
@@ -1197,6 +1237,23 @@ func (rpc *nativeRPC) setPromptLateLocked(pending *nativeRPCPending, completed n
 	pending.late = completed
 	pending.lateSet = true
 	close(pending.lateReady)
+}
+
+// absorbRefusedPromptResult takes the refused prompt's own agentInvoked:false
+// prompt_result before any turn sees it. Any other prompt_result, including
+// agentInvoked:true for that id, is left to the observer.
+func (rpc *nativeRPC) absorbRefusedPromptResult(object map[string]json.RawMessage) bool {
+	id, err := nativeRPCString(object, "id", 128)
+	if err != nil || !bytes.Equal(bytes.TrimSpace(object["agentInvoked"]), []byte("false")) {
+		return false
+	}
+	rpc.mu.Lock()
+	defer rpc.mu.Unlock()
+	if !rpc.refused.noAgentResult || rpc.refused.id != id {
+		return false
+	}
+	rpc.refused.noAgentResult = false
+	return true
 }
 
 func (rpc *nativeRPC) abandonPending(id string, pending *nativeRPCPending) (nativeRPCResult, bool) {

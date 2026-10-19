@@ -6,6 +6,59 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## Lane Run boundary on OMP 18.11.0 (2026-10-19)
+
+Owner decision (2026-10-15): an OMP lane Run ends at OMP's own done report for
+our prompt, and later work by OMP or other extensions is OMP's own and no
+longer ends the lane. The floor is OMP 18.11.0, stated here and in the README
+with no runtime version check. Source: OMP 18.11.0 npm `src`
+(`modes/rpc/rpc-prompt-results.ts`, `modes/rpc/rpc-mode.ts`,
+`session/agent-session.ts`, `cli-commands.ts`).
+
+- **End of a Run.** OMP writes one `prompt_result` with our request id after
+  all work of the prompt settled (`rpc-types.ts:229-246`). The Run takes its
+  result from the last assistant message before its run's first yielded
+  `agent_end` (`yielded ?? isTerminal !== false`, the rule OMP uses at
+  `rpc-prompt-results.ts:136`), and ends at our agent-invoked `prompt_result`.
+- **OMP's own work.** A run event before our run starts or after it yielded,
+  or with no Run open, is ignored. A dialog from that work is cancelled with no
+  Run to join, as for Pi.
+- **Refusal.** A prompt OMP refuses before admission (for example
+  `AgentBusyError` while its own work runs) gets an error response, then a
+  success response for the same id, then `prompt_result` with
+  `agentInvoked:false`. Our RPC reader absorbs exactly one of each for that
+  id. The Run fails with OMP's answer and is recorded unavailable, its
+  delivery is rejected `not_submitted`, and the lane stays, as for Pi. The slot
+  is cleared by the next admitted prompt, a new refusal or transport loss.
+- **Preflights.** OMP also preflights its own runs. Each Run opens a window
+  before it sends its prompt and closes it at turn end. Every preflight is
+  consumed when it arrives. In the window the first one with our prompt is
+  ours; one before it is recorded as foreign and fails an admitted Run; one
+  after it is ignored. Outside a window a preflight is only recorded. If our
+  agent-invoked `prompt_result` arrives without our preflight, the Run fails
+  as "owned preflight missing or rewritten", where it used to wait.
+- **Subcommands.** OMP drops recognised launch flags, including our
+  `--extension` and `--mode`, in front of a hoisted subcommand other than
+  `launch` and `acp` (`cli-commands.ts:313`, `402-428`, `462`). The wrapper
+  therefore lists all 53 commands and 6 aliases and runs them directly.
+
+Not covered, listed:
+
+- Own work that starts after our Run opens and before OMP reads our prompt is
+  counted as ours. Our prompt is then refused as busy and that Run is dropped.
+  If the own work also ends before OMP reads our prompt, our prompt is admitted
+  and its foreign preflight fails the Run.
+- There is no wait for idle before a Run, unlike Pi. While OMP's own work
+  runs, each Run is refused.
+- The extension sends its preflight on a separate socket without waiting. If
+  it reaches the wrapper after our `prompt_result`, the Run fails as missing.
+- A session switch during our Run makes OMP report our prompt aborted without
+  our run's yielded `agent_end`; the Run fails.
+- An `agentInvoked:false` after agent work, or an error after the success
+  response, is not a refusal and still fails the Run.
+- OMP 18.1.17 never sends an agent-invoked `prompt_result`; a lane Run there
+  waits until it is cancelled.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream

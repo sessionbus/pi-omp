@@ -1,8 +1,12 @@
 # Sessionbus OMP peer
 
-`omp-peer` integrates Oh My Pi with Sessionbus. It was tested with Oh My Pi
-18.1.17 and Bun 1.4.0. Install Oh My Pi and make its Bun runtime available on
-the login `PATH`, then run this archive's `install` script.
+`omp-peer` integrates Oh My Pi with Sessionbus. Lanes need Oh My Pi 18.11.0 or
+newer: a lane Run ends at OMP's own `prompt_result` report for the lane's
+prompt, which older versions do not send for agent work, so on them a lane Run
+waits until it is cancelled. There is no runtime version check. Earlier builds
+were tested with Oh My Pi 18.1.17 and Bun 1.4.0. Install Oh My Pi and make its
+Bun runtime available on the login `PATH`, then run this archive's `install`
+script.
 
 Interactive terminal launches retain native OMP arguments and add one managed,
 per-process extension. Wrapper-owned `-g`/`--group` values select Sessionbus
