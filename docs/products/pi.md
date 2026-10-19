@@ -26,6 +26,24 @@ The managed extension therefore checks the active tools at every
 missing it calls `setActiveTools` with our tool added after the others. If it
 is present it does nothing. No other tool is removed or reordered.
 
+## Tool modifiers in managed launches (2026-10-19)
+
+Pi's `--tools` takes either plain names and patterns, or only `+name`/`-name`
+modifiers. Modifiers change the default selection, in order
+(`settings-manager.js:37-73`, `sdk.js:149-156`). With `--no-tools`, the
+modifiers start from an empty selection that also bounds the allowed tools.
+A list that mixes the two forms is Pi's own error.
+
+The managed launch guard used to compare names with the `+`/`-` still
+attached. It therefore rejected valid modifier lists such as
+`--tools +sessionbus`. The guard now follows Pi's rule:
+- a plain list must name `sessionbus`;
+- a modifier list is refused only if it removes `sessionbus` last, or if
+  `--no-tools` is set and the list does not add `+sessionbus`;
+- a mixed list passes through, and Pi rejects it.
+
+Arguments always pass through unchanged.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 Pi 0.85.1 is bound to upstream `d981de1229ef899957bbe968bc8dcda02a21f477`.

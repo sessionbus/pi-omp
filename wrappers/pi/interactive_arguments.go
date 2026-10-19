@@ -111,8 +111,27 @@ func validateManagedToolArguments(arguments []string) error {
 			index++
 		}
 	}
-	if allowedSet && !slices.Contains(allowed, "sessionbus") {
-		return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
+	if allowedSet {
+		// Pi's --tools list is either plain names and patterns or only
+		// +name/-name entries, which change the default selection in order
+		// (Pi settings-manager.js:37-73, sdk.js:149-156); a list mixing both
+		// is Pi's own error and passes through. Native arguments pass through
+		// unchanged; only a list that leaves sessionbus out is refused.
+		switch modifiers := toolModifierCount(allowed); modifiers {
+		case 0:
+			if !slices.Contains(allowed, "sessionbus") {
+				return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
+			}
+		case len(allowed):
+			// --no-tools starts the selection empty, so the list must add
+			// our tool; otherwise it is on unless the list removes it last.
+			if !toolModifiersKeep(allowed, "sessionbus", !noTools) {
+				if noTools {
+					return errors.New("argument disables managed Pi Sessionbus tool: --no-tools with --tools modifiers must add +sessionbus")
+				}
+				return errors.New("argument disables managed Pi Sessionbus tool: --tools removes sessionbus")
+			}
+		}
 	}
 	if excludedSet && slices.Contains(excluded, "sessionbus") {
 		return errors.New("argument disables managed Pi Sessionbus tool: --exclude-tools contains sessionbus")
@@ -121,6 +140,32 @@ func validateManagedToolArguments(arguments []string) error {
 		return errors.New("argument disables managed Pi Sessionbus tool: --no-tools")
 	}
 	return nil
+}
+
+// toolModifierCount counts Pi's +name/-name entries (Pi settings-manager.js
+// isToolModifier).
+func toolModifierCount(entries []string) int {
+	count := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "+") || strings.HasPrefix(entry, "-") {
+			count++
+		}
+	}
+	return count
+}
+
+// toolModifiersKeep applies the +name/-name entries for name in order, as
+// Pi's applyToolModifiers does, from whether it starts selected.
+func toolModifiersKeep(entries []string, name string, selected bool) bool {
+	for _, entry := range entries {
+		switch entry {
+		case "+" + name:
+			selected = true
+		case "-" + name:
+			selected = false
+		}
+	}
+	return selected
 }
 
 func nativeToolList(value string) []string {

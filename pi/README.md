@@ -69,8 +69,14 @@ Not covered:
 
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:
-`--no-tools` without an overriding `--tools` list containing `sessionbus`, an
-explicit `--tools` list that omits it, or `--exclude-tools` containing it.
+- `--no-tools` without an overriding `--tools` list that keeps `sessionbus`;
+- an explicit `--tools` list of names that omits it;
+- a `--tools` list of Pi's `+name`/`-name` modifiers that removes it last, or
+  that does not add `+sessionbus` after `--no-tools`;
+- `--exclude-tools` containing it.
+
+Modifier lists that keep the tool, such as `--tools +read` or `-bash`, pass
+through unchanged.
 Other tool selections and project-trust arguments remain native-owned and
 unchanged. These checks do not apply to the direct native paths above.
 Pi 1.3.0 restores a resumed session's recorded tool set, which can leave

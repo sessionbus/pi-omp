@@ -159,9 +159,12 @@ func TestInteractivePlanRejectsManagedToolDisable(t *testing.T) {
 		{"--no-tools"},
 		{"-nt"},
 		{"--tools", "read,bash"},
-		{"-t", "-g"},
-		{"-t", "--peer-name"},
 		{"-t", "read, SessionBus"},
+		{"--tools", "-sessionbus"},
+		{"-t", "+read,-sessionbus"},
+		{"--tools", "+sessionbus,-sessionbus"},
+		{"--no-tools", "--tools", "+read"},
+		{"-nt", "-t", "-bash"},
 		{"--tools", " , "},
 		{"--exclude-tools", "read, sessionbus ,bash"},
 		{"-xt", "sessionbus"},
@@ -181,6 +184,19 @@ func TestInteractivePlanPreservesEffectiveManagedToolSelection(t *testing.T) {
 	for _, args := range [][]string{
 		{"--tools", "read, sessionbus ,write"},
 		{"-t", "sessionbus"},
+		// Pi's +name/-name modifiers change its default selection, which
+		// keeps our extension tool; they pass through unchanged. A value
+		// that only looks like a wrapper flag is such a modifier list.
+		{"--tools", "+read"},
+		{"-t", "-bash"},
+		{"--tools", "+sessionbus"},
+		{"--tools", "-sessionbus,+sessionbus"},
+		{"--no-tools", "--tools", "+sessionbus"},
+		{"--no-tools", "--tools", "+read,+sessionbus"},
+		{"-t", "-g"},
+		{"-t", "--peer-name"},
+		// A list mixing names and modifiers is Pi's own error.
+		{"--tools", "read,+bash"},
 		{"--exclude-tools", "read,bash"},
 		{"-xt", "read"},
 		{"--no-builtin-tools"},
