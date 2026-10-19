@@ -6,7 +6,7 @@ import {
   BridgeClosedError,
 } from "../pifamily/extension/bridge.mjs";
 import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
-import { appendNative, customMessageType, describeNative, nativeLeaf, steerNative } from "./native.mjs";
+import { appendNative, customMessageType, describeNative, historyNative, nativeLeaf, steerNative } from "./native.mjs";
 import { connectPiInteractivePeer } from "./peer.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
@@ -177,6 +177,7 @@ export function createPiExtension({
   describe = describeNative,
   append = appendNative,
   steer = steerNative,
+  history = historyNative,
 } = {}) {
   const lifetime = new AbortController();
   let bridgePromise;
@@ -281,7 +282,7 @@ export function createPiExtension({
         }
         exactKeys(result, ["accepted"], "native.steer result");
         if (result.accepted !== true) throw new Error("Pi native steer result is invalid");
-        record.admittedMessages.set(params.message_id, { body: params.body, started: false });
+        record.admittedMessages.set(params.message_id, { body: params.body, started: false, steered: true });
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
       default:
@@ -375,6 +376,28 @@ export function createPiExtension({
       if (current !== owner || current.session_id !== owner.session_id) return;
       void drain(ctx, witness).catch((error) => stop(ctx, error));
     });
+  }
+
+  // DEF-04, owner decision 2026-10-19 ("Clear the queue first"): after an
+  // aborted run, a steered peer message whose message_start never fired did
+  // not reach the model; Pi saves a steered message only at its own
+  // message_end. Escape and the TUI's other aborts clear Pi's queues first and
+  // drop it. A mid-run /compact or session switch aborts without that clear
+  // and leaves it queued for a later run. So ctx.abort() first runs the clear
+  // Escape runs (restoreQueuedMessagesToEditor({abort:true}), Pi 1.2.0
+  // interactive-mode.js:1732-1734, 3891-3910): no queued copy is delivered
+  // later, and text the user queued returns to the editor. Each such message
+  // is then written to history once, with no turn. One that already started
+  // is left as it is. Pi is idle at every settle; if a native change made it
+  // busy here, a plain send would steer, so nothing is cleared or written.
+  function keepNeverStarted(record, ctx) {
+    const candidates = [...record.admittedMessages].filter(([, admitted]) => admitted.steered && !admitted.started);
+    if (candidates.length === 0 || !ctx.isIdle()) return;
+    ctx.abort();
+    for (const [messageID, admitted] of candidates) {
+      record.admittedMessages.delete(messageID);
+      history(record.pi, ctx, { session_id: record.session_id, message_id: messageID, body: admitted.body });
+    }
   }
 
   async function laneWitness(ctx, method, params) {
@@ -518,7 +541,7 @@ export function createPiExtension({
       });
     }
 
-    pi.on("agent_settled", (_event, ctx) => {
+    pi.on("agent_settled", (event, ctx) => {
       // Pi clears its active flag, then runs agent_settled handlers in
       // extension order: CLI first, then discovered. The managed extension is
       // first, so this prefix counts the settle and marks settling before any
@@ -532,6 +555,9 @@ export function createPiExtension({
       const token = record?.runToken ?? null;
       if (record) { record.branchSummaryBusy = false; record.running = false; record.runToken = null; }
       if (launch.topology === "interactive") {
+        if (record && event?.aborted === true) {
+          try { keepNeverStarted(record, ctx); } catch (error) { stop(ctx, error); return; }
+        }
         if (record) record.settledAppend = "open";
         return drain(ctx, "agent_settled").catch((error) => stop(ctx, error)).finally(() => {
           if (record) record.settledAppend = undefined;

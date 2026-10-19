@@ -50,9 +50,22 @@ it (`written`). While Pi is busy without a task, for example compacting, the
 message waits in the extension's FIFO (`queued_for_next_turn`) and goes into
 the next task, in order. Pressing Escape in Pi's terminal aborts the task and
 clears Pi's queues (Pi 1.2.0 `interactive-mode.js:3891-3908`,
-`agent-session.js:1914-1922`). Typed messages return to the editor, but a
-steered peer message is dropped: its receipt stays `injected` and the message
-is not delivered again. This is accepted for now, as for Grok.
+`agent-session.js:1914-1922`). Typed messages return to the editor. A steered
+peer message the task had not read yet is written to that session's history
+when the aborted task settles, with no new turn, so the model sees it in the
+session's next task. Its receipt stays `injected`, and it is never delivered
+twice. Other aborts of a task are handled the same way, for example a
+mid-task `/compact`, or a session switch, which writes the message to the
+session being left. Before it writes, the extension clears Pi's queues as
+Escape does, so text you had queued returns to the editor. A steered message
+the task had already read stays in history as it is.
+
+Not covered:
+- a task that ends without an abort before reading a steered message, for
+  example after a failure while preparing its next turn;
+- a queue clear without an abort, such as restoring queued messages to the
+  editor (Alt+Up) during a task, or a failed flush of the compaction queue;
+- quitting Pi while a task runs.
 
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:

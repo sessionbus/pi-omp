@@ -37,6 +37,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
   let pending;
   let idle = true;
   let aborted = 0;
+  let abortHook;
   let shutdown = 0;
   const notices = [];
   const shutdownSignal = deferred();
@@ -46,7 +47,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     isIdle: () => idle,
     hasUI: true,
     ui: { notify: (message, type) => notices.push({ message, type }) },
-    abort: () => { aborted++; },
+    abort: () => { aborted++; abortHook?.(); },
     shutdown: () => { shutdown++; shutdownSignal.resolve(); },
     sessionManager: {
       getSessionId: () => id,
@@ -83,6 +84,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     setID(value) { id = value; },
     setName(value) { name = value; },
     setIdle(value) { idle = value; },
+    onAbort(hook) { abortHook = hook; },
     setLeaf(value) { leaf = value === null ? undefined : { id: value }; },
     pending: () => pending,
     async completeMessage() {
@@ -384,6 +386,121 @@ test("interactive native.steer steers into the running task and refuses an idle 
   native.setIdle(true);
   await native.emit("agent_settled");
   assert.deepEqual(await steer("late"), idle("late"));
+  assert.equal(sends.length, 1);
+  assert.equal(native.shutdown(), 0);
+});
+
+// DEF-04 (owner 2026-10-19, "Clear the queue first"): at an aborted settle a
+// steered message whose message_start never fired is written to history with a
+// plain send, after one ctx.abort() has cleared any queued copy. A started one
+// is left as it is, an appended one is not a steer, and a settle with nothing
+// to keep or without an abort changes nothing. Before this change every such
+// message was dropped.
+test("interactive aborted settle clears Pi's queue once and writes never-started steers to history", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options, aborts: native.aborted() }); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const peer = (id) => ({ customType: "sessionbus.message", content: `body ${id}`, display: true, details: { message_id: id } });
+  const accepted = (id) => ({ session_id: "interactive-1", message_id: id, accepted: true });
+  const steer = (id) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null });
+
+  assert.deepEqual(await owner.native("native.append", {
+    session_id: "interactive-1", message_id: "appended", body: "body appended",
+  }), accepted("appended"));
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  for (const id of ["started", "completed", "never-1", "never-2"]) assert.deepEqual(await steer(id), accepted(id));
+  await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("started") } });
+  await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("completed") } });
+  await native.emit("message_end", { type: "message_end", message: { role: "custom", ...peer("completed") } });
+  assert.equal(sends.length, 5);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 1);
+  assert.deepEqual(sends.slice(5), [
+    { message: peer("never-1"), options: undefined, aborts: 1 },
+    { message: peer("never-2"), options: undefined, aborts: 1 },
+  ]);
+
+  // Nothing is left to keep, so a second aborted settle clears nothing.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "again" });
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 1);
+  assert.equal(sends.length, 7);
+
+  // A settle without an abort keeps the earlier behaviour; it is listed as
+  // not covered.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "third" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("unaborted"), accepted("unaborted"));
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.equal(native.aborted(), 1);
+  assert.equal(sends.length, 8);
+  assert.equal(native.shutdown(), 0);
+});
+
+// Pi's queue at an aborted settle, modelled: a mid-run /compact aborts without
+// clearing it, so one steer is still queued; in the P3 case the loop had
+// dequeued the other and lost it to a throw before its message_start. In both
+// the message ends up once in history and not in the queue, so no later run
+// delivers it again. Before this change the first stayed queued and the
+// second was lost.
+test("interactive aborted settle leaves one history copy and no queued copy of a never-started steer", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const history = [];
+  native.pi.sendMessage = (message, options) => {
+    if (options?.deliverAs === "steer") queue.push(message.details.message_id);
+    else if (options === undefined) history.push(message.details.message_id);
+    else assert.fail(`unexpected send options ${JSON.stringify(options)}`);
+  };
+  // The TUI's ctx.abort() runs restoreQueuedMessagesToEditor({abort:true}),
+  // which clears Pi's queues (Pi 1.2.0 interactive-mode.js:1732-1734, 3891-3910).
+  native.onAbort(() => { queue.length = 0; });
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  for (const id of ["compacted", "dequeued"]) {
+    assert.equal((await owner.native("native.steer", {
+      session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null,
+    })).accepted, true);
+  }
+  queue.splice(queue.indexOf("dequeued"), 1);
+  assert.deepEqual(queue, ["compacted"]);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.deepEqual(queue, []);
+  assert.deepEqual(history, ["compacted", "dequeued"]);
+  assert.equal(native.shutdown(), 0);
+});
+
+// A lane's rpc abort leaves Pi's queue in place and the next run drains it
+// (Pi 1.2.0 rpc-mode.js:327-329), so a lane's aborted settle neither clears
+// nor writes anything.
+test("lane aborted settle leaves a never-started steer to Pi", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
+  native.setIdle(false);
+  assert.equal((await owner.native("native.steer", {
+    session_id: "native-1", message_id: "steer-1", body: "peer", run: runToken(1),
+  })).accepted, true);
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 0);
   assert.equal(sends.length, 1);
   assert.equal(native.shutdown(), 0);
 });

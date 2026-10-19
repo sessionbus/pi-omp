@@ -69,6 +69,15 @@ export function appendNative(pi, ctx, delivery) {
   return { accepted: true };
 }
 
+// While Pi is idle, as at every agent_settled (Pi 1.2.0 agent-session.js:686,
+// 1057-1059), a send with no options appends the message to history and the
+// model's context at once and starts no turn (:1848-1857). Its own message
+// events go only to session listeners, not to extensions.
+export function historyNative(pi, ctx, delivery) {
+  validDelivery(ctx, delivery);
+  pi.sendMessage(nativeMessage(delivery));
+}
+
 // While a native run is active Pi puts a triggerTurn custom message in its
 // steering queue synchronously (Pi 1.2.0 agent-session.js:1824-1835). The
 // agent loop reads that queue after each turn's tool results and adds it
