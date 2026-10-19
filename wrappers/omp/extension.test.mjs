@@ -570,6 +570,62 @@ test("interactive later batch can complete before an older claimed batch", async
   assert.equal(native.aborts(), 0);
 });
 
+// OMP builds the provider context, and runs the context hook, before it emits
+// the turn's input message events (agent-core 18.11.0 agent-loop.ts:1312-1328,
+// 1360, 1412-1416; the same in 18.1.17), for an idle prompt and for a steer
+// drained at a turn boundary alike. One exact copy in that context is this
+// order: the session keeps running, and the batch completes at its
+// message_end with the four reports in order. Before this change the context
+// check ended the session.
+test("interactive delivery accepts OMP's context before its own message events", async () => {
+  for (const busy of [false, true]) {
+    const owner = new FakeOwner();
+    const native = nativeFixture("interactive-main", "tui");
+    const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+    await start(extension, native, owner);
+    const token = owner.calls[0].params.owner_token;
+    native.setIdle(!busy);
+    assert.equal((await owner.native("native.stage", {
+      owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+    })).queued, true);
+    const message = nativeCustom(native.scheduled()[0]);
+    await native.emit("context", { type: "context", messages: [{ role: "user", content: "earlier" }, message] }, native.context());
+    assert.equal(native.aborts(), 0, `busy=${busy}`);
+    await native.emit("message_start", { type: "message_start", message }, native.context());
+    await native.emit("message_end", { type: "message_end", message }, native.context());
+    await owner.waitFor((calls) => calls.filter((call) => call.method === "delivery.observe").length === 4);
+    assert.deepEqual(
+      owner.calls.filter((call) => call.method === "delivery.observe").map((call) => call.params.phase),
+      ["claimed", "message_start", "message_end", "context"],
+    );
+    // The batch is complete: a later turn's context that repeats it is harmless.
+    await native.emit("context", { type: "context", messages: [message] }, native.context());
+    assert.equal(native.aborts(), 0, `busy=${busy}`);
+    assert.equal(native.shutdowns(), 0, `busy=${busy}`);
+  }
+});
+
+test("interactive context before its message events still rejects a changed or repeated delivery", async () => {
+  for (const [name, contextOf] of [
+    ["changed copy", (message) => [{ ...message, content: "changed body" }]],
+    ["two copies", (message) => [message, { ...message }]],
+    ["exact copy beside a changed one", (message) => [message, { ...message, content: "changed body" }]],
+  ]) {
+    const owner = new FakeOwner();
+    const native = nativeFixture("interactive-main", "tui");
+    const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+    await start(extension, native, owner);
+    const token = owner.calls[0].params.owner_token;
+    assert.equal((await owner.native("native.stage", {
+      owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+    })).queued, true);
+    const message = nativeCustom(native.scheduled()[0]);
+    await native.emit("context", { type: "context", messages: contextOf(message) }, native.context());
+    assert.equal(native.aborts(), 1, name);
+    assert.equal(native.shutdowns(), 1, name);
+  }
+});
+
 test("interactive scheduling failure retires the owner and releases the claimed batch", async () => {
   const owner = new FakeOwner();
   const native = nativeFixture("interactive-main", "tui");

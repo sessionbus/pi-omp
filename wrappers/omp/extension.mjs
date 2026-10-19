@@ -775,6 +775,25 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     if (batch.phase !== expected) throw new Error("OMP native delivery message event is out of order");
     scheduleDelivery(factory, state, batch, phase);
     batch.phase = expected + 1;
+    // The provider context already held this batch (see observeContext), so
+    // its message_end completes it.
+    if (batch.phase === 3 && batch.contextSeen) {
+      scheduleDelivery(factory, state, batch, "context");
+      batch.phase = 4;
+      completeBatch(state, batch);
+      scheduleDeliveryTurn(factory, state);
+    }
+  }
+
+  function completeBatch(state, batch) {
+    for (const entry of batch.entries) {
+      const bytes = deliveryEntryBytes(entry);
+      state.deliveryBytes -= bytes;
+      release(bytes);
+    }
+    state.deliveryBytes -= batch.contentBytes;
+    release(batch.contentBytes);
+    state.batches.delete(batch.batchToken);
   }
 
   function observeContext(factory, ctx, messages) {
@@ -789,7 +808,18 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         // this independently submitted batch has not emitted its own message
         // events. Ignore only context that does not reference this batch.
         if (matches.length === 0 && !referenced) continue;
-        throw new Error("OMP native context observed a claimed Sessionbus delivery before its message events");
+        // OMP builds the provider context, and runs this hook, before it emits
+        // the turn's input message events (agent-core 18.11.0
+        // agent-loop.ts:1312-1328, 1360, 1412-1416; the same in 18.1.17), for
+        // an idle prompt and for a steer drained at a turn boundary alike. One
+        // exact copy is that order: note it, and complete at message_end. Any
+        // other reference changed the delivery's identity.
+        const references = list.filter((message) => referencesDeliveryBatch(message, state, batch)).length;
+        if (matches.length !== 1 || references !== 1) {
+          throw new Error("OMP native context did not preserve the claimed Sessionbus delivery");
+        }
+        batch.contextSeen = true;
+        continue;
       }
       if (matches.length !== 1 || batch.phase !== 3) {
         throw new Error("OMP native context did not preserve the claimed Sessionbus delivery");
@@ -798,16 +828,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
       batch.phase = 4;
       completed.push(batch);
     }
-    for (const batch of completed) {
-      for (const entry of batch.entries) {
-        const bytes = deliveryEntryBytes(entry);
-        state.deliveryBytes -= bytes;
-        release(bytes);
-      }
-      state.deliveryBytes -= batch.contentBytes;
-      release(batch.contentBytes);
-      state.batches.delete(batch.batchToken);
-    }
+    for (const batch of completed) completeBatch(state, batch);
     scheduleDeliveryTurn(factory, state);
   }
 
