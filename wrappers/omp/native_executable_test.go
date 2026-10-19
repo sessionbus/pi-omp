@@ -52,7 +52,84 @@ func newOMPExecutableFixture(t *testing.T) ompExecutableFixture {
 	}
 	t.Setenv("PATH", bin)
 	t.Setenv(NativeBinPathEnv, "")
+	// No Bun in its standard install directory unless a test adds one.
+	t.Setenv("HOME", filepath.Join(directory, "home"))
+	t.Setenv(nativeRuntimeInstallEnv, "")
 	return ompExecutableFixture{root: root, front: front, entry: entry, runtime: runtime}
+}
+
+// writeStandardBun puts an executable Bun at directory/bin/bun, the shape of
+// Bun's own install location.
+func writeStandardBun(t *testing.T, directory string) string {
+	t.Helper()
+	bun := filepath.Join(directory, "bin", "bun")
+	if err := os.MkdirAll(filepath.Dir(bun), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bun, []byte("standard Bun\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(bun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+// A daemon-started lane has the service PATH, which usually omits Bun's own
+// install directory. Bun is then found there: $BUN_INSTALL/bin/bun when
+// BUN_INSTALL is set, else $HOME/.bun/bin/bun. Before this change the lane
+// failed with "exec: \"bun\": executable file not found in $PATH".
+func TestResolveNativeExecutableFindsBunInItsStandardInstallDirectory(t *testing.T) {
+	fixture := newOMPExecutableFixture(t)
+	if err := os.Remove(filepath.Join(filepath.Dir(fixture.front), "bun")); err != nil {
+		t.Fatal(err)
+	}
+	home := os.Getenv("HOME")
+	homeBun := writeStandardBun(t, filepath.Join(home, ".bun"))
+	result, err := ResolveNativeExecutable(fixture.front)
+	if err != nil || result.RuntimePath != homeBun {
+		t.Fatalf("home Bun = %#v, %v", result, err)
+	}
+
+	installBun := writeStandardBun(t, filepath.Join(filepath.Dir(home), "bun-install"))
+	t.Setenv(nativeRuntimeInstallEnv, filepath.Dir(filepath.Dir(installBun)))
+	result, err = ResolveNativeExecutable(fixture.front)
+	if err != nil || result.RuntimePath != installBun {
+		t.Fatalf("BUN_INSTALL Bun = %#v, %v", result, err)
+	}
+
+	// BUN_INSTALL names Bun's location; when it holds no Bun, HOME is not
+	// tried, and the error is PATH's as before.
+	t.Setenv(nativeRuntimeInstallEnv, filepath.Join(filepath.Dir(home), "empty-install"))
+	if _, err = ResolveNativeExecutable(fixture.front); err == nil ||
+		!strings.Contains(err.Error(), `runtime: exec: "bun": executable file not found in $PATH`) {
+		t.Fatalf("missing BUN_INSTALL Bun = %v", err)
+	}
+}
+
+func TestResolveNativeExecutablePrefersBunOnPATH(t *testing.T) {
+	fixture := newOMPExecutableFixture(t)
+	writeStandardBun(t, filepath.Join(os.Getenv("HOME"), ".bun"))
+	result, err := ResolveNativeExecutable(fixture.front)
+	if err != nil || result.RuntimePath != fixture.runtime {
+		t.Fatalf("PATH Bun not preferred: %#v, %v", result, err)
+	}
+}
+
+func TestResolveNativeExecutableValidatesTheStandardBun(t *testing.T) {
+	fixture := newOMPExecutableFixture(t)
+	if err := os.Remove(filepath.Join(filepath.Dir(fixture.front), "bun")); err != nil {
+		t.Fatal(err)
+	}
+	bun := writeStandardBun(t, filepath.Join(os.Getenv("HOME"), ".bun"))
+	if err := os.Chmod(bun, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveNativeExecutable(fixture.front); err == nil ||
+		!strings.Contains(err.Error(), `runtime: exec: "bun": executable file not found in $PATH`) {
+		t.Fatalf("non-executable standard Bun accepted: %v", err)
+	}
 }
 
 func TestResolveNativeExecutablePublishedPackageAndBun(t *testing.T) {

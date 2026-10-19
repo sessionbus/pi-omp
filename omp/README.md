@@ -6,7 +6,9 @@ prompt, which older versions do not send for agent work, so on them a lane Run
 waits until it is cancelled. There is no runtime version check. Earlier builds
 were tested with Oh My Pi 18.1.17 and Bun 1.4.0. Install Oh My Pi and make its
 Bun runtime available on the login `PATH`, then run this archive's `install`
-script.
+script. A lane started by the Sessionbus service uses the service's `PATH`. If
+`bun` is not on it, the lane uses Bun's standard install location instead:
+`$BUN_INSTALL/bin/bun` when `BUN_INSTALL` is set, otherwise `~/.bun/bin/bun`.
 
 Interactive terminal launches retain native OMP arguments and add one managed,
 per-process extension. Wrapper-owned `-g`/`--group` values select Sessionbus

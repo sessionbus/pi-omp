@@ -20,6 +20,10 @@ const nativePackageName = "@oh-my-pi/pi-coding-agent"
 const nativePackageEntry = "dist/cli.js"
 const nativeRuntimeCommand = "bun"
 
+// nativeRuntimeInstallEnv is Bun's own installer variable: Bun's documented
+// install location is $BUN_INSTALL/bin, by default ~/.bun/bin.
+const nativeRuntimeInstallEnv = "BUN_INSTALL"
+
 // NativeExecutable identifies OMP's published command, package entry, and the
 // Bun executable selected by the same PATH inherited by the native child.
 type NativeExecutable struct {
@@ -87,7 +91,15 @@ func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
 
 	runtime, err := exec.LookPath(nativeRuntimeCommand)
 	if err != nil {
-		return NativeExecutable{}, fmt.Errorf("%s runtime: %w", label, err)
+		// A service PATH (launchd, systemd) usually omits Bun's own install
+		// directory, so a lane started by the daemon tries it next. The same
+		// validation applies below, and the error stays PATH's when neither
+		// is present.
+		standard, ok := standardBunRuntime()
+		if !ok {
+			return NativeExecutable{}, fmt.Errorf("%s runtime: %w", label, err)
+		}
+		runtime = standard
 	}
 	runtime, err = filepath.Abs(runtime)
 	if err != nil {
@@ -108,6 +120,29 @@ func ResolveNativeExecutable(frontDoor string) (NativeExecutable, error) {
 	return NativeExecutable{
 		Path: path, EntryPath: entry, RuntimePath: runtime, PackageRoot: root,
 	}, nil
+}
+
+// standardBunRuntime is Bun's documented install location:
+// $BUN_INSTALL/bin/bun when BUN_INSTALL is set, else $HOME/.bun/bin/bun, if it
+// is an executable file there.
+func standardBunRuntime() (string, bool) {
+	directory := os.Getenv(nativeRuntimeInstallEnv)
+	if directory == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		directory = filepath.Join(home, ".bun")
+	}
+	candidate := filepath.Join(directory, "bin", nativeRuntimeCommand)
+	if !filepath.IsAbs(candidate) {
+		return "", false
+	}
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return "", false
+	}
+	return candidate, true
 }
 
 func ompRegularFile(path string, limit int64) ([]byte, error) {
