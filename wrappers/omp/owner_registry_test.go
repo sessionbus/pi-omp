@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -89,8 +90,7 @@ func (fixture *ownerNativeFixture) handle(_ context.Context, method string, raw 
 			MessageID: request.MessageID, Queued: &queued,
 		}
 		if fixture.topology == ownerTopologyInteractive {
-			busy := fixture.busy
-			result.Busy = &busy
+			result.Busy = json.RawMessage(strconv.FormatBool(fixture.busy))
 		}
 		return json.Marshal(result)
 	case "native.steer":
@@ -776,8 +776,7 @@ func TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner(t *testing.
 		if !queued {
 			result.Reason = "queue_full"
 		} else {
-			busy := false
-			result.Busy = &busy
+			result.Busy = json.RawMessage("false")
 		}
 		return result
 	}
@@ -2369,6 +2368,8 @@ func TestOwnerRegistryInteractiveReceiptFollowsBusyStateAtTheCall(t *testing.T) 
 		{name: "no busy state", fields: map[string]any{"queued": true}},
 		{name: "null busy state", fields: map[string]any{"queued": true, "busy": nil}},
 		{name: "busy state on queue_full", fields: map[string]any{"queued": false, "reason": "queue_full", "busy": false}},
+		{name: "null busy state on queue_full", fields: map[string]any{"queued": false, "reason": "queue_full", "busy": nil}},
+		{name: "string busy state", fields: map[string]any{"queued": true, "busy": "true"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			listener := ownerBusListener(t)
@@ -2416,8 +2417,9 @@ func TestOwnerRegistryInteractiveReceiptFollowsBusyStateAtTheCall(t *testing.T) 
 // receipt changed, and a child answer carrying a busy state is invalid.
 func TestOwnerRegistryTaskChildKeepsItsQueuedReceipt(t *testing.T) {
 	for name, fields := range map[string]map[string]any{
-		"queued":     {"queued": true},
-		"busy state": {"queued": true, "busy": true},
+		"queued":          {"queued": true},
+		"busy state":      {"queued": true, "busy": true},
+		"null busy state": {"queued": true, "busy": nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			listener := ownerBusListener(t)

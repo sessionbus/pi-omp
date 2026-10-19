@@ -222,7 +222,25 @@ type ownerStageResult struct {
 	MessageID  string `json:"message_id"`
 	Queued     *bool  `json:"queued"`
 	Reason     string `json:"reason,omitempty"`
-	Busy       *bool  `json:"busy,omitempty"`
+	// Busy stays raw so that an absent member and JSON null differ: a
+	// pointer would decode both to nil.
+	Busy json.RawMessage `json:"busy,omitempty"`
+}
+
+// ownerStageBusy reads a stage answer's busy member. It is either absent or
+// exactly true or false; JSON null or any other value is invalid, as the
+// member was as an unknown field before it existed.
+func ownerStageBusy(raw json.RawMessage) (present, busy, valid bool) {
+	if raw == nil {
+		return false, false, true
+	}
+	switch string(bytes.TrimSpace(raw)) {
+	case "true":
+		return true, true, true
+	case "false":
+		return true, false, true
+	}
+	return true, false, false
 }
 
 type ownerSteerRequest struct {
@@ -1085,9 +1103,11 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 	// confirmation. Task children keep queued_for_next_turn.
 	reportsBusy := registry.topology == ownerTopologyInteractive && state.Scope == ownerScopePrimary
 	var result ownerStageResult
-	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != state.OwnerToken || result.SessionID != state.SessionID ||
+	err = decodeOwnerJSON(raw, &result)
+	busyPresent, busy, busyValid := ownerStageBusy(result.Busy)
+	if err != nil || result.OwnerToken != state.OwnerToken || result.SessionID != state.SessionID ||
 		result.MessageID != request.MessageID || result.Queued == nil || (*result.Queued && result.Reason != "") || (!*result.Queued && result.Reason != "queue_full") ||
-		(result.Busy != nil) != (*result.Queued && reportsBusy) {
+		!busyValid || busyPresent != (*result.Queued && reportsBusy) {
 		registry.fail(errors.New("OMP native stage acknowledgement is invalid"))
 		return kit.DeliveryReceipt{}, errors.New("OMP native stage acknowledgement is invalid")
 	}
@@ -1110,7 +1130,7 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 	if !reportsBusy {
 		return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 	}
-	if *result.Busy {
+	if busy {
 		return kit.DeliveryReceipt{Disposition: "injected"}, nil
 	}
 	return kit.DeliveryReceipt{Disposition: "written"}, nil
