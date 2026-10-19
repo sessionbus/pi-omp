@@ -439,6 +439,66 @@ test("a superseded owner keeps Pi running without Sessionbus", { timeout: 5000 }
   assert.equal(await owner.done, undefined);
 });
 
+// The daemon writes session.superseded and closes its end at once, without
+// waiting for a reply (bus internal/daemon/session.go supersede). The kit's
+// courtesy reply then fails to write. Kit 0.5.9 left that failure unhandled;
+// kit 0.5.12 handles it, and Pi keeps running. This is source and local
+// evidence only: the cause of the live takeover's wrapper exit 129 is unknown.
+test("a takeover the daemon closes at once leaves no unhandled rejection", { timeout: 5000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "pi-superseded-close-"));
+  const socket = path.join(directory, "bus.sock");
+  const rejections = [];
+  const collect = (reason) => rejections.push(reason);
+  process.on("unhandledRejection", collect);
+  let daemon;
+  let stream;
+  const server = net.createServer((accepted) => {
+    stream = accepted;
+    daemon = new kit.Connection(accepted, false, async (request) => {
+      if (request.method === "session.hello") return daemon.result(request, {});
+      return daemon.error(request, -32600);
+    });
+  });
+  server.listen(socket);
+  await once(server, "listening");
+  t.after(async () => {
+    process.off("unhandledRejection", collect);
+    daemon?.close();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const peers = [];
+  const connectPeer = (...args) => {
+    const peer = kit.connectPeer(...args);
+    peers.push(peer);
+    return peer;
+  };
+  const native = async ({ method }) => {
+    if (method === "native.describe") return { session_id: "taken-native", name: "Taken", cwd: "/work" };
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner({ ...launch, socket }, native, connectPeer);
+  t.after(() => owner.close());
+  await ready(owner, "taken-native", "Taken");
+  assert.equal(peers.length, 1);
+
+  // As the daemon does: write the final frame, then close without reading.
+  const frame = `${JSON.stringify({ jsonrpc: "2.0", id: 900, method: "session.superseded", params: {} })}\n`;
+  stream.write(frame, () => stream.destroy());
+  await peers[0].closed;
+  for (let turn = 0; turn < 3; turn++) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(rejections.map((reason) => reason?.code ?? String(reason)), []);
+  await assert.rejects(toolCall(owner, "taken-native", "after"), bridgeError("tool_error",
+    "Sessionbus: another pi-peer launch took over this session (superseded); relaunch to use Sessionbus here"));
+  const state = await Promise.race([
+    owner.done.then(() => "ended"),
+    new Promise((resolve) => setImmediate(() => resolve("running"))),
+  ]);
+  assert.equal(state, "running");
+});
+
 // From DEV1's read of 7e61f51: the Caller's reply succeeds, and the takeover
 // lands before the owner's continuation runs.
 test("a successful Caller reply that crosses a takeover answers the takeover text", async () => {
