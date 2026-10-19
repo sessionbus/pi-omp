@@ -145,6 +145,25 @@ block this release, and no code handles it. Source: OMP 18.11.0 npm `src`
   queue into a new turn (`agent-session.ts:9794-9797`), so the message is
   delivered in that next turn.
 
+## Interactive delivery and OMP's context order (2026-10-19)
+
+The first live idle delivery ended the session. Our extension saw the
+delivery in OMP's `context` event before the message's own `message_start`
+and `message_end`, and treated that as a protocol violation. It aborted the
+task ("Interrupted by user") and shut the session down. The order is OMP's
+by design, in 18.1.17 and 18.11.0 alike. The agent loop builds the
+provider context, and runs the `context` hook, before it emits the turn's
+input message events (`@oh-my-pi/pi-agent-core` `agent-loop.ts`
+18.11.0:1312-1328, 1360, 1412-1416). That covers both an idle prompt and a
+steer taken at a turn boundary.
+
+- One exact copy of a claimed delivery in such a context is now accepted.
+  The delivery completes at its `message_end`, and the wrapper still gets
+  the claimed, `message_start`, `message_end` and `context` reports in that
+  order.
+- A changed copy, or more than one copy, still ends the session.
+- Native Task children use the same check and are covered.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream
