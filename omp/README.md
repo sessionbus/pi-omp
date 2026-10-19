@@ -21,6 +21,18 @@ real native OMP session through the same per-launch extension. Installation
 does not register a global OMP extension, create a native session, or make a
 model request.
 
+A peer message that arrives while a lane's Run is active, before OMP's run for
+it yields, is handed to OMP as a steer, which the running task reads at its
+next boundary. Its receipt is `injected`: handed to OMP while it was busy with
+that Run, not yet seen by the model. OMP places the message only after an
+await of its own; if the task ended in between, the message is appended to
+the session history without starting a turn, and the next Run reads it. A
+message OMP queues after the task's last check for steering, or before an
+interrupt, is answered by OMP's own continuation after the Run: it reaches the
+model and its answer is in the native history, but not in the Run's result.
+Without an active Run the lane is not running and the daemon starts a later
+Run.
+
 Every managed factory exposes the one `sessionbus` tool directly with OMP's
 `loadMode: "essential"` and `{tier: "exec", policy: "allow"}` approval.
 This covers the lane, interactive

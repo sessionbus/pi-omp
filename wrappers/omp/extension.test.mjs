@@ -41,8 +41,10 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
   let shutdowns = 0;
   let sendError;
   let resetSequence = 0;
+  let idle = true;
   const entries = [];
   const scheduled = [];
+  const steered = [];
   const ctx = {
     mode,
     cwd,
@@ -53,6 +55,7 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
     },
     abort: () => { aborts += 1; },
     shutdown: () => { shutdowns += 1; },
+    isIdle: () => idle,
   };
   const pi = {
     tool: undefined,
@@ -63,6 +66,13 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
     },
     registerTool(tool) { this.tool = tool; },
     sendMessage(message, options) {
+      // A lane steer starts no turn of its own; a staged delivery does.
+      if (mode === "rpc") {
+        assert.deepEqual(options, { deliverAs: "steer" });
+        if (sendError) throw sendError;
+        steered.push(structuredClone(message));
+        return;
+      }
       assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
       if (sendError) throw sendError;
       scheduled.push(structuredClone(message));
@@ -78,12 +88,15 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
         sessionManager: ctx.sessionManager,
         abort: ctx.abort,
         shutdown: ctx.shutdown,
+        isIdle: ctx.isIdle,
       };
     },
     setSessionID(value) { currentID = value; },
     setName(value) { currentName = value; },
     addResetBoundary(id = `reset-${++resetSequence}`) { entries.push({ type: "reset_boundary", id }); },
     throwOnSend(error) { sendError = error; },
+    setIdle(value) { idle = value; },
+    steered: () => structuredClone(steered),
     aborts: () => aborts,
     shutdowns: () => shutdowns,
     scheduled: () => structuredClone(scheduled),
@@ -301,6 +314,89 @@ test("lane primary reports ready and preflight before routing its exact tool ide
     },
   });
   assert.deepEqual(extension.stats(), { bindings: 0, reports: 0, retainedBytes: 0 });
+});
+
+// A lane delivery is steered only for the run that preflighted with its token,
+// only while OMP is busy, and only until that run yields; a later preflight
+// replaces the token. Before this change the lane had no native.steer.
+test("lane primary steers only its current run while OMP is busy, until the run yields", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture();
+  const extension = createOMPExtension({ launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  const steer = (messageID, runToken) => owner.native("native.steer", {
+    owner_token: token, session_id: "native-main", message_id: messageID, body: `body ${messageID}`, run_token: runToken,
+  });
+  const idle = (messageID) => ({ owner_token: token, session_id: "native-main", message_id: messageID, accepted: false, reason: "idle" });
+  const accepted = (messageID) => ({ owner_token: token, session_id: "native-main", message_id: messageID, accepted: true });
+  const preflights = () => owner.calls.filter((call) => call.method === "run.preflight").map((call) => call.params.run_token);
+
+  native.setIdle(false);
+  assert.deepEqual(await steer("before-run", "token1-primary-1-run-1"), idle("before-run"));
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "owned prompt" }, native.context());
+  await owner.waitFor(() => preflights().length === 1);
+  const [runToken] = preflights();
+  native.setIdle(true);
+  assert.deepEqual(await steer("idle", runToken), idle("idle"));
+  native.setIdle(false);
+  assert.deepEqual(await steer("other-run", `${runToken}-other`), idle("other-run"));
+  assert.deepEqual(native.steered(), []);
+  assert.deepEqual(await steer("steered", runToken), accepted("steered"));
+  assert.deepEqual(native.steered(), [{
+    customType: deliveryMessageType, content: "body steered", display: true, attribution: "user",
+    details: { owner_token: token, session_id: "native-main", message_ids: ["steered"] },
+  }]);
+
+  // An end that continues is still the run; a yielded one, by OMP's rule
+  // !willContinue || awaitingAsyncWork, ends it.
+  await native.emit("agent_end", { type: "agent_end", messages: [], willContinue: true }, native.context());
+  assert.deepEqual(await steer("continuing", runToken), accepted("continuing"));
+  await native.emit("agent_end", { type: "agent_end", messages: [], willContinue: true, awaitingAsyncWork: true }, native.context());
+  assert.deepEqual(await steer("after-yield", runToken), idle("after-yield"));
+
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "own work" }, native.context());
+  await owner.waitFor(() => preflights().length === 2);
+  const nextToken = preflights()[1];
+  assert.notEqual(nextToken, runToken);
+  assert.deepEqual(await steer("old-token", runToken), idle("old-token"));
+  assert.deepEqual(await steer("next", nextToken), accepted("next"));
+  await native.emit("agent_end", { type: "agent_end", messages: [] }, native.context());
+  assert.deepEqual(await steer("after-end", nextToken), idle("after-end"));
+  assert.deepEqual(native.steered().map((message) => message.details.message_ids[0]), ["steered", "continuing", "next"]);
+  assert.deepEqual(native.scheduled(), []);
+});
+
+test("native steer is refused outside the lane's primary session", async () => {
+  const notFound = (error) => error instanceof BridgeCallError && error.code === "method_not_found";
+  const interactiveOwner = new FakeOwner();
+  const interactive = nativeFixture("interactive-main", "tui");
+  const interactiveExtension = createOMPExtension({
+    launch: launch("interactive"), connect: interactiveOwner.connect, createToken: deterministicTokens(),
+  });
+  await start(interactiveExtension, interactive, interactiveOwner);
+  interactive.setIdle(false);
+  await assert.rejects(interactiveOwner.native("native.steer", {
+    owner_token: interactiveOwner.calls[0].params.owner_token, session_id: "interactive-main",
+    message_id: "interactive", body: "body", run_token: "token1-primary-1-run-1",
+  }), notFound);
+
+  const owner = new FakeOwner();
+  const extension = createOMPExtension({ launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens() });
+  const primary = nativeFixture();
+  const child = nativeFixture("child-session", "print", "/work/child", "child");
+  await start(extension, primary, owner);
+  extension(child.pi);
+  await child.emit("session_start");
+  await owner.waitFor((calls) => calls.filter((call) => call.method === "owner.ready").length === 2);
+  const childReady = owner.calls.filter((call) => call.method === "owner.ready")[1].params;
+  assert.equal(childReady.scope, "child");
+  child.setIdle(false);
+  await assert.rejects(owner.native("native.steer", {
+    owner_token: childReady.owner_token, session_id: "child-session",
+    message_id: "child", body: "body", run_token: "token2-child-1-run-1",
+  }), notFound);
+  assert.deepEqual([...interactive.steered(), ...primary.steered(), ...child.steered()], []);
 });
 
 test("native stage can follow published hello before local owner.ready continuation", async () => {

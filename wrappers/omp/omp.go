@@ -422,20 +422,49 @@ func (p *Wrapper) lose(err error) {
 	}
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	if _, err := host.RenderNativeMessage(request); err != nil {
+// Deliver steers a message into the lane's running task: while this Run's
+// native run is admitted and has not yielded, the managed extension hands it
+// to OMP as a steer. The steer carries the token of the Run's own preflight;
+// the extension checks it, OMP's busy state and sends in one synchronous step,
+// so a steer for this Run never enters a later one. `injected` claims only that
+// hand-off: OMP places the message after an await of its own, and one it
+// queues after the run's last steering poll is answered by OMP's own
+// continuation, outside this Run's result. Otherwise the lane is not running
+// and the daemon starts a later Run.
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
+	body, err := host.RenderNativeMessage(request)
+	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	p.mu.Lock()
 	available := p.opened && !p.closing && p.failure == nil && p.ctx.Err() == nil
+	turn, owner := p.active, p.owner
+	current := run != nil && p.run == run && turn != nil && turn.run == run && owner != nil && owner.registry != nil
 	p.mu.Unlock()
 	if !available {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "lane_unavailable"}, nil
 	}
-	return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	if !current {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	turn.mu.Lock()
+	running := turn.failure == nil && turn.preflight && turn.starts > 0 && !turn.ownEndedLocked()
+	token, binding := turn.preflightToken, turn.binding
+	turn.mu.Unlock()
+	if !running {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	accepted, err := owner.registry.steerPrimary(ctx, binding, token, request.MessageID, body)
+	if err != nil {
+		return sessionkit.DeliveryReceipt{}, err
+	}
+	if !accepted {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
 
 func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {

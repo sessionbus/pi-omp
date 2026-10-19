@@ -213,6 +213,18 @@ function customDeliveryMessage(state, batch) {
   };
 }
 
+// A lane delivery steered into the running native run. It has no batch: the
+// lane's receipt is the hand-off itself, and nothing later is correlated.
+function laneDeliveryMessage(state, messageID, body) {
+  return {
+    customType: deliveryMessageType,
+    content: body,
+    display: true,
+    attribution: "user",
+    details: { owner_token: state.ownerToken, session_id: state.sessionID, message_ids: [messageID] },
+  };
+}
+
 function matchingDelivery(message, state, batch) {
   if (!object(message) || message.role !== "custom" || message.customType !== deliveryMessageType ||
       message.content !== batch.content || message.display !== true || message.attribution !== "user") return false;
@@ -401,6 +413,29 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         scheduleDeliveryTurn(state.factory, state);
         return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, queued: true };
       }
+      case "native.steer": {
+        const state = nativeState(params, ["owner_token", "session_id", "message_id", "body", "run_token"]);
+        if (state.scope !== "primary" || launch.topology !== "lane") {
+          throw new BridgeCallError("method_not_found", "OMP native steer is only for the lane's primary session");
+        }
+        if (!state.described || state.ending) {
+          throw new BridgeCallError("stale_owner", "OMP native steer does not own a deliverable factory");
+        }
+        const id = messageID(params.message_id);
+        const body = boundedText(params.body, maxTextBytes, "steered delivery body", { empty: true });
+        const runToken = ownerToken(params.run_token);
+        throwIfAborted(signal);
+        // The Run's token, OMP's busy state and the send are one synchronous
+        // step, so a steer made for a Run never enters a later one. OMP places
+        // the message only after an await of its own (agent-session.ts:8814-
+        // 8840): still streaming, it joins the steering queue; idle by then,
+        // with no triggerTurn, it is appended to history without a turn.
+        if (state.runToken !== runToken || state.ctx.isIdle()) {
+          return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "idle" };
+        }
+        state.pi.sendMessage(laneDeliveryMessage(state, id, body), { deliverAs: "steer" });
+        return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: true };
+      }
       case "native.shutdown": {
         const state = nativeState(params, ["owner_token", "session_id"]);
         if (state.scope !== "primary") {
@@ -555,7 +590,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     const state = {
       factory, pi, ctx, scope, mode, ownerToken: token, sessionID, controller: new AbortController(),
       described: false, admitted: false, ending: false, ended: false, failure: undefined,
-      queued: [], batches: new Map(),
+      queued: [], batches: new Map(), runToken: undefined,
       deliveryBytes: 0, bindingBytes, reportSequence: 0, runSequence: 0, batchSequence: 0,
       resetBoundary: resetBoundarySnapshot(ctx),
     };
@@ -648,6 +683,8 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
   function schedulePreflight(factory, state, prompt) {
     state.runSequence += 1;
     const runToken = ownerToken(`${state.ownerToken}-run-${state.runSequence}`);
+    // A lane steer must carry this token until the run yields.
+    state.runToken = runToken;
     const sequence = nextReport(state);
     const params = {
       owner_token: state.ownerToken, session_id: state.sessionID, report_sequence: sequence,
@@ -873,6 +910,14 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         failState(factory.current, error);
         return undefined;
       }
+    });
+
+    // A yielded end, by OMP's own rule (agent-session.ts:5063-5067), ends the
+    // lane run that a steer may join; an end that continues does not.
+    pi.on("agent_end", (event) => {
+      const state = factory.current;
+      if (launch.topology !== "lane" || state?.scope !== "primary") return;
+      if (event?.willContinue !== true || event?.awaitingAsyncWork === true) state.runToken = undefined;
     });
 
     pi.on("message_start", (event, ctx) => {

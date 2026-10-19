@@ -224,6 +224,22 @@ type ownerStageResult struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+type ownerSteerRequest struct {
+	OwnerToken string `json:"owner_token"`
+	SessionID  string `json:"session_id"`
+	MessageID  string `json:"message_id"`
+	Body       string `json:"body"`
+	RunToken   string `json:"run_token"`
+}
+
+type ownerSteerResult struct {
+	OwnerToken string `json:"owner_token"`
+	SessionID  string `json:"session_id"`
+	MessageID  string `json:"message_id"`
+	Accepted   *bool  `json:"accepted"`
+	Reason     string `json:"reason,omitempty"`
+}
+
 type ownerShutdownResult struct {
 	OwnerToken string `json:"owner_token"`
 	SessionID  string `json:"session_id"`
@@ -1085,6 +1101,42 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 	}
 	record.acknowledged = true
 	return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+}
+
+// steerPrimary hands a lane delivery to the primary session's running native
+// run. The extension checks runToken, OMP's busy state and sends in one
+// synchronous step; accepted means only that hand-off. Once the call has been
+// made its outcome is uncertain on any failure, so it is never retried, and as
+// for Pi the lane stays: unlike native.stage no FIFO order was reserved.
+func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBinding, runToken, messageID, body string) (bool, error) {
+	if registry.topology != ownerTopologyLane || !validOwnerToken(runToken) || !validOwnerMessageID(messageID) ||
+		!validOwnerText(body, maxOwnerTextBytes) {
+		return false, errors.New("invalid OMP native steer")
+	}
+	params := ownerSteerRequest{OwnerToken: binding.OwnerToken, SessionID: binding.SessionID, MessageID: messageID, Body: body, RunToken: runToken}
+	encoded, err := json.Marshal(params)
+	if err != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
+		return false, errors.New("OMP native steer exceeds the private bridge frame")
+	}
+	registry.mu.Lock()
+	state := registry.bindings[binding.OwnerToken]
+	current := !registry.ending && registry.err == nil && registry.primaryToken == binding.OwnerToken &&
+		state != nil && state.admitted && state.SessionID == binding.SessionID
+	bridge := registry.bridge
+	registry.mu.Unlock()
+	if !current || bridge == nil {
+		return false, errors.New("OMP native steer does not own the current primary session")
+	}
+	var raw json.RawMessage
+	if err = bridge.Call(ctx, "native.steer", params, &raw); err != nil {
+		return false, fmt.Errorf("OMP native steer outcome is uncertain: %w", err)
+	}
+	var result ownerSteerResult
+	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != binding.OwnerToken || result.SessionID != binding.SessionID ||
+		result.MessageID != messageID || result.Accepted == nil || (*result.Accepted && result.Reason != "") || (!*result.Accepted && result.Reason != "idle") {
+		return false, errors.New("OMP native steer outcome is uncertain: its answer is invalid")
+	}
+	return *result.Accepted, nil
 }
 
 func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID string) (ownerDescribeResult, error) {

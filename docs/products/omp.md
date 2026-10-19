@@ -59,6 +59,50 @@ Not covered, listed:
 - OMP 18.1.17 never sends an agent-invoked `prompt_result`; a lane Run there
   waits until it is cancelled.
 
+## Lane busy steering on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): OMP keeps its Go helper for this release, and
+lanes get busy steering. Source: OMP 18.11.0 npm `src`
+(`session/agent-session.ts`, `modes/runtime-init.ts`, `modes/rpc/rpc-mode.ts`)
+and `@oh-my-pi/pi-agent-core` 18.11.0 `src/agent-loop.ts`.
+
+- **When.** `Deliver` steers only while the Worker's Run is the lane's current
+  Run, its own preflight was taken, and its run started and has not yielded.
+  Otherwise the lane is not running, as before.
+- **How.** Go calls `native.steer` for the lane's primary session over the
+  private bridge, with the token of the Run's own preflight. The extension
+  keeps that token from its preflight until the run yields
+  (`!willContinue || awaitingAsyncWork`, OMP's own rule at
+  `agent-session.ts:5063-5067`) or a later preflight replaces it. In one
+  synchronous step it checks the token, checks `!ctx.isIdle()` and calls
+  `pi.sendMessage(message, {deliverAs:"steer"})`. Otherwise it answers idle
+  and makes no native call.
+- **Receipt.** `injected` claims only that hand-off. OMP's `sendMessage`
+  returns nothing, and OMP chooses between its steering queue and history only
+  after an await (`agent-session.ts:8814-8840`). No native confirmation is
+  claimed.
+- **No `triggerTurn`.** If OMP went idle during that await, the message is
+  appended to history without a turn (`agent-session.ts:8904-8911`) and the
+  next Run reads it. With `triggerTurn` it would start OMP's own run instead,
+  and a rejection there is written as an error response with no `id`
+  (`runtime-init.ts:103-105`, `rpc-mode.ts:1647-1649`), which the RPC reader
+  treats as a protocol failure.
+- **Failures.** A bridge failure or an invalid answer leaves the outcome
+  uncertain. The delivery fails with that reason and is never retried, and
+  neither the Run nor the lane ends. Unlike interactive `native.stage`, no
+  FIFO order is reserved.
+
+Residual, documented and not a defect: OMP's loop polls steering at each stop
+boundary and once more just before it yields (`agent-loop.ts:1752-1778`,
+`1788-1799`). A steer queued after that last poll makes OMP re-tag our
+yielded `agent_end` `isTerminal:false` (`agent-session.ts:1551-1583`), report
+our `prompt_result` there, and then run its queued-message drain as its own
+continuation. The message reaches the model and its answer is in the native
+history, but not in the Run's result. A steer queued before an interrupt is
+delivered the same way (`agent-loop.ts:1744-1751`). There is no earlier gate:
+OMP places the message after an await, so a gate would not close the gap and
+would refuse steers the run could still read.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream

@@ -32,6 +32,8 @@ type ownerNativeFixture struct {
 	stageHook    func(ownerStageRequest)
 	stageResult  func(ownerStageRequest) ownerStageResult
 	stageRaw     func(ownerStageRequest) json.RawMessage
+	steers       []ownerSteerRequest
+	steerAnswer  func(ownerSteerRequest) (json.RawMessage, error)
 }
 
 type ownerHeldWriteConn struct {
@@ -81,6 +83,20 @@ func (fixture *ownerNativeFixture) handle(_ context.Context, method string, raw 
 		return json.Marshal(ownerStageResult{
 			OwnerToken: request.OwnerToken, SessionID: request.SessionID,
 			MessageID: request.MessageID, Queued: &queued,
+		})
+	case "native.steer":
+		var request ownerSteerRequest
+		if decodeOwnerJSON(raw, &request) != nil {
+			return nil, pifamily.NewBridgeCallError("bad_request", "invalid native steer")
+		}
+		fixture.steers = append(fixture.steers, request)
+		if fixture.steerAnswer != nil {
+			return fixture.steerAnswer(request)
+		}
+		accepted := true
+		return json.Marshal(ownerSteerResult{
+			OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted,
 		})
 	case "native.shutdown":
 		var request ownerDescribeRequest

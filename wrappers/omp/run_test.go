@@ -46,6 +46,7 @@ type ompRunFixture struct {
 	registry *OwnerRegistry
 	native   *pifamily.Bridge
 	binding  OwnerBinding
+	owner    *ownerNativeFixture
 }
 
 func newOMPRunFixture(t *testing.T) *ompRunFixture {
@@ -76,7 +77,7 @@ func newOMPRunFixture(t *testing.T) *ompRunFixture {
 	rpc, peer := newNativeRPCTest(t, wrapper.observeNative, nativeRPCLimits{})
 	wrapper.owner = &NativeOwner{ctx: wrapper.ctx, rpc: rpc, registry: registry}
 	t.Cleanup(func() { wrapper.cancel(errNativeOwnerClosed) })
-	return &ompRunFixture{wrapper: wrapper, rpc: rpc, peer: peer, registry: registry, native: native, binding: binding}
+	return &ompRunFixture{wrapper: wrapper, rpc: rpc, peer: peer, registry: registry, native: native, binding: binding, owner: ownerFixture}
 }
 
 func attachHeldOMPRPC(t *testing.T, fixture *ompRunFixture) (*heldNativeRPCWriter, func()) {
@@ -1149,6 +1150,192 @@ func TestOMPRunFailsAtItsPromptResultWithoutItsOwnPreflight(t *testing.T) {
 			}
 			if regErr := fixture.registry.Err(); regErr != nil {
 				t.Fatalf("registry = %v", regErr)
+			}
+		})
+	}
+}
+
+// waitOMPTurn waits until the turn has read the native frames a test wrote.
+func waitOMPTurn(t *testing.T, turn *ompNativeTurn, what string, ready func(*ompNativeTurn) bool) {
+	t.Helper()
+	ctx := nativeRPCTestContext(t)
+	for {
+		turn.mu.Lock()
+		done, changed := ready(turn), turn.changed
+		turn.mu.Unlock()
+		if done {
+			return
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatalf("OMP turn did not reach %s", what)
+		}
+	}
+}
+
+// activeTurn returns the turn startNativeTurn registered and binds it to a
+// public Run, as Run does for the Worker's Run. A zero Run cannot pass
+// through startNativeTurn, which marks its Run admitted.
+func (fixture *ompRunFixture) activeTurn(t *testing.T) (*ompNativeTurn, *kit.Run) {
+	t.Helper()
+	fixture.wrapper.mu.Lock()
+	defer fixture.wrapper.mu.Unlock()
+	turn := fixture.wrapper.active
+	if turn == nil {
+		t.Fatal("no active OMP turn")
+	}
+	run := &kit.Run{}
+	turn.run, fixture.wrapper.run = run, run
+	return turn, run
+}
+
+func (fixture *ompRunFixture) steers() []ownerSteerRequest {
+	fixture.owner.mu.Lock()
+	defer fixture.owner.mu.Unlock()
+	return append([]ownerSteerRequest(nil), fixture.owner.steers...)
+}
+
+func (fixture *ompRunFixture) answerSteers(answer func(ownerSteerRequest) (json.RawMessage, error)) {
+	fixture.owner.mu.Lock()
+	fixture.owner.steerAnswer = answer
+	fixture.owner.mu.Unlock()
+}
+
+func ompSteerDelivery(id string) kit.DeliveryRequest {
+	return kit.DeliveryRequest{MessageID: id, Body: "steered note",
+		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}}}
+}
+
+func requireOMPNotRunning(t *testing.T, receipt kit.DeliveryReceipt, err error, what string) {
+	t.Helper()
+	var notRunning *kit.ProtocolError
+	if !errors.As(err, &notRunning) || notRunning.Code != -32004 || receipt.Disposition != "" || receipt.Reason != "" {
+		t.Fatalf("%s = %+v, %v", what, receipt, err)
+	}
+}
+
+// A lane delivery is steered only while our Run is admitted and has not
+// yielded, with the token of the Run's own preflight, and is then answered
+// injected. Before our preflight and run start, for another Run, after our
+// run yielded, and when the extension finds OMP idle or another token
+// current, the lane is not running and nothing is steered. Before this change
+// every lane delivery was not running.
+func TestOMPLaneSteersOnlyItsAdmittedRunBeforeItsYield(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	ctx := nativeRPCTestContext(t)
+	receipt, err := fixture.wrapper.Deliver(ctx, ompSteerDelivery("no-run"), &kit.Run{})
+	requireOMPNotRunning(t, receipt, err, "delivery with no Run")
+	id, started := fixture.prompt(t, "owned prompt", "")
+	turn, run := fixture.activeTurn(t)
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("before-preflight"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery before our preflight")
+	fixture.preflight(t, 1, "run-one", "owned prompt")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	start := <-started
+	if start.err != nil || start.turn != turn {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	if got := fixture.steers(); len(got) != 0 {
+		t.Fatalf("steers before admission = %+v", got)
+	}
+
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("steered"), run)
+	if err != nil || receipt.Disposition != "injected" || receipt.Reason != "" {
+		t.Fatalf("admitted delivery = %+v, %v", receipt, err)
+	}
+	steers := fixture.steers()
+	if len(steers) != 1 || steers[0].RunToken != "run-one" || steers[0].OwnerToken != fixture.binding.OwnerToken ||
+		steers[0].SessionID != fixture.binding.SessionID || steers[0].MessageID != "steered" || !strings.Contains(steers[0].Body, "steered note") {
+		t.Fatalf("steer = %+v", steers)
+	}
+
+	// The extension answers idle when OMP is idle at the call or the token
+	// is no longer its current run's.
+	fixture.answerSteers(func(request ownerSteerRequest) (json.RawMessage, error) {
+		accepted := false
+		return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted, Reason: "idle"})
+	})
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("idle"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery the extension found idle")
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("other-run"), &kit.Run{})
+	requireOMPNotRunning(t, receipt, err, "delivery for another Run")
+	if got := fixture.steers(); len(got) != 2 {
+		t.Fatalf("steers = %+v", got)
+	}
+
+	fixture.answerSteers(nil)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+	waitOMPTurn(t, turn, "its yield", func(turn *ompNativeTurn) bool { return turn.yielded })
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("after-yield"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery after our run yielded")
+	if got := fixture.steers(); len(got) != 2 {
+		t.Fatalf("steer after the yield = %+v", got)
+	}
+	fixture.promptResult(t, id, "completed")
+	result, err := turn.Wait(ctx)
+	if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+		t.Fatalf("owned result = %+v, %v", result, err)
+	}
+	fixture.requireLane(t)
+	if err = fixture.registry.Err(); err != nil {
+		t.Fatalf("registry = %v", err)
+	}
+}
+
+// A failed or invalid steer answer leaves the native outcome uncertain: the
+// delivery fails with that reason, is not retried, and neither the Run nor
+// the lane ends. Unlike native.stage, no FIFO order was reserved.
+func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
+	for name, answer := range map[string]func(ownerSteerRequest) (json.RawMessage, error){
+		"bridge error": func(ownerSteerRequest) (json.RawMessage, error) {
+			return nil, pifamily.NewBridgeCallError("stale_owner", "native steer refused")
+		},
+		"invalid answer": func(request ownerSteerRequest) (json.RawMessage, error) {
+			accepted := false
+			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+				MessageID: request.MessageID, Accepted: &accepted, Reason: "busy"})
+		},
+		"changed identity": func(request ownerSteerRequest) (json.RawMessage, error) {
+			accepted := true
+			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+				MessageID: "another", Accepted: &accepted})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			ctx := nativeRPCTestContext(t)
+			id, started := fixture.prompt(t, "owned prompt", "")
+			turn, run := fixture.activeTurn(t)
+			fixture.preflight(t, 1, "run-one", "owned prompt")
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			if start := <-started; start.err != nil || start.turn != turn {
+				t.Fatalf("start = %#v, %v", start.turn, start.err)
+			}
+			fixture.answerSteers(answer)
+			receipt, err := fixture.wrapper.Deliver(ctx, ompSteerDelivery("uncertain"), run)
+			if err == nil || !strings.Contains(err.Error(), "OMP native steer outcome is uncertain") || receipt.Disposition != "" {
+				t.Fatalf("failed steer = %+v, %v", receipt, err)
+			}
+			if got := fixture.steers(); len(got) != 1 {
+				t.Fatalf("steers = %+v", got)
+			}
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+			fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+			fixture.promptResult(t, id, "completed")
+			result, err := turn.Wait(ctx)
+			if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+				t.Fatalf("owned result = %+v, %v", result, err)
+			}
+			fixture.requireLane(t)
+			if err = fixture.registry.Err(); err != nil {
+				t.Fatalf("registry = %v", err)
+			}
+			fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+			if got := fixture.steers(); len(got) != 1 {
+				t.Fatalf("steer was retried: %+v", got)
 			}
 		})
 	}
