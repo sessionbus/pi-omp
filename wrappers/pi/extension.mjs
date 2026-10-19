@@ -328,6 +328,18 @@ export function createPiExtension({
     }
   }
 
+  // A managed session always has its comms tool (owner rule). Pi 1.3.0
+  // restores a resumed session's recorded tool loadout in place of the active
+  // set, which drops a tool its transcript never declared (agent-session.js
+  // 1.3.0:214-215, 1374-1383); session_start fires for every startup, reload,
+  // new, resume and fork. Only our tool is added, after the others, and an
+  // active one changes nothing.
+  function keepSessionbusActive(pi) {
+    const active = pi.getActiveTools();
+    if (!Array.isArray(active)) throw new Error("Pi active tool list is invalid");
+    if (!active.includes(toolName)) pi.setActiveTools([...active, toolName]);
+  }
+
   async function ready(pi, ctx) {
     requireMode(ctx);
     if (current) throw new Error("Pi native session started before its predecessor ended");
@@ -467,7 +479,7 @@ export function createPiExtension({
     });
 
     pi.on("session_start", async (_event, ctx) => {
-      try { await ready(pi, ctx); } catch (error) { stop(ctx, error); }
+      try { keepSessionbusActive(pi); await ready(pi, ctx); } catch (error) { stop(ctx, error); }
     });
 
     pi.on("session_info_changed", async (_event, ctx) => {

@@ -56,9 +56,15 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     },
   });
   const ctx = createContext();
+  // Pi activates a registered extension tool; a resumed session's recorded
+  // loadout can replace that set (Pi 1.3.0 _restoreToolsFromTranscript).
+  let activeTools = ["read"];
+  const toolSets = [];
   const pi = {
     tool: undefined,
-    registerTool(value) { this.tool = value; },
+    registerTool(value) { this.tool = value; activeTools.push(value.name); },
+    getActiveTools: () => [...activeTools],
+    setActiveTools(names) { toolSets.push([...names]); activeTools = [...names]; },
     on(event, handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -85,6 +91,9 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     setName(value) { name = value; },
     setIdle(value) { idle = value; },
     onAbort(hook) { abortHook = hook; },
+    restoreTools(names) { activeTools = [...names]; },
+    activeTools: () => [...activeTools],
+    toolSets: () => toolSets.map((names) => [...names]),
     setLeaf(value) { leaf = value === null ? undefined : { id: value }; },
     pending: () => pending,
     async completeMessage() {
@@ -388,6 +397,33 @@ test("interactive native.steer steers into the running task and refuses an idle 
   assert.deepEqual(await steer("late"), idle("late"));
   assert.equal(sends.length, 1);
   assert.equal(native.shutdown(), 0);
+});
+
+// Pi 1.3.0 restores a resumed session's recorded tool loadout, which drops
+// our tool when the transcript never declared it. session_start adds back
+// only our tool, after the others, and changes nothing when it is active.
+// Before this change the resumed session ran without its comms tool.
+test("session start keeps the comms tool active after Pi restores a resumed loadout", async () => {
+  for (const topology of ["interactive", "lane"]) {
+    const native = nativeFixture("native-1", topology === "lane" ? "rpc" : "tui");
+    const owner = fakeConnection({ topology });
+    createPiExtension({ launch: launch(topology), connect: owner.connect })(native.pi);
+    native.restoreTools(["read", "bash"]);
+    await native.emit("session_start", { type: "session_start", reason: "resume" });
+    assert.deepEqual(native.activeTools(), ["read", "bash", toolName], topology);
+    assert.deepEqual(native.toolSets(), [["read", "bash", toolName]], topology);
+    assert.equal(native.shutdown(), 0, topology);
+  }
+});
+
+test("session start leaves an active comms tool and its order alone", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  native.restoreTools([toolName, "read"]);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  assert.deepEqual(native.activeTools(), [toolName, "read"]);
+  assert.deepEqual(native.toolSets(), []);
 });
 
 // DEF-04 (owner 2026-10-19, "Clear the queue first"): at an aborted settle a

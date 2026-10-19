@@ -11,6 +11,21 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## Tool loadout on resume (Pi 1.3.0, 2026-10-19)
+
+Pi 1.3.0 restores a resumed session's recorded tool loadout whenever
+`--tools` names no tools. The restore replaces the active set with the
+transcript's `toolsAdded` (`agent-session.js` 1.3.0:214-215, 1374-1383). In
+1.2.0 the same restore never ran. A later refresh activates only tools
+registered after the previous build (`:2914-2918`). So a resumed session
+whose transcript never declared `sessionbus`, for example one started by
+plain `pi`, would run without its comms tool.
+
+The managed extension therefore checks the active tools at every
+`session_start` (startup, reload, new, resume and fork). If `sessionbus` is
+missing it calls `setActiveTools` with our tool added after the others. If it
+is present it does nothing. No other tool is removed or reordered.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 Pi 0.85.1 is bound to upstream `d981de1229ef899957bbe968bc8dcda02a21f477`.

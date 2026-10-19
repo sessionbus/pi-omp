@@ -73,6 +73,9 @@ The wrapper therefore rejects an effective tool selection that removes it:
 explicit `--tools` list that omits it, or `--exclude-tools` containing it.
 Other tool selections and project-trust arguments remain native-owned and
 unchanged. These checks do not apply to the direct native paths above.
+Pi 1.3.0 restores a resumed session's recorded tool set, which can leave
+`sessionbus` out. The extension adds it back at every session start, after
+the other tools, and changes nothing when it is already active.
 For managed interactive launches, the wrapper alias `--yolo` selects Pi's
 native `--approve`; an explicit native `--approve` remains unchanged.
 
