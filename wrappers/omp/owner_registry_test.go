@@ -34,6 +34,10 @@ type ownerNativeFixture struct {
 	stageRaw     func(ownerStageRequest) json.RawMessage
 	steers       []ownerSteerRequest
 	steerAnswer  func(ownerSteerRequest) (json.RawMessage, error)
+	// topology is the registry's; the interactive tests stage only on the
+	// primary session, whose answer carries OMP's busy state at the call.
+	topology string
+	busy     bool
 }
 
 type ownerHeldWriteConn struct {
@@ -80,10 +84,15 @@ func (fixture *ownerNativeFixture) handle(_ context.Context, method string, raw 
 			return json.Marshal(fixture.stageResult(request))
 		}
 		queued := true
-		return json.Marshal(ownerStageResult{
+		result := ownerStageResult{
 			OwnerToken: request.OwnerToken, SessionID: request.SessionID,
 			MessageID: request.MessageID, Queued: &queued,
-		})
+		}
+		if fixture.topology == ownerTopologyInteractive {
+			busy := fixture.busy
+			result.Busy = &busy
+		}
+		return json.Marshal(result)
 	case "native.steer":
 		var request ownerSteerRequest
 		if decodeOwnerJSON(raw, &request) != nil {
@@ -190,6 +199,9 @@ func ownerRegistryPair(t *testing.T, options OwnerRegistryOptions, fixture *owne
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.mu.Lock()
+	fixture.topology = options.Topology
+	fixture.mu.Unlock()
 	left, right := net.Pipe()
 	hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, registry.HandleBridge, pifamily.BridgeLimits{})
 	if err != nil {
@@ -714,8 +726,9 @@ func TestOwnerRegistryStagesInteractiveDeliveryAndConfirmsExactBatch(t *testing.
 	if frame.Request || frame.ID != 40 || frame.Error != nil {
 		t.Fatalf("delivery receipt frame = %+v", frame)
 	}
+	// OMP was idle at the call, so the steer starts a turn with it.
 	var receipt kit.DeliveryReceipt
-	if err = protocol.UnmarshalResult("message.deliver", frame.Result, &receipt); err != nil || receipt.Disposition != "queued_for_next_turn" {
+	if err = protocol.UnmarshalResult("message.deliver", frame.Result, &receipt); err != nil || receipt.Disposition != "written" {
 		t.Fatalf("delivery receipt = %+v, %v", receipt, err)
 	}
 	fixture.mu.Lock()
@@ -762,6 +775,9 @@ func TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner(t *testing.
 		}
 		if !queued {
 			result.Reason = "queue_full"
+		} else {
+			busy := false
+			result.Busy = &busy
 		}
 		return result
 	}
@@ -788,7 +804,7 @@ func TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner(t *testing.
 	}
 	registry.mu.Unlock()
 	receipt, err = registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{MessageID: "next", From: source, Body: "two"})
-	if err != nil || receipt.Disposition != "queued_for_next_turn" {
+	if err != nil || receipt.Disposition != "written" {
 		t.Fatalf("delivery after capacity rejection = %+v, %v", receipt, err)
 	}
 	if err := registry.Err(); err != nil {
@@ -2324,5 +2340,125 @@ func TestOwnerRegistryShutdownIsPrimaryRequestOnly(t *testing.T) {
 	}
 	if err := registry.shutdownPrimary(ownerTestContext(t)); err == nil {
 		t.Fatal("shutdown without primary was accepted")
+	}
+}
+
+func ownerStageAnswer(request ownerStageRequest, fields map[string]any) json.RawMessage {
+	answer := map[string]any{"owner_token": request.OwnerToken, "session_id": request.SessionID, "message_id": request.MessageID}
+	for key, value := range fields {
+		answer[key] = value
+	}
+	body, _ := json.Marshal(answer)
+	return body
+}
+
+// The interactive primary's receipt follows OMP's busy state at the call, as
+// the extension reports it: injected when busy (a steer into the running
+// task), written when idle (a turn started with it). Neither is a native
+// confirmation. A queued answer without that state, or a queue_full answer
+// with it, is invalid. Before this change every accepted interactive stage
+// was queued_for_next_turn.
+func TestOwnerRegistryInteractiveReceiptFollowsBusyStateAtTheCall(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		fields map[string]any
+		want   string
+	}{
+		{name: "busy", fields: map[string]any{"queued": true, "busy": true}, want: "injected"},
+		{name: "idle", fields: map[string]any{"queued": true, "busy": false}, want: "written"},
+		{name: "no busy state", fields: map[string]any{"queued": true}},
+		{name: "null busy state", fields: map[string]any{"queued": true, "busy": nil}},
+		{name: "busy state on queue_full", fields: map[string]any{"queued": false, "reason": "queue_full", "busy": false}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listener := ownerBusListener(t)
+			directory := t.TempDir()
+			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+				"owner-token": {OwnerToken: "owner-token", SessionID: "native-session", CWD: "/work"},
+			}}
+			fixture.stageRaw = func(request ownerStageRequest) json.RawMessage { return ownerStageAnswer(request, test.fields) }
+			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+				Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+			}, fixture)
+			_, _, _ = ownerReady(t, registry, native, listener, ownerReadyRequest{
+				Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+				Mode: ownerModeTUI, OwnerToken: "owner-token", SessionID: "native-session",
+			})
+			state, err := registry.current("owner-token", "native-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{
+				MessageID: "staged", From: kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{}}, Body: "body",
+			})
+			if test.want != "" {
+				if err != nil || receipt.Disposition != test.want || receipt.Reason != "" {
+					t.Fatalf("receipt = %+v, %v", receipt, err)
+				}
+				if err = registry.Err(); err != nil {
+					t.Fatalf("registry = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "acknowledgement is invalid") {
+				t.Fatalf("invalid busy state = %+v, %v", receipt, err)
+			}
+			select {
+			case <-registry.Done():
+			case <-ownerTestContext(t).Done():
+				t.Fatal("invalid busy state did not retire the registry")
+			}
+		})
+	}
+}
+
+// A Task child keeps queued_for_next_turn: only the interactive primary's
+// receipt changed, and a child answer carrying a busy state is invalid.
+func TestOwnerRegistryTaskChildKeepsItsQueuedReceipt(t *testing.T) {
+	for name, fields := range map[string]map[string]any{
+		"queued":     {"queued": true},
+		"busy state": {"queued": true, "busy": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			listener := ownerBusListener(t)
+			directory := t.TempDir()
+			caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) {
+				return json.RawMessage(`{}`), nil
+			})
+			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+				"main-token":  {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
+				"child-token": {OwnerToken: "child-token", SessionID: "child-session", CWD: "/work/child"},
+			}}
+			fixture.stageRaw = func(request ownerStageRequest) json.RawMessage { return ownerStageAnswer(request, fields) }
+			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+				Topology: ownerTopologyLane, Socket: listener.Addr().String(), Directory: directory, PrimaryCaller: caller,
+			}, fixture)
+			if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
+				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary,
+				Mode: ownerModeRPC, OwnerToken: "main-token", SessionID: "main-session",
+			}, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, _, _ = ownerReady(t, registry, native, listener, ownerReadyRequest{
+				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopeChild,
+				Mode: ownerModePrint, OwnerToken: "child-token", SessionID: "child-session",
+			})
+			state, err := registry.current("child-token", "child-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{
+				MessageID: "child", From: kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{}}, Body: "body",
+			})
+			if _, busy := fields["busy"]; !busy {
+				if err != nil || receipt.Disposition != "queued_for_next_turn" {
+					t.Fatalf("child receipt = %+v, %v", receipt, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "acknowledgement is invalid") {
+				t.Fatalf("child busy state = %+v, %v", receipt, err)
+			}
+		})
 	}
 }

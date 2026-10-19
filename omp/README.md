@@ -15,6 +15,13 @@ ID, title, and working directory remain authoritative. Native maintenance,
 help, version, print/export commands, and non-terminal stdin or stdout run
 directly without managed ownership.
 
+In a managed interactive terminal, a peer message is handed to OMP as a steer
+when it arrives. If OMP is busy at that moment, the running task reads it at
+its next boundary and the receipt is `injected`; if OMP is idle, it starts a
+turn with it and the receipt is `written`. Both are decided when the message
+is handed over, and OMP confirms neither. A native Task child's receipt stays
+`queued_for_next_turn`.
+
 Daemon-owned lanes are selected by the Sessionbus launch token and accept no
 command-line arguments. The lane exposes the standard Sessionbus tool from the
 real native OMP session through the same per-launch extension. Installation

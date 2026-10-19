@@ -410,8 +410,18 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         }
         state.queued.push(entry);
         state.deliveryBytes += bytes;
+        // OMP chooses between steering into its running task and starting a
+        // turn only after an await (agent-session.ts:8814-8840), so the
+        // interactive primary's receipt is decided here, from OMP's busy
+        // state before the send, with no native confirmation. Task children
+        // keep their queued receipt.
+        const reportsBusy = state.scope === "primary" && launch.topology === "interactive";
+        const busy = reportsBusy && !state.ctx.isIdle();
         scheduleDeliveryTurn(state.factory, state);
-        return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, queued: true };
+        return {
+          owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, queued: true,
+          ...(reportsBusy ? { busy } : {}),
+        };
       }
       case "native.steer": {
         const state = nativeState(params, ["owner_token", "session_id", "message_id", "body", "run_token"]);

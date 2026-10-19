@@ -103,6 +103,24 @@ delivered the same way (`agent-loop.ts:1744-1751`). There is no earlier gate:
 OMP places the message after an await, so a gate would not close the gap and
 would refuse steers the run could still read.
 
+## Interactive receipts on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): fix the receipt wording. This replaces the
+`queued_for_next_turn` receipt of the section below for the interactive
+primary session only.
+
+- `native.stage` still hands each accepted message to OMP at once with
+  `sendMessage(...,{deliverAs:"steer",triggerTurn:true})`. Its answer now
+  also carries `busy`, read from `!ctx.isIdle()` before that send.
+- A busy OMP puts the message in its running task's steering queue, so the
+  receipt is `injected`. An idle OMP starts a turn with it, so the receipt is
+  `written`. OMP makes that choice only after an await
+  (`agent-session.ts:8814-8840`), so both receipts are decided at the call
+  and neither is a native confirmation.
+- A native Task child's answer carries no busy state, and its receipt stays
+  `queued_for_next_turn`. A queue that is full is still rejected
+  `queue_full`.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream

@@ -42,6 +42,7 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
   let sendError;
   let resetSequence = 0;
   let idle = true;
+  let sendHook;
   const entries = [];
   const scheduled = [];
   const steered = [];
@@ -76,6 +77,7 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
       assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
       if (sendError) throw sendError;
       scheduled.push(structuredClone(message));
+      sendHook?.();
     },
   };
   return {
@@ -96,6 +98,7 @@ function nativeFixture(sessionID = "native-main", mode = "rpc", cwd = "/work/mai
     addResetBoundary(id = `reset-${++resetSequence}`) { entries.push({ type: "reset_boundary", id }); },
     throwOnSend(error) { sendError = error; },
     setIdle(value) { idle = value; },
+    onSend(hook) { sendHook = hook; },
     steered: () => structuredClone(steered),
     aborts: () => aborts,
     shutdowns: () => shutdowns,
@@ -418,10 +421,50 @@ test("native stage can follow published hello before local owner.ready continuat
     session_id: ready.session_id,
     message_id: "immediate",
     queued: true,
+    busy: false,
   });
   held.release();
   await owner.waitFor((calls) => calls.length >= 1);
   await flush();
+});
+
+// The interactive primary's stage answer carries OMP's busy state, read before
+// the send: busy becomes injected and idle written in Go. Before this change
+// the answer had no busy state and every receipt was queued_for_next_turn.
+test("interactive primary stage reports OMP's busy state before its send", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture("interactive-main", "tui");
+  const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  const stage = (messageID) => owner.native("native.stage", {
+    owner_token: token, session_id: "interactive-main", message_id: messageID, body: `body ${messageID}`,
+  });
+  const answer = (messageID, busy) => ({ owner_token: token, session_id: "interactive-main", message_id: messageID, queued: true, busy });
+  native.setIdle(false);
+  assert.deepEqual(await stage("busy"), answer("busy", true));
+  native.setIdle(true);
+  native.onSend(() => native.setIdle(false));
+  assert.deepEqual(await stage("idle"), answer("idle", false));
+  assert.deepEqual(native.scheduled().map((message) => message.details.message_ids[0]), ["busy", "idle"]);
+});
+
+test("Task child stage keeps its answer without a busy state", async () => {
+  for (const topology of ["interactive", "lane"]) {
+    const owner = new FakeOwner();
+    const extension = createOMPExtension({ launch: launch(topology), connect: owner.connect, createToken: deterministicTokens() });
+    const primary = nativeFixture("main-session", topology === "lane" ? "rpc" : "tui", "/work/main", "main");
+    const child = nativeFixture("child-session", "print", "/work/child", "child");
+    await start(extension, primary, owner);
+    extension(child.pi);
+    await child.emit("session_start");
+    await owner.waitFor((calls) => calls.filter((call) => call.method === "owner.ready").length === 2);
+    const childReady = owner.calls.filter((call) => call.method === "owner.ready")[1].params;
+    child.setIdle(false);
+    assert.deepEqual(await owner.native("native.stage", {
+      owner_token: childReady.owner_token, session_id: "child-session", message_id: "child", body: "child body",
+    }), { owner_token: childReady.owner_token, session_id: "child-session", message_id: "child", queued: true }, topology);
+  }
 });
 
 test("invalid managed factory mode fails closed before retaining a binding", async () => {
@@ -449,10 +492,10 @@ test("interactive delivery tracks independent batches through one coalesced nati
   const token = owner.calls[0].params.owner_token;
   assert.deepEqual(await owner.native("native.stage", {
     owner_token: token, session_id: "interactive-main", message_id: " message one ", body: "first body",
-  }), { owner_token: token, session_id: "interactive-main", message_id: " message one ", queued: true });
+  }), { owner_token: token, session_id: "interactive-main", message_id: " message one ", queued: true, busy: false });
   assert.deepEqual(await owner.native("native.stage", {
     owner_token: token, session_id: "interactive-main", message_id: "message-two", body: "second body",
-  }), { owner_token: token, session_id: "interactive-main", message_id: "message-two", queued: true });
+  }), { owner_token: token, session_id: "interactive-main", message_id: "message-two", queued: true, busy: false });
   assert.deepEqual(await owner.native("native.stage", {
     owner_token: token, session_id: "interactive-main", message_id: "message-three", body: "third body",
   }), { owner_token: token, session_id: "interactive-main", message_id: "message-three", queued: false, reason: "queue_full" });

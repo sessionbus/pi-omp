@@ -222,6 +222,7 @@ type ownerStageResult struct {
 	MessageID  string `json:"message_id"`
 	Queued     *bool  `json:"queued"`
 	Reason     string `json:"reason,omitempty"`
+	Busy       *bool  `json:"busy,omitempty"`
 }
 
 type ownerSteerRequest struct {
@@ -1078,9 +1079,15 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		registry.fail(fmt.Errorf("OMP native stage outcome is uncertain: %w", err))
 		return kit.DeliveryReceipt{}, err
 	}
+	// The interactive primary session's extension also reports whether OMP
+	// was busy before its send: a busy OMP steers the message into its
+	// running task, an idle one starts a turn with it. Neither is a native
+	// confirmation. Task children keep queued_for_next_turn.
+	reportsBusy := registry.topology == ownerTopologyInteractive && state.Scope == ownerScopePrimary
 	var result ownerStageResult
 	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != state.OwnerToken || result.SessionID != state.SessionID ||
-		result.MessageID != request.MessageID || result.Queued == nil || (*result.Queued && result.Reason != "") || (!*result.Queued && result.Reason != "queue_full") {
+		result.MessageID != request.MessageID || result.Queued == nil || (*result.Queued && result.Reason != "") || (!*result.Queued && result.Reason != "queue_full") ||
+		(result.Busy != nil) != (*result.Queued && reportsBusy) {
 		registry.fail(errors.New("OMP native stage acknowledgement is invalid"))
 		return kit.DeliveryReceipt{}, errors.New("OMP native stage acknowledgement is invalid")
 	}
@@ -1100,7 +1107,13 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		return kit.DeliveryReceipt{Disposition: "rejected", Reason: result.Reason}, nil
 	}
 	record.acknowledged = true
-	return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	if !reportsBusy {
+		return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	}
+	if *result.Busy {
+		return kit.DeliveryReceipt{Disposition: "injected"}, nil
+	}
+	return kit.DeliveryReceipt{Disposition: "written"}, nil
 }
 
 // steerPrimary hands a lane delivery to the primary session's running native
