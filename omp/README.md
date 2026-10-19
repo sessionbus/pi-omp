@@ -22,6 +22,14 @@ turn with it and the receipt is `written`. Both are decided when the message
 is handed over, and OMP confirms neither. A native Task child's receipt stays
 `queued_for_next_turn`.
 
+Pressing Escape while OMP shows its working animation returns a steered peer
+message that OMP had not read yet to your editor, as if you had typed it. It
+is neither sent nor written to the session history unless you submit it, and
+its receipt stays `injected`. Other stops of a task, such as Escape while no
+animation shows, leave the message in OMP's queue, and OMP delivers it in a
+new turn after the stop. This is an open defect, to be fixed with the planned
+rework of the OMP integration.
+
 Daemon-owned lanes are selected by the Sessionbus launch token and accept no
 command-line arguments. The lane exposes the standard Sessionbus tool from the
 real native OMP session through the same per-launch extension. Installation

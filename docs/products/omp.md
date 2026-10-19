@@ -122,6 +122,29 @@ primary session only.
   `queued_for_next_turn`. A queue that is full is still rejected
   `queue_full`.
 
+## Interactive Escape on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): release with today's behaviour. DEF-20261015-05
+moves into the OMP rework item as an open defect. It is not fixed and does not
+block this release, and no code handles it. Source: OMP 18.11.0 npm `src`
+(`modes/controllers/input-controller.ts`, `session/queued-messages.ts`,
+`session/agent-session.ts`, `modes/controllers/extension-ui-controller.ts`).
+
+- **Escape while the working animation shows.** OMP takes the queued
+  user-authored messages back into the editor, then aborts
+  (`input-controller.ts:564-569, 1960-1982`). Our interactive delivery is a
+  custom message with `attribution:"user"` and `display:true`, which OMP
+  counts as user-queued (`queued-messages.ts:61-72`). A steered peer message
+  the task had not read yet therefore comes back into the user's editor as if
+  typed. It is neither sent nor written to history unless the user submits
+  it, and its receipt stays `injected`.
+- **Other stops.** An abort that does not clear the queue leaves our message
+  queued. Examples are Escape while no animation shows
+  (`input-controller.ts:581-582`) and an extension's `ctx.abort()`
+  (`extension-ui-controller.ts:245`). The abort's cleanup then drains the
+  queue into a new turn (`agent-session.ts:9794-9797`), so the message is
+  delivered in that next turn.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream
