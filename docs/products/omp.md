@@ -87,10 +87,11 @@ and `@oh-my-pi/pi-agent-core` 18.11.0 `src/agent-loop.ts`.
   and a rejection there is written as an error response with no `id`
   (`runtime-init.ts:103-105`, `rpc-mode.ts:1647-1649`), which the RPC reader
   treats as a protocol failure.
-- **Failures.** A bridge failure or an invalid answer leaves the outcome
-  uncertain. The delivery fails with that reason and is never retried, and
-  neither the Run nor the lane ends. Unlike interactive `native.stage`, no
-  FIFO order is reserved.
+- **Failures.** A failed or invalid steer answer leaves the outcome
+  uncertain. The delivery fails with that reason and is never retried. That
+  failure by itself retires neither the Run nor the lane. Losing the bridge
+  or the owner still ends the lane, as before (`native_owner.go:264-271`).
+  Unlike interactive `native.stage`, no FIFO order is reserved.
 
 Residual, documented and not a defect: OMP's loop polls steering at each stop
 boundary and once more just before it yields (`agent-loop.ts:1752-1778`,
