@@ -23,10 +23,10 @@ with no runtime version check. Source: OMP 18.11.0 npm `src`
 - **OMP's own work.** A run event before our run starts or after it yielded,
   or with no Run open, is ignored. A dialog from that work is cancelled with no
   Run to join, as for Pi.
-- **Refusal.** A prompt OMP refuses before admission (for example
-  `AgentBusyError` while its own work runs) gets an error response, then a
-  success response for the same id, then `prompt_result` with
-  `agentInvoked:false`. Our RPC reader absorbs exactly one of each for that
+- **Refusal.** A prompt OMP refuses before admission (for example its native
+  busy rejection while its own work runs, `agent-session.ts:7356-7364`) gets an
+  error response, then a success response for the same id, then
+  `prompt_result` with `agentInvoked:false`. Our RPC reader absorbs exactly one of each for that
   id. The Run fails with OMP's answer and is recorded unavailable, its
   delivery is rejected `not_submitted`, and the lane stays, as for Pi. The slot
   is cleared by the next admitted prompt, a new refusal or transport loss.

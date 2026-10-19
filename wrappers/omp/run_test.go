@@ -990,15 +990,17 @@ func TestOMPWorkerRefusedDeliveryIsNotSubmittedAndLaneStays(t *testing.T) {
 	receiptSeen, readySeen := false, false
 	for !receiptSeen || !readySeen {
 		frame := read()
+		// The Worker numbers its own requests independently: its turn.ready
+		// request can also carry ID 2, so only a response is the receipt.
 		switch {
-		case frame.ID == 2:
+		case !frame.Request && frame.ID == 2:
 			var receipt kit.DeliveryReceipt
 			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
 				receipt.Disposition != "rejected" || receipt.Reason != "not_submitted" {
 				t.Fatalf("refused delivery receipt = %+v, decoded %+v", frame, receipt)
 			}
 			receiptSeen = true
-		case frame.Method == "turn.ready":
+		case frame.Request && frame.Method == "turn.ready":
 			var ready protocol.TurnReady
 			if json.Unmarshal(frame.Params, &ready) != nil || ready.State != "unavailable" || !strings.Contains(ready.Reason, "Agent is busy") {
 				t.Fatalf("refused terminal = %s", frame.Params)
