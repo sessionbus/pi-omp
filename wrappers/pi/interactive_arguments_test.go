@@ -57,6 +57,8 @@ func TestInteractivePlanNativeMaintenancePassthroughIsBytePreserving(t *testing.
 	for _, args := range [][]string{
 		{"--help", "-g"},
 		{"install", "-g", "package"},
+		// Pi 1.2.0 added the mcp command (dist/main.js:486).
+		{"mcp", "list", "-g"},
 		{"--print", "-g"},
 		{"-p", "prompt", "-g"},
 		{"--export", "session.jsonl", "output.html"},
@@ -157,15 +159,27 @@ func TestInteractivePlanRejectsManagedToolDisable(t *testing.T) {
 		{"--no-tools"},
 		{"-nt"},
 		{"--tools", "read,bash"},
-		{"-t", "-g"},
-		{"-t", "--peer-name"},
 		{"-t", "read, SessionBus"},
+		{"--tools", "-sessionbus"},
+		{"-t", "+read,-sessionbus"},
+		{"--tools", "+sessionbus,-sessionbus"},
+		{"--no-tools", "--tools", "+read"},
+		{"-nt", "-t", "-bash"},
 		{"--tools", " , "},
 		{"--exclude-tools", "read, sessionbus ,bash"},
 		{"-xt", "sessionbus"},
 		{"--tools", "sessionbus", "--exclude-tools", "sessionbus"},
 		{"--no-tools", "--tools", "read"},
 		{"--tools", "read", "--no-tools"},
+		// Pi matches both lists as exact names or "*" patterns over the whole
+		// name (Pi 1.4.0 createToolNameMatcher); an exclusion pattern that
+		// matches sessionbus removes it before any extension can restore it.
+		{"--tools", "+sessionbus", "--exclude-tools", "session*"},
+		{"-xt", "*"},
+		{"--exclude-tools", "read,*bus"},
+		{"--exclude-tools", "s*s"},
+		// An allowlist whose patterns do not match sessionbus leaves it out.
+		{"--tools", "read,sess*x"},
 	} {
 		if _, native, err := InteractivePlan(args, nil); err == nil || native ||
 			!strings.Contains(err.Error(), "disables managed Pi Sessionbus tool") {
@@ -179,6 +193,19 @@ func TestInteractivePlanPreservesEffectiveManagedToolSelection(t *testing.T) {
 	for _, args := range [][]string{
 		{"--tools", "read, sessionbus ,write"},
 		{"-t", "sessionbus"},
+		// Pi's +name/-name modifiers change its default selection, which
+		// keeps our extension tool; they pass through unchanged. A value
+		// that only looks like a wrapper flag is such a modifier list.
+		{"--tools", "+read"},
+		{"-t", "-bash"},
+		{"--tools", "+sessionbus"},
+		{"--tools", "-sessionbus,+sessionbus"},
+		{"--no-tools", "--tools", "+sessionbus"},
+		{"--no-tools", "--tools", "+read,+sessionbus"},
+		{"-t", "-g"},
+		{"-t", "--peer-name"},
+		// A list mixing names and modifiers is Pi's own error.
+		{"--tools", "read,+bash"},
 		{"--exclude-tools", "read,bash"},
 		{"-xt", "read"},
 		{"--no-builtin-tools"},
@@ -190,6 +217,15 @@ func TestInteractivePlanPreservesEffectiveManagedToolSelection(t *testing.T) {
 		{"--exclude-tools=sessionbus"},
 		{"--model", "--no-tools"},
 		{"--", "--no-tools", "--tools", "read", "--exclude-tools", "sessionbus"},
+		// Allowlist patterns that match sessionbus keep it; exclusions that
+		// do not match it leave it. Only "*" is special to Pi.
+		{"--tools", "*"},
+		{"--tools", "read,session*"},
+		{"--no-tools", "--tools", "*bus"},
+		{"--exclude-tools", "sess"},
+		{"--exclude-tools", "sessionbus?"},
+		{"--exclude-tools", "session.us"},
+		{"-xt", "*x"},
 	} {
 		plan, passthrough, err := InteractivePlan(args, nil)
 		if err != nil || passthrough || !reflect.DeepEqual(plan.Args, args) {

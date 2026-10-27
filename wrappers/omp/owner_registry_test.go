@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,12 @@ type ownerNativeFixture struct {
 	stageHook    func(ownerStageRequest)
 	stageResult  func(ownerStageRequest) ownerStageResult
 	stageRaw     func(ownerStageRequest) json.RawMessage
+	steers       []ownerSteerRequest
+	steerAnswer  func(ownerSteerRequest) (json.RawMessage, error)
+	// topology is the registry's; the interactive tests stage only on the
+	// primary session, whose answer carries OMP's busy state at the call.
+	topology string
+	busy     bool
 }
 
 type ownerHeldWriteConn struct {
@@ -78,9 +85,27 @@ func (fixture *ownerNativeFixture) handle(_ context.Context, method string, raw 
 			return json.Marshal(fixture.stageResult(request))
 		}
 		queued := true
-		return json.Marshal(ownerStageResult{
+		result := ownerStageResult{
 			OwnerToken: request.OwnerToken, SessionID: request.SessionID,
 			MessageID: request.MessageID, Queued: &queued,
+		}
+		if fixture.topology == ownerTopologyInteractive {
+			result.Busy = json.RawMessage(strconv.FormatBool(fixture.busy))
+		}
+		return json.Marshal(result)
+	case "native.steer":
+		var request ownerSteerRequest
+		if decodeOwnerJSON(raw, &request) != nil {
+			return nil, pifamily.NewBridgeCallError("bad_request", "invalid native steer")
+		}
+		fixture.steers = append(fixture.steers, request)
+		if fixture.steerAnswer != nil {
+			return fixture.steerAnswer(request)
+		}
+		accepted := true
+		return json.Marshal(ownerSteerResult{
+			OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted,
 		})
 	case "native.shutdown":
 		var request ownerDescribeRequest
@@ -174,6 +199,9 @@ func ownerRegistryPair(t *testing.T, options OwnerRegistryOptions, fixture *owne
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.mu.Lock()
+	fixture.topology = options.Topology
+	fixture.mu.Unlock()
 	left, right := net.Pipe()
 	hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, registry.HandleBridge, pifamily.BridgeLimits{})
 	if err != nil {
@@ -698,8 +726,9 @@ func TestOwnerRegistryStagesInteractiveDeliveryAndConfirmsExactBatch(t *testing.
 	if frame.Request || frame.ID != 40 || frame.Error != nil {
 		t.Fatalf("delivery receipt frame = %+v", frame)
 	}
+	// OMP was idle at the call, so the steer starts a turn with it.
 	var receipt kit.DeliveryReceipt
-	if err = protocol.UnmarshalResult("message.deliver", frame.Result, &receipt); err != nil || receipt.Disposition != "queued_for_next_turn" {
+	if err = protocol.UnmarshalResult("message.deliver", frame.Result, &receipt); err != nil || receipt.Disposition != "written" {
 		t.Fatalf("delivery receipt = %+v, %v", receipt, err)
 	}
 	fixture.mu.Lock()
@@ -746,6 +775,8 @@ func TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner(t *testing.
 		}
 		if !queued {
 			result.Reason = "queue_full"
+		} else {
+			result.Busy = json.RawMessage("false")
 		}
 		return result
 	}
@@ -772,7 +803,7 @@ func TestOwnerRegistryReturnsNativeQueueCapacityWithoutRetiringOwner(t *testing.
 	}
 	registry.mu.Unlock()
 	receipt, err = registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{MessageID: "next", From: source, Body: "two"})
-	if err != nil || receipt.Disposition != "queued_for_next_turn" {
+	if err != nil || receipt.Disposition != "written" {
 		t.Fatalf("delivery after capacity rejection = %+v, %v", receipt, err)
 	}
 	if err := registry.Err(); err != nil {
@@ -1289,6 +1320,10 @@ func TestOwnerRegistryConsumedEvidenceDoesNotImposeLifetimeTurnLimit(t *testing.
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
+	state, err := registry.current("main-token", "main-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var sequence uint64
 	for index := 0; index < maxOwnerTrackedItems+8; index++ {
 		sequence++
@@ -1300,13 +1335,13 @@ func TestOwnerRegistryConsumedEvidenceDoesNotImposeLifetimeTurnLimit(t *testing.
 		})); err != nil {
 			t.Fatalf("preflight %d = %v", index, err)
 		}
-		if got, err := registry.takePreflight("main-token", "main-session", runToken); err != nil || got != prompt {
-			t.Fatalf("consumed preflight %d = %q, %v", index, got, err)
+		// With no Run window open, a preflight is consumed when it arrives.
+		registry.mu.Lock()
+		_, consumed := state.consumedPreflightSet[runToken]
+		registry.mu.Unlock()
+		if !consumed {
+			t.Fatalf("preflight %d was not consumed on arrival", index)
 		}
-	}
-	state, err := registry.current("main-token", "main-session")
-	if err != nil {
-		t.Fatal(err)
 	}
 	for index := 0; index < maxOwnerTrackedItems+8; index++ {
 		messageID := fmt.Sprintf("message-%d", index)
@@ -1330,9 +1365,9 @@ func TestOwnerRegistryConsumedEvidenceDoesNotImposeLifetimeTurnLimit(t *testing.
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if len(state.preflights) != 0 || len(state.consumedPreflights) != maxOwnerTrackedItems || len(state.consumedPreflightSet) != maxOwnerTrackedItems ||
+	if len(state.consumedPreflights) != maxOwnerTrackedItems || len(state.consumedPreflightSet) != maxOwnerTrackedItems ||
 		len(state.batches) != 0 || len(state.completed) != maxOwnerTrackedItems || len(state.completedSet) != maxOwnerTrackedItems {
-		t.Fatalf("retained evidence = preflights %d/%d/%d, batches %d/%d/%d", len(state.preflights), len(state.consumedPreflights),
+		t.Fatalf("retained evidence = preflights %d/%d, batches %d/%d/%d", len(state.consumedPreflights),
 			len(state.consumedPreflightSet), len(state.batches), len(state.completed), len(state.completedSet))
 	}
 }
@@ -2051,7 +2086,8 @@ func TestOwnerRegistrySupersessionWinsHeldReplacementDescription(t *testing.T) {
 	}
 }
 
-func TestOwnerRegistryWaitsForNextMatchingPreflightAndConsumesAccounting(t *testing.T) {
+func preflightWindowRegistry(t *testing.T) (*OwnerRegistry, *pifamily.Bridge) {
+	t.Helper()
 	directory := t.TempDir()
 	caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
@@ -2066,186 +2102,166 @@ func TestOwnerRegistryWaitsForNextMatchingPreflightAndConsumesAccounting(t *test
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	type outcome struct {
-		token string
-		err   error
-	}
-	result := make(chan outcome, 1)
-	go func() {
-		token, err := registry.waitPreflight(ownerTestContext(t), "main-token", "main-session", "owned prompt")
-		result <- outcome{token, err}
-	}()
+	return registry, native
+}
+
+func recordWindowPreflight(t *testing.T, registry *OwnerRegistry, sequence uint64, token, prompt string) {
+	t.Helper()
 	if _, err := registry.recordPreflight(mustOwnerJSON(t, ownerPreflightRequest{
-		OwnerToken: "main-token", SessionID: "main-session", ReportSequence: 1,
-		RunToken: "run-one", Prompt: "owned prompt",
+		OwnerToken: "main-token", SessionID: "main-session", ReportSequence: sequence,
+		RunToken: token, Prompt: prompt,
 	})); err != nil {
 		t.Fatal(err)
 	}
-	got := <-result
-	if got.err != nil || got.token != "run-one" {
-		t.Fatalf("preflight wait = %#v", got)
+}
+
+// Replaces TestOwnerRegistryWaitsForNextMatchingPreflightAndConsumesAccounting:
+// a Run's window takes its matching preflight, wakes its observer and keeps
+// only the consumed token's accounting.
+func TestOwnerRegistryPreflightWindowTakesMatchingPreflight(t *testing.T) {
+	registry, _ := preflightWindowRegistry(t)
+	window, err := registry.openPreflightWindow("main-token", "main-session", "owned prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runToken, foreign, changed, err := window.observe()
+	if err != nil || runToken != "" || foreign != 0 {
+		t.Fatalf("empty window = %q, %d, %v", runToken, foreign, err)
+	}
+	registry.mu.Lock()
+	retained := registry.bindings["main-token"].retainedBytes
+	registry.mu.Unlock()
+	recordWindowPreflight(t, registry, 1, "run-one", "owned prompt")
+	select {
+	case <-changed:
+	case <-ownerTestContext(t).Done():
+		t.Fatal("window observer was not woken by its preflight")
+	}
+	if runToken, foreign, _, err = window.observe(); err != nil || runToken != "run-one" || foreign != 0 {
+		t.Fatalf("matched window = %q, %d, %v", runToken, foreign, err)
 	}
 	registry.mu.Lock()
 	state := registry.bindings["main-token"]
-	if len(state.preflights) != 0 || len(state.preflightOrder) != 0 || len(state.consumedPreflights) != 1 || state.consumedPreflights[0] != "run-one" {
-		t.Fatalf("preflight evidence = pending %v/%v, consumed %v", state.preflights, state.preflightOrder, state.consumedPreflights)
+	if !reflect.DeepEqual(state.consumedPreflights, []string{"run-one"}) || state.retainedBytes != retained+len("run-one") {
+		t.Fatalf("preflight evidence = consumed %v, retained %d after %d", state.consumedPreflights, state.retainedBytes, retained)
 	}
 	registry.mu.Unlock()
+	window.close()
+	if _, _, _, err = window.observe(); err == nil {
+		t.Fatal("closed window still observed preflights")
+	}
 }
 
-func TestOwnerRegistryPreflightWaitDoesNotSearchPastForeignWitness(t *testing.T) {
-	directory := t.TempDir()
-	caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
-		"main-token": {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
-	}}
-	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
-		Topology: ownerTopologyLane, Socket: filepath.Join(directory, "bus.sock"), Directory: directory, PrimaryCaller: caller,
-	}, fixture)
-	if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
-		Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary, Mode: ownerModeRPC,
-		OwnerToken: "main-token", SessionID: "main-session",
-	}, nil); err != nil {
+// Replaces TestOwnerRegistryPreflightWaitDoesNotSearchPastForeignWitness: a
+// foreign preflight ahead of ours is recorded, not dropped and not taken as
+// ours, and it no longer retires the registry; the Run decides.
+func TestOwnerRegistryPreflightWindowRecordsForeignBeforeOurs(t *testing.T) {
+	registry, _ := preflightWindowRegistry(t)
+	window, err := registry.openPreflightWindow("main-token", "main-session", "owned")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for sequence, value := range []struct{ token, prompt string }{{"foreign-run", "foreign"}, {"owned-run", "owned"}} {
-		if _, err := registry.recordPreflight(mustOwnerJSON(t, ownerPreflightRequest{
-			OwnerToken: "main-token", SessionID: "main-session", ReportSequence: uint64(sequence + 1),
-			RunToken: value.token, Prompt: value.prompt,
-		})); err != nil {
+	recordWindowPreflight(t, registry, 1, "foreign-run", "foreign")
+	if runToken, foreign, _, err := window.observe(); err != nil || runToken != "" || foreign != 1 {
+		t.Fatalf("foreign window = %q, %d, %v", runToken, foreign, err)
+	}
+	recordWindowPreflight(t, registry, 2, "owned-run", "owned")
+	recordWindowPreflight(t, registry, 3, "later-run", "owned")
+	if runToken, foreign, _, err := window.observe(); err != nil || runToken != "owned-run" || foreign != 1 {
+		t.Fatalf("window after ours = %q, %d, %v", runToken, foreign, err)
+	}
+	if err := registry.Err(); err != nil {
+		t.Fatalf("foreign preflight retired the registry: %v", err)
+	}
+}
+
+// Replaces TestOwnerRegistryCanceledPreflightWaitPreservesArrivedEvidence:
+// arrived evidence used to wait in a queue for the next Run, which made OMP's
+// own work between Runs fail that Run. A preflight outside a window is now
+// consumed at once; a reused token is still refused.
+func TestOwnerRegistryPreflightOutsideWindowNeverReachesALaterRun(t *testing.T) {
+	registry, _ := preflightWindowRegistry(t)
+	recordWindowPreflight(t, registry, 1, "own-work-run", "own work")
+	window, err := registry.openPreflightWindow("main-token", "main-session", "owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runToken, foreign, _, err := window.observe(); err != nil || runToken != "" || foreign != 0 {
+		t.Fatalf("window after own work = %q, %d, %v", runToken, foreign, err)
+	}
+	if _, err := registry.recordPreflight(mustOwnerJSON(t, ownerPreflightRequest{
+		OwnerToken: "main-token", SessionID: "main-session", ReportSequence: 2,
+		RunToken: "own-work-run", Prompt: "owned",
+	})); err == nil {
+		t.Fatal("a consumed preflight token was accepted again")
+	}
+	select {
+	case <-registry.Done():
+	case <-ownerTestContext(t).Done():
+		t.Fatal("a reused preflight token did not retire the registry")
+	}
+}
+
+// Replaces TestOwnerRegistryPreflightWaitWakesOnCancellationAndOwnerEnd and
+// TestOwnerRegistryFailedPreflightWaitPreservesArrivedEvidence. The Run's own
+// select owns cancellation; the window wakes it and fails at owner end and at
+// registry failure.
+func TestOwnerRegistryPreflightWindowEndsWithOwnerAndRegistry(t *testing.T) {
+	t.Run("owner end", func(t *testing.T) {
+		registry, native := preflightWindowRegistry(t)
+		window, err := registry.openPreflightWindow("main-token", "main-session", "owned")
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := registry.waitPreflight(ownerTestContext(t), "main-token", "main-session", "owned"); err == nil {
-		t.Fatal("foreign leading preflight was accepted")
-	}
-	if registry.Err() == nil {
-		t.Fatal("foreign leading preflight did not retire the registry")
-	}
-}
-
-func TestOwnerRegistryPreflightWaitWakesOnCancellationAndOwnerEnd(t *testing.T) {
-	for _, ending := range []bool{false, true} {
-		t.Run(fmt.Sprintf("ending-%v", ending), func(t *testing.T) {
-			directory := t.TempDir()
-			caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
-				"main-token": {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
-			}}
-			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
-				Topology: ownerTopologyLane, Socket: filepath.Join(directory, "bus.sock"), Directory: directory, PrimaryCaller: caller,
-			}, fixture)
-			if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
-				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary, Mode: ownerModeRPC,
-				OwnerToken: "main-token", SessionID: "main-session",
-			}, nil); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			result := make(chan error, 1)
-			go func() {
-				_, err := registry.waitPreflight(ctx, "main-token", "main-session", "owned")
-				result <- err
-			}()
-			if ending {
-				if err := native.Call(ownerTestContext(t), "session_end", ownerEndRequest{
-					Topology: ownerTopologyLane, Scope: ownerScopePrimary, Mode: ownerModeRPC,
-					OwnerToken: "main-token", SessionID: "main-session", Reason: "shutdown",
-				}, nil); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				cancel()
-			}
-			if err := <-result; err == nil {
-				t.Fatal("preflight wait did not report cancellation or owner end")
-			}
-			cancel()
-		})
-	}
-}
-
-func TestOwnerRegistryCanceledPreflightWaitPreservesArrivedEvidence(t *testing.T) {
-	directory := t.TempDir()
-	caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
-		"main-token": {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
-	}}
-	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
-		Topology: ownerTopologyLane, Socket: filepath.Join(directory, "bus.sock"), Directory: directory, PrimaryCaller: caller,
-	}, fixture)
-	if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
-		Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary, Mode: ownerModeRPC,
-		OwnerToken: "main-token", SessionID: "main-session",
-	}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := registry.recordPreflight(mustOwnerJSON(t, ownerPreflightRequest{
-		OwnerToken: "main-token", SessionID: "main-session", ReportSequence: 1,
-		RunToken: "run-one", Prompt: "owned prompt",
-	})); err != nil {
-		t.Fatal(err)
-	}
-	registry.mu.Lock()
-	state := registry.bindings["main-token"]
-	retained := state.retainedBytes
-	registry.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := registry.waitPreflight(ctx, "main-token", "main-session", "owned prompt"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled preflight wait = %v", err)
-	}
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	if state.retainedBytes != retained || state.preflights["run-one"] != "owned prompt" ||
-		!reflect.DeepEqual(state.preflightOrder, []string{"run-one"}) {
-		t.Fatalf("canceled evidence = retained %d/%d, preflights %v, order %v", state.retainedBytes, retained, state.preflights, state.preflightOrder)
-	}
-}
-
-func TestOwnerRegistryFailedPreflightWaitPreservesArrivedEvidence(t *testing.T) {
-	for _, canceled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("canceled-%v", canceled), func(t *testing.T) {
-			directory := t.TempDir()
-			caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
-				"main-token": {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
-			}}
-			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
-				Topology: ownerTopologyLane, Socket: filepath.Join(directory, "bus.sock"), Directory: directory, PrimaryCaller: caller,
-			}, fixture)
-			if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
-				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary, Mode: ownerModeRPC,
-				OwnerToken: "main-token", SessionID: "main-session",
-			}, nil); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := registry.recordPreflight(mustOwnerJSON(t, ownerPreflightRequest{
-				OwnerToken: "main-token", SessionID: "main-session", ReportSequence: 1,
-				RunToken: "run-one", Prompt: "owned prompt",
-			})); err != nil {
-				t.Fatal(err)
-			}
-			registry.mu.Lock()
-			state := registry.bindings["main-token"]
-			retained := state.retainedBytes
-			registry.mu.Unlock()
-			failure := errors.New("controlled registry loss")
-			registry.recordError(failure)
-			if canceled {
-				registry.cancel()
-			}
-			if _, err := registry.waitPreflight(ownerTestContext(t), "main-token", "main-session", "owned prompt"); err == nil || !strings.Contains(err.Error(), failure.Error()) {
-				t.Fatalf("failed preflight wait = %v", err)
-			}
-			registry.mu.Lock()
-			defer registry.mu.Unlock()
-			if state.retainedBytes != retained || state.preflights["run-one"] != "owned prompt" ||
-				!reflect.DeepEqual(state.preflightOrder, []string{"run-one"}) {
-				t.Fatalf("failed evidence = retained %d/%d, preflights %v, order %v", state.retainedBytes, retained, state.preflights, state.preflightOrder)
-			}
-		})
-	}
+		_, _, changed, err := window.observe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := native.Call(ownerTestContext(t), "session_end", ownerEndRequest{
+			Topology: ownerTopologyLane, Scope: ownerScopePrimary, Mode: ownerModeRPC,
+			OwnerToken: "main-token", SessionID: "main-session", Reason: "shutdown",
+		}, nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-changed:
+		case <-ownerTestContext(t).Done():
+			t.Fatal("owner end did not wake the window")
+		}
+		var bridgeErr *pifamily.BridgeCallError
+		if _, _, _, err = window.observe(); !errors.As(err, &bridgeErr) || bridgeErr.Code != "stale_owner" {
+			t.Fatalf("window after owner end = %v", err)
+		}
+	})
+	t.Run("registry failure", func(t *testing.T) {
+		registry, _ := preflightWindowRegistry(t)
+		window, err := registry.openPreflightWindow("main-token", "main-session", "owned")
+		if err != nil {
+			t.Fatal(err)
+		}
+		failure := errors.New("controlled registry loss")
+		registry.recordError(failure)
+		if _, _, _, err = window.observe(); err == nil || !strings.Contains(err.Error(), failure.Error()) {
+			t.Fatalf("window after registry failure = %v", err)
+		}
+		if _, err = registry.openPreflightWindow("main-token", "main-session", "next"); err == nil {
+			t.Fatal("a window opened on a failed registry")
+		}
+	})
+	t.Run("one window per binding", func(t *testing.T) {
+		registry, _ := preflightWindowRegistry(t)
+		window, err := registry.openPreflightWindow("main-token", "main-session", "owned")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = registry.openPreflightWindow("main-token", "main-session", "second"); err == nil {
+			t.Fatal("a second window opened on one binding")
+		}
+		window.close()
+		if _, err = registry.openPreflightWindow("main-token", "main-session", "second"); err != nil {
+			t.Fatalf("window after close = %v", err)
+		}
+	})
 }
 
 func TestOwnerRegistryBoundsReorderedReportPayloadBytes(t *testing.T) {
@@ -2323,5 +2339,207 @@ func TestOwnerRegistryShutdownIsPrimaryRequestOnly(t *testing.T) {
 	}
 	if err := registry.shutdownPrimary(ownerTestContext(t)); err == nil {
 		t.Fatal("shutdown without primary was accepted")
+	}
+}
+
+func ownerStageAnswer(request ownerStageRequest, fields map[string]any) json.RawMessage {
+	answer := map[string]any{"owner_token": request.OwnerToken, "session_id": request.SessionID, "message_id": request.MessageID}
+	for key, value := range fields {
+		answer[key] = value
+	}
+	body, _ := json.Marshal(answer)
+	return body
+}
+
+// The interactive primary's receipt follows OMP's busy state at the call, as
+// the extension reports it: injected when busy (a steer into the running
+// task), written when idle (a turn started with it). Neither is a native
+// confirmation. A queued answer without that state, or a queue_full answer
+// with it, is invalid. Before this change every accepted interactive stage
+// was queued_for_next_turn.
+func TestOwnerRegistryInteractiveReceiptFollowsBusyStateAtTheCall(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		fields map[string]any
+		want   string
+	}{
+		{name: "busy", fields: map[string]any{"queued": true, "busy": true}, want: "injected"},
+		{name: "idle", fields: map[string]any{"queued": true, "busy": false}, want: "written"},
+		{name: "no busy state", fields: map[string]any{"queued": true}},
+		{name: "null busy state", fields: map[string]any{"queued": true, "busy": nil}},
+		{name: "busy state on queue_full", fields: map[string]any{"queued": false, "reason": "queue_full", "busy": false}},
+		{name: "null busy state on queue_full", fields: map[string]any{"queued": false, "reason": "queue_full", "busy": nil}},
+		{name: "string busy state", fields: map[string]any{"queued": true, "busy": "true"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listener := ownerBusListener(t)
+			directory := t.TempDir()
+			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+				"owner-token": {OwnerToken: "owner-token", SessionID: "native-session", CWD: "/work"},
+			}}
+			fixture.stageRaw = func(request ownerStageRequest) json.RawMessage { return ownerStageAnswer(request, test.fields) }
+			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+				Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+			}, fixture)
+			_, _, _ = ownerReady(t, registry, native, listener, ownerReadyRequest{
+				Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+				Mode: ownerModeTUI, OwnerToken: "owner-token", SessionID: "native-session",
+			})
+			state, err := registry.current("owner-token", "native-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{
+				MessageID: "staged", From: kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{}}, Body: "body",
+			})
+			if test.want != "" {
+				if err != nil || receipt.Disposition != test.want || receipt.Reason != "" {
+					t.Fatalf("receipt = %+v, %v", receipt, err)
+				}
+				if err = registry.Err(); err != nil {
+					t.Fatalf("registry = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "acknowledgement is invalid") {
+				t.Fatalf("invalid busy state = %+v, %v", receipt, err)
+			}
+			select {
+			case <-registry.Done():
+			case <-ownerTestContext(t).Done():
+				t.Fatal("invalid busy state did not retire the registry")
+			}
+		})
+	}
+}
+
+// A Task child keeps queued_for_next_turn: only the interactive primary's
+// receipt changed, and a child answer carrying a busy state is invalid.
+func TestOwnerRegistryTaskChildKeepsItsQueuedReceipt(t *testing.T) {
+	for name, fields := range map[string]map[string]any{
+		"queued":          {"queued": true},
+		"busy state":      {"queued": true, "busy": true},
+		"null busy state": {"queued": true, "busy": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			listener := ownerBusListener(t)
+			directory := t.TempDir()
+			caller := kit.NewCaller(func(context.Context, string, any) (json.RawMessage, error) {
+				return json.RawMessage(`{}`), nil
+			})
+			fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+				"main-token":  {OwnerToken: "main-token", SessionID: "main-session", CWD: "/work/main"},
+				"child-token": {OwnerToken: "child-token", SessionID: "child-session", CWD: "/work/child"},
+			}}
+			fixture.stageRaw = func(request ownerStageRequest) json.RawMessage { return ownerStageAnswer(request, fields) }
+			registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+				Topology: ownerTopologyLane, Socket: listener.Addr().String(), Directory: directory, PrimaryCaller: caller,
+			}, fixture)
+			if err := native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
+				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopePrimary,
+				Mode: ownerModeRPC, OwnerToken: "main-token", SessionID: "main-session",
+			}, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, _, _ = ownerReady(t, registry, native, listener, ownerReadyRequest{
+				Topology: ownerTopologyLane, Directory: directory, Scope: ownerScopeChild,
+				Mode: ownerModePrint, OwnerToken: "child-token", SessionID: "child-session",
+			})
+			state, err := registry.current("child-token", "child-session")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := registry.deliver(ownerTestContext(t), state, kit.DeliveryRequest{
+				MessageID: "child", From: kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{}}, Body: "body",
+			})
+			if _, busy := fields["busy"]; !busy {
+				if err != nil || receipt.Disposition != "queued_for_next_turn" {
+					t.Fatalf("child receipt = %+v, %v", receipt, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "acknowledgement is invalid") {
+				t.Fatalf("child busy state = %+v, %v", receipt, err)
+			}
+		})
+	}
+}
+
+// The extension abandons a claimed batch whose native events no longer match
+// what it sent. The owner stops tracking it, keeps the receipt it gave, and
+// keeps serving later deliveries; an abandon before any claim is still a
+// protocol failure.
+func TestOwnerRegistryRetiresAnAbandonedDeliveryBatchAndStaysHealthy(t *testing.T) {
+	for _, abandonBeforeClaim := range []bool{false, true} {
+		listener := ownerBusListener(t)
+		directory := t.TempDir()
+		fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+			"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+		}}
+		registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+			Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+			Groups: []string{"interactive"},
+		}, fixture)
+		_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+			Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+			Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one",
+		})
+		deliver := func(id int64, messageID string) {
+			t.Helper()
+			body, err := protocol.RequestBytes(id, "message.deliver", kit.DeliveryRequest{
+				MessageID: messageID,
+				From:      kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}},
+				Body:      "hello " + messageID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownerWrite(t, public, body)
+			var receipt kit.DeliveryReceipt
+			if frame := ownerFrame(t, scanner); frame.Error != nil ||
+				protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "written" {
+				t.Fatalf("delivery %s receipt = %+v, %+v", messageID, frame, receipt)
+			}
+		}
+		sequence := uint64(0)
+		observe := func(batch, phase, messageID string) error {
+			sequence++
+			return native.Call(ownerTestContext(t), "delivery.observe", ownerDeliveryObserveRequest{
+				OwnerToken: "owner-one", SessionID: "session-one", BatchToken: batch,
+				ReportSequence: sequence, Phase: phase, MessageIDs: []string{messageID},
+			}, nil)
+		}
+		deliver(40, "first")
+		if abandonBeforeClaim {
+			if err := observe("batch-one", "abandoned", "first"); err == nil {
+				t.Fatal("an abandon before its claim was accepted")
+			}
+			select {
+			case <-registry.Done():
+			case <-ownerTestContext(t).Done():
+				t.Fatal("an abandon before its claim did not fail the registry")
+			}
+			continue
+		}
+		for _, phase := range []string{"claimed", "message_start", "abandoned"} {
+			if err := observe("batch-one", phase, "first"); err != nil {
+				t.Fatalf("batch-one %s = %v", phase, err)
+			}
+		}
+		deliver(41, "second")
+		for _, phase := range []string{"claimed", "message_start", "message_end", "context"} {
+			if err := observe("batch-two", phase, "second"); err != nil {
+				t.Fatalf("batch-two %s after an abandon = %v", phase, err)
+			}
+		}
+		select {
+		case <-registry.Done():
+			t.Fatal("an abandoned batch retired the registry")
+		default:
+		}
+		// The abandoned batch's token is retired like a completed one.
+		if err := observe("batch-one", "claimed", "first"); err == nil {
+			t.Fatal("an abandoned delivery batch was claimed again")
+		}
 	}
 }

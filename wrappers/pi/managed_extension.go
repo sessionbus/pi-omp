@@ -12,6 +12,7 @@ import (
 var managedPluginFiles = []string{
 	"pi/extension.mjs",
 	"pi/native.mjs",
+	"pi/peer.mjs",
 	"pifamily/extension/bridge.mjs",
 	"pifamily/extension/inherited.mjs",
 	"package.json",

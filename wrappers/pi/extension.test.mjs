@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import fs from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BridgeCallError, PrivateBridge } from "../pifamily/extension/bridge.mjs";
+import kit from "../../pi/node_modules/@sessionbus/kit/sdk/js/index.js";
+import { BridgeCallError } from "../pifamily/extension/bridge.mjs";
 import {
   captureLaunch,
   createPiExtension,
   launchEnvironmentName,
   toolName,
 } from "./extension.mjs";
+import { connectPiInteractivePeer } from "./peer.mjs";
 
 function deferred() {
   let resolve;
@@ -33,6 +37,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
   let pending;
   let idle = true;
   let aborted = 0;
+  let abortHook;
   let shutdown = 0;
   const notices = [];
   const shutdownSignal = deferred();
@@ -42,7 +47,7 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     isIdle: () => idle,
     hasUI: true,
     ui: { notify: (message, type) => notices.push({ message, type }) },
-    abort: () => { aborted++; },
+    abort: () => { aborted++; abortHook?.(); },
     shutdown: () => { shutdown++; shutdownSignal.resolve(); },
     sessionManager: {
       getSessionId: () => id,
@@ -51,9 +56,15 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     },
   });
   const ctx = createContext();
+  // Pi activates a registered extension tool; a resumed session's recorded
+  // loadout can replace that set (Pi 1.3.0 _restoreToolsFromTranscript).
+  let activeTools = ["read"];
+  const toolSets = [];
   const pi = {
     tool: undefined,
-    registerTool(value) { this.tool = value; },
+    registerTool(value) { this.tool = value; activeTools.push(value.name); },
+    getActiveTools: () => [...activeTools],
+    setActiveTools(names) { toolSets.push([...names]); activeTools = [...names]; },
     on(event, handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -79,6 +90,11 @@ function nativeFixture(id = "native-1", mode = "rpc") {
     setID(value) { id = value; },
     setName(value) { name = value; },
     setIdle(value) { idle = value; },
+    onAbort(hook) { abortHook = hook; },
+    restoreTools(names) { activeTools = [...names]; },
+    activeTools: () => [...activeTools],
+    toolSets: () => toolSets.map((names) => [...names]),
+    setLeaf(value) { leaf = value === null ? undefined : { id: value }; },
     pending: () => pending,
     async completeMessage() {
       assert.ok(pending);
@@ -99,11 +115,18 @@ function nativeFixture(id = "native-1", mode = "rpc") {
 }
 
 function launch(topology) {
-  return { directory: "/private/owner", owner_pid: process.ppid, socket: "/private/owner/bridge.sock", topology };
+  if (topology === "lane") return { bridge_fd: 3, topology };
+  return { socket: "/public/bus.sock", name: "managed", groups: ["team"], topology };
 }
 
-function fakeConnection({ topology, queue = [] } = {}) {
+// A run token as Go mints it: 32 hex digits.
+function runToken(index) {
+  return index.toString(16).padStart(32, "0");
+}
+
+function fakeConnection({ topology, queue = [], preflightRuns } = {}) {
   const calls = [];
+  let preflights = 0;
   const done = deferred();
   let nativeHandler;
   let closes = 0;
@@ -113,10 +136,12 @@ function fakeConnection({ topology, queue = [] } = {}) {
       if (signal?.aborted) throw signal.reason;
       calls.push({ method, params });
       switch (method) {
+        case "run.preflight":
+          preflights++;
+          return { session_id: params.session_id, run: preflightRuns ? preflightRuns.shift() : runToken(preflights) };
         case "owner.ready":
         case "session_end":
         case "run.input":
-        case "run.preflight":
         case "run.start":
         case "run.settling":
           return { session_id: params.session_id };
@@ -159,31 +184,38 @@ function fakeConnection({ topology, queue = [] } = {}) {
   };
 }
 
-test("launch capture scrubs and binds a private physical socket", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-  const value = { directory, owner_pid: process.ppid, socket, topology: "lane" };
+test("launch capture scrubs and validates inherited lane descriptors", () => {
+  const value = { bridge_fd: 3, topology: "lane" };
   const environment = { [launchEnvironmentName]: JSON.stringify(value) };
   assert.deepEqual(captureLaunch(environment), value);
   assert.equal(Object.hasOwn(environment, launchEnvironmentName), false);
 
   for (const invalid of [
-    { ...value, owner_pid: process.ppid + 1 },
+    { ...value, bridge_fd: 2 },
+    { ...value, bridge_fd: 3.5 },
     { ...value, topology: "other" },
     { ...value, extra: true },
   ]) {
     const candidate = { [launchEnvironmentName]: JSON.stringify(invalid) };
     assert.throws(() => captureLaunch(candidate), /metadata/);
+    assert.equal(Object.hasOwn(candidate, launchEnvironmentName), false);
+  }
+});
+
+test("interactive launch capture scrubs immutable public bootstrap", () => {
+  const value = { socket: "/public/bus.sock", name: "managed", groups: ["team"], topology: "interactive" };
+  const environment = { [launchEnvironmentName]: JSON.stringify(value) };
+  assert.deepEqual(captureLaunch(environment), value);
+  assert.equal(Object.hasOwn(environment, launchEnvironmentName), false);
+
+  for (const invalid of [
+    { ...value, socket: "relative" },
+    { ...value, groups: [""] },
+    { ...value, topology: "other" },
+    { ...value, extra: true },
+  ]) {
+    const candidate = { [launchEnvironmentName]: JSON.stringify(invalid) };
+    assert.throws(() => captureLaunch(candidate), /metadata|socket|groups/);
     assert.equal(Object.hasOwn(candidate, launchEnvironmentName), false);
   }
 });
@@ -200,7 +232,7 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("session_start", { type: "session_start", reason: "startup" });
   assert.deepEqual(owner.calls.shift(), {
     method: "owner.ready",
-    params: { topology: "lane", directory: "/private/owner", session_id: "native-1", name: "Pi title" },
+    params: { topology: "lane", session_id: "native-1", name: "Pi title" },
   });
   assert.deepEqual(await owner.native("native.describe", { session_id: "native-1" }), {
     session_id: "native-1", name: "Pi title", cwd: "/project",
@@ -213,13 +245,13 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("before_agent_start", { type: "before_agent_start", prompt: "expanded" });
   await native.emit("agent_start");
   await native.emit("agent_settled");
+  // Work that starts after the settle is Pi's own and is not reported.
   await native.emit("agent_start");
   assert.deepEqual(owner.calls.splice(0), [
     { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "original", settling: false } },
-    { method: "run.preflight", params: { session_id: "native-1", prompt: "expanded", settling: false } },
-    { method: "run.start", params: { session_id: "native-1", settling: false } },
-    { method: "run.settling", params: { session_id: "native-1" } },
-    { method: "run.start", params: { session_id: "native-1", settling: true } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "expanded", settling: false, leaf: null, settled: 0 } },
+    { method: "run.start", params: { session_id: "native-1", run: runToken(1), settling: false } },
+    { method: "run.settling", params: { session_id: "native-1", run: runToken(1), leaf: null } },
   ]);
 
   const result = await native.pi.tool.execute("call-1", { action: "list", arguments: {} }, undefined, undefined, native.ctx);
@@ -232,13 +264,550 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   await native.emit("session_info_changed", { type: "session_info_changed", name: undefined });
   assert.deepEqual(owner.calls.splice(0), [
     { method: "tool.call", params: { session_id: "native-1", call_id: "call-1", action: "list", arguments: {} } },
-    { method: "owner.ready", params: { topology: "lane", directory: "/private/owner", session_id: "native-1", name: "" } },
+    { method: "owner.ready", params: { topology: "lane", session_id: "native-1", name: "" } },
   ]);
   await native.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
   assert.deepEqual(owner.calls.shift(), {
     method: "session_end", params: { topology: "lane", session_id: "native-1", reason: "reload" },
   });
   assert.equal(owner.closes(), 0);
+});
+
+// A lane puts a peer message in Pi's steering queue only while its own run is
+// active (before_agent_start to agent_settled) and only for that run's token,
+// checked in the same step as the send; the steered message's events match
+// its admitted delivery. Pi reads that queue at the running task's next
+// boundary (agent-core agent-loop.js:183-195).
+test("lane native.steer steers only for the running Run's token", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const steer = (id, run) => owner.native("native.steer", { session_id: "native-1", message_id: id, body: "peer", run });
+  const idle = (id) => ({ session_id: "native-1", message_id: id, accepted: false, reason: "idle" });
+  assert.deepEqual(await steer("early", runToken(1)), idle("early"));
+
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("steer-1", runToken(1)), { session_id: "native-1", message_id: "steer-1", accepted: true });
+  assert.deepEqual(sends, [{
+    message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
+    options: { triggerTurn: true, deliverAs: "steer" },
+  }]);
+  const message = { role: "custom", customType: "sessionbus.message", content: "peer", details: { message_id: "steer-1" } };
+  await native.emit("message_start", { type: "message_start", message });
+  await native.emit("message_end", { type: "message_end", message });
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
+
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  assert.deepEqual(await steer("late", runToken(1)), idle("late"));
+
+  // A steer made for the first Run that arrives during the next Run is
+  // refused; the next Run's own steer is accepted.
+  await native.emit("input", { type: "input", source: "rpc", text: "second" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "second" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("stale", runToken(1)), idle("stale"));
+  assert.deepEqual(await steer("steer-2", runToken(2)), { session_id: "native-1", message_id: "steer-2", accepted: true });
+  assert.deepEqual(sends.map(({ message: sent }) => sent.details.message_id), ["steer-1", "steer-2"]);
+  await assert.rejects(owner.native("native.steer", { session_id: "native-1", message_id: "no-run", body: "peer" }), /fields are invalid/);
+});
+
+// Only the lane's own rpc prompt starts its Run (owner decision: the Run ends
+// when Pi settles). Input from elsewhere, a run a custom message starts, and
+// any run after a settle until the next rpc prompt are Pi's own work: none is
+// reported or gets a token, and a run Go answers null for is not reported
+// further. The preflight carries the leaf and the count of settled Pi runs;
+// the settle carries the leaf where the owned run ended.
+test("lane reports only its own rpc run, with the settle count and leaves", async () => {
+  const native = nativeFixture();
+  const owner = fakeConnection({ topology: "lane", preflightRuns: [runToken(1), null] });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  owner.calls.splice(0);
+
+  native.setLeaf("before-run");
+  await native.emit("input", { type: "input", source: "rpc", text: "owned" });
+  assert.deepEqual(await native.emit("input", { type: "input", source: "extension", text: "mid-run" }), { action: "continue" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "owned" });
+  await native.emit("agent_start");
+  native.setLeaf("owned-answer");
+  await native.emit("agent_settled");
+
+  assert.deepEqual(await native.emit("input", { type: "input", source: "extension", text: "own" }), { action: "continue" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "own" });
+  await native.emit("agent_start");
+  await native.emit("agent_settled");
+  await native.emit("before_agent_start", {
+    type: "before_agent_start", messageType: "custom", message: { role: "custom", customType: "other", content: "own" },
+  });
+  await native.emit("agent_start");
+  native.setLeaf("own-answer");
+  await native.emit("agent_settled");
+  assert.deepEqual(owner.calls.splice(0), [
+    { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "owned", settling: false } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "owned", settling: false, leaf: "before-run", settled: 0 } },
+    { method: "run.start", params: { session_id: "native-1", run: runToken(1), settling: false } },
+    { method: "run.settling", params: { session_id: "native-1", run: runToken(1), leaf: "owned-answer" } },
+  ]);
+
+  // The next preflight counts every settled run, the lane's and Pi's own.
+  await native.emit("input", { type: "input", source: "rpc", text: "next" });
+  await native.emit("before_agent_start", { type: "before_agent_start", messageType: "user", prompt: "next" });
+  await native.emit("agent_start");
+  await native.emit("agent_settled");
+  assert.deepEqual(owner.calls.splice(0), [
+    { method: "run.input", params: { session_id: "native-1", source: "rpc", text: "next", settling: false } },
+    { method: "run.preflight", params: { session_id: "native-1", prompt: "next", settling: false, leaf: "own-answer", settled: 3 } },
+  ]);
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
+});
+
+// An interactive session has no Run: a peer message goes into Pi's steering
+// queue while a native run is active (before_agent_start to agent_settled),
+// and run must be null.
+test("interactive native.steer steers into the running task and refuses an idle session", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const steer = (id, run = null) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: "peer", run });
+  const idle = (id) => ({ session_id: "interactive-1", message_id: id, accepted: false, reason: "idle" });
+  assert.deepEqual(await steer("early"), idle("early"));
+
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("steer-1"), { session_id: "interactive-1", message_id: "steer-1", accepted: true });
+  assert.deepEqual(sends, [{
+    message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
+    options: { triggerTurn: true, deliverAs: "steer" },
+  }]);
+  await assert.rejects(steer("token", runToken(1)), /run must be null/);
+
+  native.setIdle(true);
+  await native.emit("agent_settled");
+  // steer-1 never started, so the settle keeps it: one history copy, no turn.
+  assert.deepEqual(sends.slice(1), [{
+    message: { customType: "sessionbus.message", content: "peer", display: true, details: { message_id: "steer-1" } },
+    options: undefined,
+  }]);
+  assert.deepEqual(await steer("late"), idle("late"));
+  assert.equal(sends.length, 2);
+  assert.equal(native.shutdown(), 0);
+});
+
+// Pi 1.3.0 restores a resumed session's recorded tool loadout, which drops
+// our tool when the transcript never declared it. session_start adds back
+// only our tool, after the others, and changes nothing when it is active.
+// Before this change the resumed session ran without its comms tool.
+test("session start keeps the comms tool active after Pi restores a resumed loadout", async () => {
+  for (const topology of ["interactive", "lane"]) {
+    const native = nativeFixture("native-1", topology === "lane" ? "rpc" : "tui");
+    const owner = fakeConnection({ topology });
+    createPiExtension({ launch: launch(topology), connect: owner.connect })(native.pi);
+    native.restoreTools(["read", "bash"]);
+    await native.emit("session_start", { type: "session_start", reason: "resume" });
+    assert.deepEqual(native.activeTools(), ["read", "bash", toolName], topology);
+    assert.deepEqual(native.toolSets(), [["read", "bash", toolName]], topology);
+    assert.equal(native.shutdown(), 0, topology);
+  }
+});
+
+test("session start leaves an active comms tool and its order alone", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  native.restoreTools([toolName, "read"]);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  assert.deepEqual(native.activeTools(), [toolName, "read"]);
+  assert.deepEqual(native.toolSets(), []);
+});
+
+// DEF-04 (owner 2026-10-19, "Clear the queue first"): at a settle (aborted,
+// and since 2026-10-28 also without an abort) a steered message whose
+// message_start never fired is written to history with a plain send, after
+// one ctx.abort() has cleared any queued copy. A started one is left as it
+// is, an appended one is not a steer, and a settle with nothing to keep
+// changes nothing. Before this change every such message was dropped.
+test("interactive aborted settle clears Pi's queue once and writes never-started steers to history", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options, aborts: native.aborted() }); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const peer = (id) => ({ customType: "sessionbus.message", content: `body ${id}`, display: true, details: { message_id: id } });
+  const accepted = (id) => ({ session_id: "interactive-1", message_id: id, accepted: true });
+  const steer = (id) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null });
+
+  assert.deepEqual(await owner.native("native.append", {
+    session_id: "interactive-1", message_id: "appended", body: "body appended",
+  }), accepted("appended"));
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  for (const id of ["started", "completed", "never-1", "never-2"]) assert.deepEqual(await steer(id), accepted(id));
+  await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("started") } });
+  await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("completed") } });
+  await native.emit("message_end", { type: "message_end", message: { role: "custom", ...peer("completed") } });
+  assert.equal(sends.length, 5);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 1);
+  assert.deepEqual(sends.slice(5), [
+    { message: peer("never-1"), options: undefined, aborts: 1 },
+    { message: peer("never-2"), options: undefined, aborts: 1 },
+  ]);
+
+  // Nothing is left to keep, so a second aborted settle clears nothing.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "again" });
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 1);
+  assert.equal(sends.length, 7);
+
+  // A settle without an abort that still holds a never-started steer (Pi
+  // dropped it, or holds it for a later run) clears and writes it the same
+  // way; an ordinary settle with none is untouched.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "third" });
+  native.setIdle(false);
+  assert.deepEqual(await steer("unaborted"), accepted("unaborted"));
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.equal(native.aborted(), 2);
+  assert.deepEqual(sends.slice(8), [{ message: peer("unaborted"), options: undefined, aborts: 2 }]);
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "fourth" });
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.equal(native.aborted(), 2);
+  assert.equal(sends.length, 9);
+  assert.equal(native.shutdown(), 0);
+});
+
+// At a settle without an abort the rescue of a never-started steer runs before
+// this extension's own drain: the steer is written to history first, then the
+// drain's delivery is handed to Pi with its turn. Pi's run is no longer
+// active at a settle, so the abort that clears the queue requests no run
+// abort and leaves later deferred starts alone (Pi 1.4.0
+// agent-session.js:683-706).
+test("interactive settle rescue runs before its own drain and leaves the drain's turn", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const order = [];
+  const send = native.pi.sendMessage.bind(native.pi);
+  // The fixture's own send models only a turn-starting append; the steer and
+  // the history write are recorded here.
+  native.pi.sendMessage = (message, options) => {
+    order.push({ id: message.details.message_id, options, aborts: native.aborted() });
+    if (options?.triggerTurn === true && options.deliverAs === undefined) return send(message, options);
+  };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  assert.equal((await owner.native("native.steer", { session_id: "interactive-1", message_id: "never", body: "peer", run: null })).accepted, true);
+  queue.push({ session_id: "interactive-1", message_id: "drained", body: "after settle" });
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.deepEqual(order.slice(1), [
+    { id: "never", options: undefined, aborts: 1 },
+    { id: "drained", options: { triggerTurn: true }, aborts: 1 },
+  ]);
+  assert.equal(native.aborted(), 1);
+  assert.equal(native.pending().details.message_id, "drained");
+  assert.equal(native.shutdown(), 0);
+});
+
+// A settle that arrives while a quit waits for Pi still keeps the unread
+// steer, and its drain starts no run; the quit drain then writes the queued
+// delivery to history once, after the steer.
+test("interactive settle during quit keeps the steer and starts no run", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 1000 })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "queued", body: "peer", run: null });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "for the next task" });
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(native.aborted(), 1);
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  await quitting;
+  assert.deepEqual(sends.slice(1), [{ id: "queued", options: undefined }, { id: "waiting", options: undefined }]);
+  assert.equal(queue.length, 0);
+});
+
+// dev1's control (pi-unread-steer-rescue-read-dev1-20261028): a compaction
+// schedules a drain before its task settles; quit then aborts the task and
+// waits for session_end. Neither that scheduled drain nor the settle's starts
+// a run while Pi quits; the quit drain writes the waiting delivery to history
+// once, after the never-started steer, and nothing is left queued.
+test("interactive quit starts no run from a scheduled or settle drain and writes queued deliveries after steers", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 200 })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "held", body: "peer", run: null });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued for the next task" });
+  await native.emit("session_compact", { type: "session_compact", reason: "threshold" });
+  native.onAbort(() => native.setIdle(true));
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends.filter((send) => send.options?.triggerTurn && !send.options.deliverAs), [], "a run started during quit");
+  assert.deepEqual(sends.slice(1).map((send) => [send.id, send.options]), [["held", undefined], ["waiting", undefined]]);
+  assert.equal(queue.length, 0);
+});
+
+// Quitting while Pi is idle ends the session before Pi's next task: the
+// steers it never read are written to history first, then the deliveries
+// still queued for that task, in arrival order, each once and with no run.
+// This does not depend on aborting a busy task.
+test("interactive idle quit writes never-started steers, then queued deliveries in order, with no run", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "held", body: "peer", run: null });
+  queue.push(
+    { session_id: "interactive-1", message_id: "waiting-1", body: "first queued" },
+    { session_id: "interactive-1", message_id: "waiting-2", body: "second queued" },
+  );
+  native.setIdle(true);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  assert.deepEqual(sends.slice(1).map((send) => [send.id, send.options]),
+    [["held", undefined], ["waiting-1", undefined], ["waiting-2", undefined]]);
+  assert.equal(queue.length, 0);
+  assert.equal(native.aborted(), 0);
+});
+
+// A drain a compaction scheduled before quit starts no run while quit waits
+// for session_end; the quit drain alone writes the queued delivery, once.
+test("interactive idle quit gates a scheduled drain while session_end is pending", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued" });
+  await native.emit("session_compact", { type: "session_compact", reason: "threshold" });
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends, [{ id: "waiting", options: undefined }]);
+  assert.equal(queue.length, 0);
+});
+
+// A delivery crossing the quit while Pi is still busy is answered busy and
+// starts nothing; with Pi idle it is written to history and accepted.
+test("interactive delivery crossing a quit is busy while Pi is busy and history once idle", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const owner = fakeConnection({ topology: "interactive" });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  native.setIdle(false);
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    assert.deepEqual(await owner.native("native.append", { session_id: "interactive-1", message_id: "busy", body: "crossing" }),
+      { session_id: "interactive-1", message_id: "busy", accepted: false, reason: "busy" });
+    native.setIdle(true);
+    assert.deepEqual(await owner.native("native.append", { session_id: "interactive-1", message_id: "idle", body: "crossing" }),
+      { session_id: "interactive-1", message_id: "idle", accepted: true });
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends, [{ id: "idle", options: undefined }]);
+  assert.equal(native.aborted(), 0);
+});
+
+// Quitting with a steer that never started ends the session before any later
+// run. Idle at quit: it is written to history once, with no turn and no
+// abort. Busy at quit: Pi does not abort the task first, so the extension
+// aborts it as Escape does and gives Pi a bounded time to settle; settled, the
+// steer is written once; still busy at the bound, nothing is written and quit
+// goes on. A started steer stays as it is. Before this change all were lost.
+test("interactive quit keeps never-started steers when Pi is or becomes idle", async () => {
+  for (const atQuit of ["idle", "settles after abort", "stays busy"]) {
+    const native = nativeFixture("interactive-1", "tui");
+    const sends = [];
+    native.pi.sendMessage = (message, options) => { sends.push({ message, options, aborts: native.aborted() }); };
+    const owner = fakeConnection({ topology: "interactive" });
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 200 })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    const peer = (id) => ({ customType: "sessionbus.message", content: `body ${id}`, display: true, details: { message_id: id } });
+    const steer = (id) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null });
+    await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+    native.setIdle(false);
+    for (const id of ["started", "queued"]) await steer(id);
+    await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("started") } });
+    const steered = sends.length;
+    if (atQuit === "idle") native.setIdle(true);
+    if (atQuit === "settles after abort") native.onAbort(() => setTimeout(() => native.setIdle(true), 30));
+    const started = Date.now();
+    await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+    const expected = atQuit === "stays busy" ? [] : [{ message: peer("queued"), options: undefined, aborts: atQuit === "idle" ? 0 : 1 }];
+    assert.deepEqual(sends.slice(steered), expected, atQuit);
+    assert.equal(native.aborted(), atQuit === "idle" ? 0 : 1, atQuit);
+    if (atQuit === "stays busy") assert.ok(Date.now() - started < 1000, "quit goes on at the bound");
+  }
+});
+
+test("interactive aborted settle leaves one history copy and no queued copy of a never-started steer", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const history = [];
+  native.pi.sendMessage = (message, options) => {
+    if (options?.deliverAs === "steer") queue.push(message.details.message_id);
+    else if (options === undefined) history.push(message.details.message_id);
+    else assert.fail(`unexpected send options ${JSON.stringify(options)}`);
+  };
+  // The TUI's ctx.abort() runs restoreQueuedMessagesToEditor({abort:true}),
+  // which clears Pi's queues (Pi 1.2.0 interactive-mode.js:1732-1734, 3891-3910).
+  native.onAbort(() => { queue.length = 0; });
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  for (const id of ["compacted", "dequeued"]) {
+    assert.equal((await owner.native("native.steer", {
+      session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null,
+    })).accepted, true);
+  }
+  queue.splice(queue.indexOf("dequeued"), 1);
+  assert.deepEqual(queue, ["compacted"]);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.deepEqual(queue, []);
+  assert.deepEqual(history, ["compacted", "dequeued"]);
+  assert.equal(native.shutdown(), 0);
+});
+
+// Pi can settle without an abort while our steer is still in agent-core's
+// queue (Pi 1.4.0 _runBeforeSettleBoundary, when the context cannot
+// continue). The rescue's ctx.abort() runs restoreQueuedMessagesToEditor
+// ({abort:true}), which clears agent-core's steering queue whether or not a
+// run is active (Pi 1.4.0 interactive-mode.js:1732-1734, 3820-3822;
+// agent-session.js:1944-1949; agent-core agent.js:195-206). The message is
+// then in history once, and a later run finds no queued copy to deliver.
+test("interactive no-abort settle with a still-queued steer writes it once and leaves no queued copy", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const history = [];
+  native.pi.sendMessage = (message, options) => {
+    if (options?.deliverAs === "steer") queue.push(message.details.message_id);
+    else if (options === undefined) history.push(message.details.message_id);
+    else assert.fail(`unexpected send options ${JSON.stringify(options)}`);
+  };
+  native.onAbort(() => { queue.length = 0; });
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  assert.equal((await owner.native("native.steer", {
+    session_id: "interactive-1", message_id: "held", body: "body held", run: null,
+  })).accepted, true);
+  assert.deepEqual(queue, ["held"]);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.deepEqual(queue, []);
+  assert.deepEqual(history, ["held"]);
+  assert.equal(native.aborted(), 1);
+
+  // A later run drains Pi's queue: nothing of "held" is left to deliver, and
+  // its settle writes nothing more.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "later" });
+  assert.deepEqual(queue, []);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.deepEqual(history, ["held"]);
+  assert.equal(native.aborted(), 1);
+  assert.equal(native.shutdown(), 0);
+});
+
+// A lane's rpc abort leaves Pi's queue in place and the next run drains it
+// (Pi 1.2.0 rpc-mode.js:327-329), so a lane's aborted settle neither clears
+// nor writes anything.
+test("lane aborted settle leaves a never-started steer to Pi", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
+  native.setIdle(false);
+  assert.equal((await owner.native("native.steer", {
+    session_id: "native-1", message_id: "steer-1", body: "peer", run: runToken(1),
+  })).accepted, true);
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.equal(native.aborted(), 0);
+  assert.equal(sends.length, 1);
+  assert.equal(native.shutdown(), 0);
 });
 
 test("interactive drains before a prompt and after a settled turn through nested native appends", async () => {
@@ -278,6 +847,47 @@ test("interactive drains before a prompt and after a settled turn through nested
 
   await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
   assert.equal(owner.closes(), 1);
+});
+
+// Pi 1.2.0 defers a triggerTurn send made during agent_settled handlers and
+// stays idle until they finish (agent-session.js:1836-1838). The settled drain
+// accepts one such send and keeps the rest queued, as Pi 0.85.1 did; outside
+// that drain the busy check still applies.
+test("interactive settled drain accepts one deferred Pi 1.2.0 send and keeps the rest queued", async () => {
+  const native = nativeFixture("interactive-defer", "tui");
+  const send = native.pi.sendMessage;
+  native.pi.sendMessage = (message, options) => { send(message, options); native.setIdle(true); };
+  const queue = [
+    { session_id: "interactive-defer", message_id: "first", body: "one" },
+    { session_id: "interactive-defer", message_id: "second", body: "two" },
+  ];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("agent_settled");
+  assert.equal(native.shutdown(), 0);
+  assert.equal(native.aborted(), 0);
+  assert.equal(native.pending().details.message_id, "first");
+  assert.deepEqual(queue.map(({ message_id }) => message_id), ["second"]);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
+
+// An idle delivery that lands while Pi still runs later settled handlers is
+// deferred by Pi too (agent-session.js:1836-1838). It is accepted and does not
+// end the session.
+test("interactive idle delivery that Pi defers outside the settled drain is accepted", async () => {
+  const native = nativeFixture("interactive-window", "tui");
+  const send = native.pi.sendMessage;
+  native.pi.sendMessage = (message, options) => { send(message, options); native.setIdle(true); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  assert.deepEqual(await owner.native("native.append", {
+    session_id: "interactive-window", message_id: "window", body: "during later handlers",
+  }), { session_id: "interactive-window", message_id: "window", accepted: true });
+  assert.equal(native.pending().details.message_id, "window");
+  assert.equal(native.shutdown(), 0);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 });
 
 test("interactive wakes after manual compaction and brackets unobservable branch summaries", async () => {
@@ -411,123 +1021,82 @@ test("an idle owner connection ending retires the native session", async () => {
   assert.equal(native.shutdown(), 1);
 });
 
-test("actual Unix bridge supports handshake, nested drain, tool call, and joined quit", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-wire-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const queue = [{ session_id: "wire-native", message_id: "wire-message", body: "wire body" }];
-  let host;
-  const hostReady = deferred();
-  const server = net.createServer((connection) => {
-    host = new PrivateBridge(connection, {
-      role: "host",
-      handler: async ({ method, params, bridge, signal }) => {
-        switch (method) {
-          case "owner.ready": return { session_id: params.session_id };
-          case "session_end": return { session_id: params.session_id };
-          case "tool.call": return { session_id: params.session_id, call_id: params.call_id, result: { peers: [] } };
-          case "owner.drain": {
-            let drained = 0;
-            while (queue.length) {
-              const result = await bridge.call("native.append", queue[0], { signal });
-              if (!result.accepted) break;
-              queue.shift();
-              drained++;
-            }
-            return { session_id: params.session_id, drained };
-          }
-          default: throw new BridgeCallError("method_not_found", "unexpected test method");
-        }
-      },
-    });
-    host.ready().then(hostReady.resolve, hostReady.reject);
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await host?.close().catch(() => {});
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  const native = nativeFixture("wire-native", "tui");
-  createPiExtension({ launch: { directory, owner_pid: process.ppid, socket, topology: "interactive" } })(native.pi);
-  await native.emit("session_start", { type: "session_start", reason: "startup" });
-  await hostReady.promise;
-  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "wire prompt" });
-  assert.equal(queue.length, 0);
-  assert.equal(native.pending().details.message_id, "wire-message");
-  await native.completeMessage();
-  assert.equal(native.leaf().details.message_id, "wire-message");
-  assert.deepEqual(await native.pi.tool.execute("wire-call", { action: "list", arguments: {} }, undefined, undefined, native.ctx), {
-    content: [{ type: "text", text: '{"peers":[]}' }],
-    details: { session_id: "wire-native", call_id: "wire-call", result: { peers: [] } },
-  });
-  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-  await host.done;
-});
-
-test("actual idle Unix EOF retires native ownership", { timeout: 1000 }, async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-eof-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  let host;
-  const hostReady = deferred();
-  const server = net.createServer((connection) => {
-    host = new PrivateBridge(connection, {
-      role: "host",
-      handler: async ({ method, params }) => {
-        if (method !== "owner.ready") throw new BridgeCallError("method_not_found", "unexpected test method");
-        return { session_id: params.session_id };
-      },
-    });
-    host.ready().then(hostReady.resolve, hostReady.reject);
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await host?.close().catch(() => {});
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  const native = nativeFixture("eof-native");
-  createPiExtension({ launch: { directory, owner_pid: process.ppid, socket, topology: "lane" } })(native.pi);
-  await native.emit("session_start", { type: "session_start", reason: "startup" });
-  await hostReady.promise;
-  await host.close();
-  await native.waitShutdown();
-  assert.equal(native.aborted(), 1);
-  assert.equal(native.shutdown(), 1);
-});
-
-test("default managed factory survives real module reevaluation after launch scrub", async (t) => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-extension-reload-")));
-  fs.chmodSync(directory, 0o700);
-  const socket = path.join(directory, "bridge.sock");
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socket, resolve);
-  });
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  process.env[launchEnvironmentName] = JSON.stringify({
-    directory, owner_pid: process.ppid, socket, topology: "lane",
-  });
+test("default managed factory survives real module reevaluation after launch scrub", async () => {
+  process.env[launchEnvironmentName] = JSON.stringify(launch("interactive"));
   const first = await import("./extension.mjs?managed-reload=first");
   assert.equal(Object.hasOwn(process.env, launchEnvironmentName), false);
   const second = await import("./extension.mjs?managed-reload=second");
   assert.strictEqual(second.default, first.default);
 });
 
+// One real kit Peer, the real direct owner, and a daemon speaking the real
+// kit wire protocol over one Unix socket.
+async function actualInteractive(t, prefix, handle) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const socket = path.join(directory, "bus.sock");
+  const connections = [];
+  const methods = [];
+  const server = net.createServer((stream) => {
+    const connection = new kit.Connection(stream, false, (request) => {
+      methods.push(request.method);
+      if (request.method === "session.hello") return connection.result(request, {});
+      return handle(connection, request);
+    });
+    connections.push(connection);
+  });
+  server.listen(socket);
+  await once(server, "listening");
+  t.after(async () => {
+    for (const connection of connections) connection.close();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const native = nativeFixture(`${prefix}native`, "tui");
+  createPiExtension({
+    launch: { socket, name: "managed", groups: ["team"], topology: "interactive" },
+    // No kit reconnect: a failed assertion must not leave a retry loop behind.
+    connect: (endpoint, options) => connectPiInteractivePeer(endpoint, {
+      ...options, connectPeer: kit.connectPeer, peerOptions: { schedule: () => () => {} },
+    }),
+  })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const call = (callID, action, args) => native.pi.tool.execute(callID, { action, arguments: args }, undefined, undefined, native.ctx);
+  return { native, connections, methods, call };
+}
+
+test("interactive daemon action rejection is a native tool error on the same admitted Peer", { timeout: 5000 }, async (t) => {
+  const f = await actualInteractive(t, "pi-tool-error-", (connection, request) => {
+    if (request.method === "message.send") return connection.error(request, -32001);
+    if (request.method === "session.list") return connection.result(request, { sessions: [] });
+    return connection.error(request, -32600);
+  });
+  await assert.rejects(f.call("send-call", "send", { target: "missing", message: "hello" }), (error) =>
+    error instanceof BridgeCallError && error.code === "tool_error" && error.message === "unknown_session");
+  assert.equal(f.native.aborted(), 0);
+  assert.equal(f.native.shutdown(), 0);
+  const result = await f.call("list-call", "list", {});
+  assert.deepEqual(result.details, { session_id: "pi-tool-error-native", call_id: "list-call", result: { sessions: [] } });
+  assert.equal(f.connections.length, 1);
+  assert.deepEqual(f.methods, ["session.hello", "message.send", "session.list"]);
+  await f.native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
+
+// Preserves main's Go owner, interactive_owner.go:354-357: every Caller.Action
+// failure, a lost connection included, is a tool_error and the session stays.
+test("interactive transport loss during an action is a native tool error and keeps the session", { timeout: 5000 }, async (t) => {
+  const held = deferred();
+  const f = await actualInteractive(t, "pi-tool-loss-", (connection, request) => {
+    if (request.method === "session.list") { held.resolve(); return; }
+    return connection.error(request, -32600);
+  });
+  const action = f.call("held-call", "list", {});
+  await held.promise;
+  f.connections[0].close();
+  await assert.rejects(action, (error) => error instanceof BridgeCallError && error.code === "tool_error");
+  assert.equal(f.native.aborted(), 0);
+  assert.equal(f.native.shutdown(), 0);
+  await f.native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+});
 
 test("native tool arguments match the shared closed MCP field declaration", () => {
   const native = nativeFixture();

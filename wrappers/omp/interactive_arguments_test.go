@@ -167,6 +167,31 @@ func TestOMPInteractivePlanNativePassthroughIsExact(t *testing.T) {
 	}
 }
 
+// OMP 18.11.0 registers 53 commands and 6 aliases (cli-commands.ts:27-310).
+// Before this change 15 of them were missing, so for example `auth` or
+// `web-search` started a managed launch that OMP then ran without our flags.
+func TestOMPCommandsMatchNativeRegistry(t *testing.T) {
+	native := strings.Fields(`launch acp auth auth-broker auth-gateway agents anonymize bench
+		browser-relay cleanse collab commit completions __complete compress config dry-balance
+		find gc grep gallery git grievances images if-bench install join login models plugin
+		predict ps say clip play share session setup shell read render skill ssh stats stream
+		update usage tiny-models token toks ttsr worktree search
+		img plugins skills wt q web-search`)
+	want := make(map[string]bool, len(native))
+	for _, command := range native {
+		want[command] = true
+	}
+	if len(native) != 59 || !reflect.DeepEqual(ompCommands, want) {
+		t.Fatalf("commands = %d entries, differ from the native registry: %v", len(ompCommands), native)
+	}
+	for _, command := range []string{"auth", "session", "skills", "web-search"} {
+		plan, passthrough, err := InteractivePlan(argumentTestNative, []string{"--model", "gpt", command}, []string{"KEEP=value"})
+		if err != nil || !passthrough || !reflect.DeepEqual(plan.Args, []string{argumentTestNative.EntryPath, "--model", "gpt", command}) {
+			t.Fatalf("%s plan = %#v, %t, %v", command, plan, passthrough, err)
+		}
+	}
+}
+
 func TestOMPInteractivePlanRoutesEveryRegisteredNativeCommand(t *testing.T) {
 	for command := range ompCommands {
 		if command == "launch" {

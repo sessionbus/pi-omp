@@ -185,7 +185,7 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 		t.Fatal("package or installer accepts unsupported product")
 	}
 	for _, expected := range []string{
-		"wrappers/pi/extension.mjs wrappers/pi/native.mjs",
+		"wrappers/pi/extension.mjs wrappers/pi/native.mjs wrappers/pi/peer.mjs",
 		"wrappers/omp/extension.mjs",
 		"wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs",
 		"npm ci --prefix \"$stage/plugin\" --omit=dev --ignore-scripts",
@@ -218,7 +218,7 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 		if err := json.Unmarshal(read(t, product+"/package.json"), &manifest); err != nil {
 			t.Fatal(err)
 		}
-		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.9" {
+		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.12" {
 			t.Errorf("%s kit dependency = %#v", product, manifest.Dependencies)
 		}
 		var lock struct {
@@ -232,8 +232,8 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		kit := lock.Packages["node_modules/@sessionbus/kit"]
-		if kit.Version != "0.5.9" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.9.tgz" ||
-			kit.Integrity != "sha512-otC05uCSgqv2wp+sBBr+1n7kA5wZeiATky8FuiGO6sAkoGdR6XVudpu00aU7chnZR6eoZ5Bzoycc1s2gpAsZVw==" {
+		if kit.Version != "0.5.12" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.12.tgz" ||
+			kit.Integrity != "sha512-Rydn+tWNs2SaOA/RwigoFjmdOXpACcSDFrKiXxBiPFh6s3FUSSMkN5kocFmhKSLUWh0HdOhkCXcLaT4mz98XRQ==" {
 			t.Errorf("%s locked kit = %#v", product, kit)
 		}
 	}

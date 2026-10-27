@@ -41,18 +41,28 @@ var ompValuelessFlags = map[string]bool{
 	"--no-title": true, "--auto-approve": true, "--yolo": true,
 }
 
+// ompCommands is OMP 18.11.0's command registry with its aliases
+// (cli-commands.ts:27-310). The list must stay complete: for a hoisted
+// subcommand other than launch and acp, OMP drops recognised launch flags in
+// front of it (cli-commands.ts:313, 402-428, 462), including our --extension
+// and --mode. A managed launch of such an argv would run the subcommand
+// without our extension, so these run directly without managed ownership.
 var ompCommands = map[string]bool{
-	"launch": true, "acp": true, "auth-broker": true, "auth-gateway": true,
-	"agents": true, "bench": true, "browser-relay": true, "cleanse": true,
-	"commit": true, "completions": true, "__complete": true, "compress": true,
-	"config": true, "dry-balance": true, "gc": true, "grep": true,
+	"launch": true, "acp": true, "auth": true, "auth-broker": true,
+	"auth-gateway": true, "agents": true, "anonymize": true, "bench": true,
+	"browser-relay": true, "cleanse": true, "collab": true, "commit": true,
+	"completions": true, "__complete": true, "compress": true, "config": true,
+	"dry-balance": true, "find": true, "gc": true, "grep": true,
 	"gallery": true, "git": true, "grievances": true, "images": true,
 	"img": true, "if-bench": true, "install": true, "join": true,
-	"models": true, "plugin": true, "ps": true, "say": true, "share": true,
-	"setup": true, "shell": true, "read": true, "render": true, "ssh": true,
-	"stats": true, "update": true, "usage": true, "tiny-models": true,
-	"token": true, "ttsr": true, "worktree": true, "wt": true,
-	"search": true, "q": true,
+	"login": true, "models": true, "plugin": true, "plugins": true,
+	"predict": true, "ps": true, "say": true, "clip": true, "play": true,
+	"share": true, "session": true, "setup": true, "shell": true,
+	"read": true, "render": true, "skill": true, "skills": true, "ssh": true,
+	"stats": true, "stream": true, "update": true, "usage": true,
+	"tiny-models": true, "token": true, "toks": true, "ttsr": true,
+	"worktree": true, "wt": true, "search": true, "q": true,
+	"web-search": true,
 }
 
 var ompReservedWords = map[string]bool{

@@ -27,7 +27,8 @@ func TestPiLaunchPreservesNativeSelectionAndOptionArity(t *testing.T) {
 func TestPiRejectsLifecycleAndTypedFieldOverrides(t *testing.T) {
 	for _, args := range [][]string{
 		{"--mode", "json"}, {"--session=other"}, {"--model", "other"}, {"--thinking=low"},
-		{"--name", "other"}, {"--extension", "/other"}, {"--no-extensions"}, {"--tools=read"},
+		{"--name", "other"}, {"--extension", "/other"}, {"--extension=/other"}, {"-e", "/other"},
+		{"--no-extensions"}, {"--tools=read"},
 		{"--approve"}, {"--no-session"}, {"-r"}, {"--", "prompt"}, {"positional prompt"},
 		{"--system-prompt"}, {"--verbose=yes"}, {"--unknown"}, {"--system-prompt", "nul\x00value"},
 	} {

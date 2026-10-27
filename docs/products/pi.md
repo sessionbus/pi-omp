@@ -11,6 +11,97 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## Tool-list patterns in managed launches (2026-10-28)
+
+Pi matches `--tools` and `--exclude-tools` entries as exact names or as
+patterns whose `*` matches any characters over the whole name
+(`mcp-servers.js` `toolPatternRegExp`, `createToolNameMatcher`; applied in
+`sdk.js:158-160` and `agent-session.js:193-197`). An excluded tool is never
+registered, so the extension cannot restore it. The managed launch guard
+compared both lists by exact name only, so `--exclude-tools 'session*'` (found
+by the PR #9 review bot) removed the Sessionbus tool unnoticed, and an
+allowlist pattern such as `--tools '*'` was refused although it keeps the
+tool. Decision (2026-10-28): the guard matches both lists as Pi does. Exact
+names, `+name`/`-name` modifier lists and lists that do not select the tool
+keep their earlier handling.
+
+## Steered peer messages left unread without an abort (2026-10-28)
+
+Pi 1.4.0 can end a task with a steered peer message never started and no
+abort: Alt+Up restores Pi's queue to the editor and clears agent-core's queue
+(`interactive-mode.js:3645-3652, 3852-3870`; `agent-session.js:1944-1952`), a
+failed compaction-queue flush clears it (`interactive-mode.js:3886-3899`), and
+a task whose context cannot continue settles with the message still queued
+(`_runBeforeSettleBoundary`). Only typed text returns to the editor; our
+custom steer lives in agent-core's queue, and `ctx.hasPendingMessages()`
+counts typed text only, so an extension cannot tell a dropped message from a
+held one. Decision (2026-10-28, the owner's "Clear the queue first" and
+"History only, no new turn"): at every settle, not only an aborted one, a
+steered message that never started is kept as at Escape: one `ctx.abort()`
+clears Pi's queues, then the message is written to history once with no
+turn. The abort comes only with such a message; at a settle Pi's run is no
+longer active, so it requests no run abort and leaves the deferred starts of
+settled handlers, including the extension's own drain that follows,
+untouched (`agent-session.js:683-706, 1866-1867`). A message held for a later
+task therefore reaches history at once instead of at that task. Quitting
+while Pi is idle writes any such message too, since Pi awaits
+`session_shutdown` before it disposes the session
+(`agent-session-runtime.js:296-303`). A steered message that started stays
+as it is: attempted, consumption unknown.
+
+Quitting while a task runs: Pi does not abort the task before
+`session_shutdown` and awaits that handler with no bound of its own. With a
+never-started steer, the extension aborts the task as Escape does, waits up
+to 2 seconds (`quitWaitMs`) for Pi to become idle, then writes the steer once.
+A settle in that window keeps it the same way. Every drain, scheduled or at a
+settle, is gated while Pi quits, and a delivery crossing the quit is written
+to history once Pi is idle instead of starting a turn. Once Pi is idle, the
+quit drain writes the deliveries still queued for Pi's next task to history
+once, after the never-started steers, in arrival order. Still busy at the
+bound, nothing is written and those messages are lost as before; quit is
+delayed only in that state.
+
+## A lane prompt refused before it reaches Pi (2026-10-28)
+
+A blank lane prompt, and one whose JSON encoding exceeds the 1 MiB native
+input frame (Go escapes `<`, `>` and `&` as six bytes each), were refused
+before anything was written but ended the lane. Decision (2026-10-28): both
+now end only the Run, with the reason, as Pi's own refusal does; nothing is
+written or replayed, and the lane stays.
+
+## Tool loadout on resume (Pi 1.3.0, 2026-10-19)
+
+Pi 1.3.0 restores a resumed session's recorded tool loadout whenever
+`--tools` names no tools. The restore replaces the active set with the
+transcript's `toolsAdded` (`agent-session.js` 1.3.0:214-215, 1374-1383). In
+1.2.0 the same restore never ran. A later refresh activates only tools
+registered after the previous build (`:2914-2918`). So a resumed session
+whose transcript never declared `sessionbus`, for example one started by
+plain `pi`, would run without its comms tool.
+
+The managed extension therefore checks the active tools at every
+`session_start` (startup, reload, new, resume and fork). If `sessionbus` is
+missing it calls `setActiveTools` with our tool added after the others. If it
+is present it does nothing. No other tool is removed or reordered.
+
+## Tool modifiers in managed launches (2026-10-19)
+
+Pi's `--tools` takes either plain names and patterns, or only `+name`/`-name`
+modifiers. Modifiers change the default selection, in order
+(`settings-manager.js:37-73`, `sdk.js:149-156`). With `--no-tools`, the
+modifiers start from an empty selection that also bounds the allowed tools.
+A list that mixes the two forms is Pi's own error.
+
+The managed launch guard used to compare names with the `+`/`-` still
+attached. It therefore rejected valid modifier lists such as
+`--tools +sessionbus`. The guard now follows Pi's rule:
+- a plain list must name `sessionbus`;
+- a modifier list is refused only if it removes `sessionbus` last, or if
+  `--no-tools` is set and the list does not add `+sessionbus`;
+- a mixed list passes through, and Pi rejects it.
+
+Arguments always pass through unchanged.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 Pi 0.85.1 is bound to upstream `d981de1229ef899957bbe968bc8dcda02a21f477`.

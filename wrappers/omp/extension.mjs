@@ -213,6 +213,18 @@ function customDeliveryMessage(state, batch) {
   };
 }
 
+// A lane delivery steered into the running native run. It has no batch: the
+// lane's receipt is the hand-off itself, and nothing later is correlated.
+function laneDeliveryMessage(state, messageID, body) {
+  return {
+    customType: deliveryMessageType,
+    content: body,
+    display: true,
+    attribution: "user",
+    details: { owner_token: state.ownerToken, session_id: state.sessionID, message_ids: [messageID] },
+  };
+}
+
 function matchingDelivery(message, state, batch) {
   if (!object(message) || message.role !== "custom" || message.customType !== deliveryMessageType ||
       message.content !== batch.content || message.display !== true || message.attribution !== "user") return false;
@@ -352,9 +364,10 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
       return;
     }
     if (current.count === state.resetBoundary.count && current.lastID === state.resetBoundary.lastID) return;
-    const error = new Error("OMP native context reset while a Sessionbus delivery was pending");
-    failState(state, error);
-    throw error;
+    // A user's /clear while a delivery is pending is ordinary native use: the
+    // pending attempts are uncertain and end; the session stays.
+    state.resetBoundary = current;
+    abandonBatches(state.factory, state, [...state.batches.values()]);
   }
 
   function nativeState(params, keys) {
@@ -398,8 +411,41 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         }
         state.queued.push(entry);
         state.deliveryBytes += bytes;
+        // OMP chooses between steering into its running task and starting a
+        // turn only after an await (agent-session.ts:8814-8840), so the
+        // interactive primary's receipt is decided here, from OMP's busy
+        // state before the send, with no native confirmation. Task children
+        // keep their queued receipt.
+        const reportsBusy = state.scope === "primary" && launch.topology === "interactive";
+        const busy = reportsBusy && !state.ctx.isIdle();
         scheduleDeliveryTurn(state.factory, state);
-        return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, queued: true };
+        return {
+          owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, queued: true,
+          ...(reportsBusy ? { busy } : {}),
+        };
+      }
+      case "native.steer": {
+        const state = nativeState(params, ["owner_token", "session_id", "message_id", "body", "run_token"]);
+        if (state.scope !== "primary" || launch.topology !== "lane") {
+          throw new BridgeCallError("method_not_found", "OMP native steer is only for the lane's primary session");
+        }
+        if (!state.described || state.ending) {
+          throw new BridgeCallError("stale_owner", "OMP native steer does not own a deliverable factory");
+        }
+        const id = messageID(params.message_id);
+        const body = boundedText(params.body, maxTextBytes, "steered delivery body", { empty: true });
+        const runToken = ownerToken(params.run_token);
+        throwIfAborted(signal);
+        // The Run's token, OMP's busy state and the send are one synchronous
+        // step, so a steer made for a Run never enters a later one. OMP places
+        // the message only after an await of its own (agent-session.ts:8814-
+        // 8840): still streaming, it joins the steering queue; idle by then,
+        // with no triggerTurn, it is appended to history without a turn.
+        if (state.runToken !== runToken || state.ctx.isIdle()) {
+          return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "idle" };
+        }
+        state.pi.sendMessage(laneDeliveryMessage(state, id, body), { deliverAs: "steer" });
+        return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: true };
       }
       case "native.shutdown": {
         const state = nativeState(params, ["owner_token", "session_id"]);
@@ -555,7 +601,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     const state = {
       factory, pi, ctx, scope, mode, ownerToken: token, sessionID, controller: new AbortController(),
       described: false, admitted: false, ending: false, ended: false, failure: undefined,
-      queued: [], batches: new Map(),
+      queued: [], batches: new Map(), runToken: undefined,
       deliveryBytes: 0, bindingBytes, reportSequence: 0, runSequence: 0, batchSequence: 0,
       resetBoundary: resetBoundarySnapshot(ctx),
     };
@@ -648,6 +694,8 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
   function schedulePreflight(factory, state, prompt) {
     state.runSequence += 1;
     const runToken = ownerToken(`${state.ownerToken}-run-${state.runSequence}`);
+    // A lane steer must carry this token until the run yields.
+    state.runToken = runToken;
     const sequence = nextReport(state);
     const params = {
       owner_token: state.ownerToken, session_id: state.sessionID, report_sequence: sequence,
@@ -717,51 +765,112 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     const state = localState(factory, ctx);
     const matches = [...state.batches.values()].filter((batch) => matchingDelivery(message, state, batch));
     if (matches.length === 0) {
-      if ([...state.batches.values()].some((batch) => referencesDeliveryBatch(message, state, batch))) {
-        throw new Error("OMP native changed Sessionbus delivery identity");
-      }
+      // A changed copy of a claimed batch: that attempt is uncertain. Only
+      // it ends; the session, the peer and later deliveries stay.
+      abandonBatches(factory, state,
+        [...state.batches.values()].filter((batch) => referencesDeliveryBatch(message, state, batch)));
       return;
     }
-    if (matches.length !== 1) throw new Error("OMP native delivery matched multiple claimed batches");
+    if (matches.length !== 1) {
+      abandonBatches(factory, state, matches);
+      return;
+    }
     const batch = matches[0];
+    // OMP hands a message's start and end to extensions on concurrent paths,
+    // each through every earlier extension's handlers for that event first
+    // (agent.ts 18.13.2:2233-2245; agent-session.ts:3895-3900; runner.ts
+    // :1740-1750). An extension bound after startup (runner.ts:1111-1142)
+    // runs after OMP's own message_start handlers, so its message_end can
+    // arrive first. Hold that end and report both in their order.
+    if (phase === "message_end" && batch.phase === 1 && !batch.endFirst) {
+      batch.endFirst = true;
+      return;
+    }
     const expected = phase === "message_start" ? 1 : 2;
-    if (batch.phase !== expected) throw new Error("OMP native delivery message event is out of order");
+    if (batch.phase !== expected) {
+      abandonBatches(factory, state, [batch]);
+      return;
+    }
     scheduleDelivery(factory, state, batch, phase);
     batch.phase = expected + 1;
+    if (batch.phase === 2 && batch.endFirst) {
+      scheduleDelivery(factory, state, batch, "message_end");
+      batch.phase = 3;
+    }
+    // The provider context already held this batch (see observeContext), so
+    // its message_end completes it.
+    if (batch.phase === 3 && batch.contextSeen) {
+      scheduleDelivery(factory, state, batch, "context");
+      batch.phase = 4;
+      completeBatch(state, batch);
+      scheduleDeliveryTurn(factory, state);
+    }
+  }
+
+  function completeBatch(state, batch) {
+    for (const entry of batch.entries) {
+      const bytes = deliveryEntryBytes(entry);
+      state.deliveryBytes -= bytes;
+      release(bytes);
+    }
+    state.deliveryBytes -= batch.contentBytes;
+    release(batch.contentBytes);
+    state.batches.delete(batch.batchToken);
+  }
+
+  // abandonBatches ends claimed batches whose native events no longer match
+  // what we sent. They were handed to OMP, so their receipts stand and they
+  // are never replayed; the owner stops tracking them, and unclaimed
+  // deliveries stay eligible for a later turn.
+  function abandonBatches(factory, state, batches) {
+    if (batches.length === 0) return;
+    for (const batch of batches) {
+      scheduleDelivery(factory, state, batch, "abandoned");
+      completeBatch(state, batch);
+    }
+    scheduleDeliveryTurn(factory, state);
   }
 
   function observeContext(factory, ctx, messages) {
     const state = localState(factory, ctx);
     const list = Array.isArray(messages) ? messages : [];
     const completed = [];
+    const abandoned = [];
     for (const batch of state.batches.values()) {
       const matches = list.filter((message) => matchingDelivery(message, state, batch));
-      const referenced = list.some((message) => referencesDeliveryBatch(message, state, batch));
+      const references = list.filter((message) => referencesDeliveryBatch(message, state, batch)).length;
+      const referenced = references > 0;
       if (batch.phase < 3) {
         // A different active or preparing native turn may emit context while
         // this independently submitted batch has not emitted its own message
         // events. Ignore only context that does not reference this batch.
         if (matches.length === 0 && !referenced) continue;
-        throw new Error("OMP native context observed a claimed Sessionbus delivery before its message events");
+        // OMP builds the provider context, and runs this hook, before it emits
+        // the turn's input message events (agent-core 18.11.0
+        // agent-loop.ts:1312-1328, 1360, 1412-1416; the same in 18.1.17), for
+        // an idle prompt and for a steer drained at a turn boundary alike. One
+        // exact copy is that order: note it, and complete at message_end. Any
+        // other reference changed the delivery's identity.
+        if (matches.length !== 1 || references !== 1) {
+          abandoned.push(batch);
+          continue;
+        }
+        batch.contextSeen = true;
+        continue;
       }
-      if (matches.length !== 1 || batch.phase !== 3) {
-        throw new Error("OMP native context did not preserve the claimed Sessionbus delivery");
+      // After its message events too, the context must hold exactly one copy:
+      // the exact one, and no changed copy beside it.
+      if (matches.length !== 1 || references !== 1 || batch.phase !== 3) {
+        abandoned.push(batch);
+        continue;
       }
       scheduleDelivery(factory, state, batch, "context");
       batch.phase = 4;
       completed.push(batch);
     }
-    for (const batch of completed) {
-      for (const entry of batch.entries) {
-        const bytes = deliveryEntryBytes(entry);
-        state.deliveryBytes -= bytes;
-        release(bytes);
-      }
-      state.deliveryBytes -= batch.contentBytes;
-      release(batch.contentBytes);
-      state.batches.delete(batch.batchToken);
-    }
-    scheduleDeliveryTurn(factory, state);
+    for (const batch of completed) completeBatch(state, batch);
+    if (abandoned.length > 0) abandonBatches(factory, state, abandoned);
+    else scheduleDeliveryTurn(factory, state);
   }
 
   async function endFactory(factory, ctx) {
@@ -872,6 +981,26 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
       } catch (error) {
         failState(factory.current, error);
         return undefined;
+      }
+    });
+
+    // A yielded end, by OMP's own rule (agent-session.ts:5063-5067), ends the
+    // lane run that a steer may join; an end that continues does not.
+    pi.on("agent_end", (event, ctx) => {
+      const state = factory.current;
+      if (launch.topology === "lane" && state?.scope === "primary" &&
+          (event?.willContinue !== true || event?.awaitingAsyncWork === true)) state.runToken = undefined;
+      // A message_end held for a message_start that never came (see
+      // observeMessage) ends with the run that produced it.
+      const held = (batch) => batch.endFirst && batch.phase === 1;
+      if (!state || state.failure || state.ending || ![...state.batches.values()].some(held)) return;
+      try {
+        // localState can itself abandon every pending batch on a reset, so
+        // the held ones are read after it.
+        const live = localState(factory, ctx);
+        abandonBatches(factory, live, [...live.batches.values()].filter(held));
+      } catch (error) {
+        failState(factory.current, error);
       }
     });
 

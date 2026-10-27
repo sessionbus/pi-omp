@@ -4,6 +4,8 @@ package pi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,33 @@ import (
 const maxPiTurnUIRequests = 256
 
 var errPiRunInterrupted = errors.New("Pi Run interrupted before native admission")
+
+// piPromptRefusal is Pi's error answer to the lane's own prompt command. Pi
+// answers so only before it starts a run (rpc-mode.js:298-316), so nothing of
+// the prompt was saved: the Run fails with that answer and the lane stays open.
+type piPromptRefusal struct{ err error }
+
+func (refusal *piPromptRefusal) Error() string { return refusal.err.Error() }
+func (refusal *piPromptRefusal) Unwrap() error { return refusal.err }
+
+// piPromptFailure is a lane prompt refused before anything reached Pi: our
+// own validation, or a prompt that does not fit one native input frame once
+// encoded. Like a refusal, only the Run fails and the lane stays.
+type piPromptFailure struct{ err error }
+
+func (failure *piPromptFailure) Error() string { return failure.err.Error() }
+func (failure *piPromptFailure) Unwrap() error { return failure.err }
+
+// newPiRunToken names one owned native run. The managed extension holds it
+// from the run's preflight acknowledgement to its settle, and native.steer
+// must carry it, so a steer made for one Run never enters a later one.
+func newPiRunToken() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
 
 type piNativeTurn struct {
 	owner  *Wrapper
@@ -38,6 +67,9 @@ type piNativeTurn struct {
 	userText         string
 	settling         bool
 	nativeSettled    bool
+	token            string
+	base             int
+	leaf             string
 	terminalOwned    bool
 	finalized        bool
 	uiClosed         bool
@@ -89,20 +121,48 @@ func (turn *piNativeTurn) recordInput(source, text string, settling bool) error 
 	return nil
 }
 
-func (turn *piNativeTurn) recordPreflight(prompt string, settling bool) error {
+// recordPreflight claims the run whose before_agent_start follows this Run's
+// own input. leaf is the session leaf at that hook, after any work Pi ran
+// before this run, and settled is the managed extension's count of settled Pi
+// runs before it. A preflight that does not fit is Pi's own work when own is
+// set, and answers no token.
+func (turn *piNativeTurn) recordPreflight(prompt string, settling bool, leaf string, settled int, own bool) (string, error) {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	if turn.failure != nil {
-		return turn.failure
+		return "", turn.failure
+	}
+	if validPiText(prompt, 1<<20, true) && (!turn.input || turn.preflight || settling) && own {
+		return "", nil
 	}
 	if !turn.input || turn.preflight || settling || !validPiText(prompt, 1<<20, true) {
 		err := errors.New("Pi native preflight is outside the owned Run")
 		turn.failLocked(err)
-		return err
+		return "", err
 	}
-	turn.preflight, turn.prompt = true, prompt
+	token, err := newPiRunToken()
+	if err != nil {
+		turn.failLocked(err)
+		return "", err
+	}
+	turn.preflight, turn.prompt, turn.parent = true, prompt, leaf
+	turn.base, turn.token = settled, token
 	turn.signalLocked()
-	return nil
+	return token, nil
+}
+
+func (turn *piNativeTurn) holds(token string) bool {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	return turn.token != "" && turn.token == token
+}
+
+// ownsStdout reports whether a stdout run frame read after settled Pi runs
+// belongs to this turn.
+func (turn *piNativeTurn) ownsStdout(settled int) bool {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	return turn.preflight && turn.base == settled
 }
 
 func (turn *piNativeTurn) recordStart(settling bool) error {
@@ -121,7 +181,10 @@ func (turn *piNativeTurn) recordStart(settling bool) error {
 	return nil
 }
 
-func (turn *piNativeTurn) recordSettling() error {
+// recordSettling marks the owned run settled. leaf is the session leaf in the
+// managed extension's first settled handler: Pi has saved the run's messages
+// by then, and work started after it is Pi's own.
+func (turn *piNativeTurn) recordSettling(leaf string) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	if turn.failure != nil {
@@ -132,7 +195,7 @@ func (turn *piNativeTurn) recordSettling() error {
 		turn.failLocked(err)
 		return err
 	}
-	turn.settling = true
+	turn.settling, turn.leaf = true, leaf
 	turn.signalLocked()
 	return nil
 }
@@ -351,6 +414,9 @@ func (turn *piNativeTurn) Wait(ctx context.Context) (result sessionkit.TurnResul
 	}
 	delta, err := turn.owner.readHistory(ctx, turn.cursor)
 	if err == nil {
+		delta, err = ownedHistory(delta, turn.parent, turn.leaf)
+	}
+	if err == nil {
 		result, err = historyResult(turn.parent, delta, turn.prompt)
 	}
 	turn.mu.Lock()
@@ -401,18 +467,77 @@ func (p *Wrapper) observeRunEvent(kind string, raw json.RawMessage) error {
 		extensionFailure = fmt.Errorf("Pi managed extension failed during %s: %s", event.Event, event.Error)
 	}
 	p.mu.Lock()
-	turn, closing := p.active, p.closing
+	turn, closing, settled, own := p.active, p.closing, p.nativeSettles, p.ownWork
 	p.mu.Unlock()
 	if closing {
 		return nil
 	}
-	if turn == nil {
-		if extensionFailure != nil {
+	if extensionFailure != nil {
+		if turn == nil {
 			return extensionFailure
 		}
+		return turn.recordEvent(kind, raw)
+	}
+	// Pi runs one at a time and ends each with one agent_settled
+	// (agent-session.js:1439, :690), which the managed extension counts before
+	// it sends a preflight. A stdout frame belongs to the owned run only while
+	// this count equals that preflight's, so Pi's own runs before and after it
+	// stay out, however reading stdout and the bridge interleaves. Before Pi
+	// can run work of its own, every frame must belong to an owned run.
+	owned := turn != nil && turn.ownsStdout(settled)
+	if !owned && !own {
 		return fmt.Errorf("Pi native emitted %s outside an owned Run", kind)
 	}
-	return turn.recordEvent(kind, raw)
+	var err error
+	if owned {
+		err = turn.recordEvent(kind, raw)
+	}
+	p.mu.Lock()
+	switch kind {
+	case "agent_start":
+		p.nativeRunning = true
+	case "agent_settled":
+		p.nativeRunning = false
+		p.nativeSettles++
+		if owned && err == nil {
+			p.ownWork = true
+		}
+	}
+	p.signalNativeLocked()
+	p.mu.Unlock()
+	return err
+}
+
+func (p *Wrapper) signalNativeLocked() {
+	if p.nativeChanged != nil {
+		close(p.nativeChanged)
+		p.nativeChanged = nil
+	}
+}
+
+// awaitNativeIdle waits while stdout shows a Pi run without its settle. Pi
+// refuses a prompt while it runs (agent-session.js:1634-1636), so the next
+// Run waits for Pi's own work to settle; Pi answers a run that starts later.
+func (p *Wrapper) awaitNativeIdle(ctx context.Context) error {
+	for {
+		p.mu.Lock()
+		running := p.nativeRunning
+		if p.nativeChanged == nil {
+			p.nativeChanged = make(chan struct{})
+		}
+		changed := p.nativeChanged
+		p.mu.Unlock()
+		if !running {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-p.ctx.Done():
+			return context.Cause(p.ctx)
+		case <-changed:
+		}
+	}
 }
 
 type piExtensionError struct {
@@ -449,11 +574,19 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 	}
 	p.mu.Lock()
 	turn, opened, closing := p.active, p.opened, p.closing
+	settled, own, rpc, ctx := p.nativeSettles, p.ownWork, p.rpc, p.ctx
 	p.mu.Unlock()
-	if !opened || closing || turn == nil {
+	if !opened || closing || turn == nil && !own {
 		return fmt.Errorf("Pi native requested unsupported startup UI method %q", event.Method)
 	}
-	return turn.cancelUI(event.ID)
+	// A dialog read while the open turn owns stdout is its run's, and before
+	// Pi can run work of its own every dialog is. A dialog of Pi's own work
+	// is cancelled the same way, with no Run to join.
+	if turn != nil && (!own || turn.ownsStdout(settled)) {
+		return turn.cancelUI(event.ID)
+	}
+	go func() { _ = rpc.CancelUI(ctx, event.ID) }()
+	return nil
 }
 
 func (p *Wrapper) currentNativeTurn(sessionID string) (*piNativeTurn, error) {
@@ -473,28 +606,60 @@ func (p *Wrapper) recordRunInput(sessionID, source, text string, settling bool) 
 	return turn.recordInput(source, text, settling)
 }
 
-func (p *Wrapper) recordRunPreflight(sessionID, prompt string, settling bool) error {
-	turn, err := p.currentNativeTurn(sessionID)
-	if err != nil {
-		return err
+// witnessTurn returns the open turn for a run witness and whether Pi can run
+// work of its own: after an owned run settled or Pi refused an owned prompt
+// (owner decision: the Run ends when Pi settles). A nil turn is then Pi's own
+// work, which does not end the lane.
+func (p *Wrapper) witnessTurn(sessionID string) (*piNativeTurn, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened || p.closing || p.failure != nil || sessionID != p.id || (p.active == nil && !p.ownWork) {
+		return nil, false, errors.New("Pi Run witness has no matching native owner")
 	}
-	return turn.recordPreflight(prompt, settling)
+	return p.active, p.ownWork, nil
 }
 
-func (p *Wrapper) recordRunStart(sessionID string, settling bool) error {
-	turn, err := p.currentNativeTurn(sessionID)
-	if err != nil {
+func (p *Wrapper) recordRunPreflight(sessionID, prompt string, settling bool, leaf string, settled int) (string, error) {
+	turn, own, err := p.witnessTurn(sessionID)
+	if err != nil || turn == nil {
+		return "", err
+	}
+	return turn.recordPreflight(prompt, settling, leaf, settled, own)
+}
+
+// The managed extension sends start and settling witnesses only for a run
+// whose preflight it got a token for. Another token is a run of a refused
+// prompt, which is Pi's own work.
+func (p *Wrapper) recordRunStart(sessionID, token string, settling bool) error {
+	turn, own, err := p.witnessTurn(sessionID)
+	if err != nil || turn == nil {
+		return err
+	}
+	if !turn.holds(token) {
+		if own {
+			return nil
+		}
+		err = errors.New("Pi native start does not belong to the owned Run")
+		turn.fail(err)
 		return err
 	}
 	return turn.recordStart(settling)
 }
 
-func (p *Wrapper) recordRunSettling(sessionID string) error {
-	turn, err := p.currentNativeTurn(sessionID)
-	if err != nil {
+func (p *Wrapper) recordRunSettling(sessionID, token, leaf string) error {
+	turn, own, err := p.witnessTurn(sessionID)
+	if err != nil || turn == nil {
 		return err
 	}
-	return turn.recordSettling()
+	if !turn.holds(token) {
+		if own {
+			return nil
+		}
+		err = errors.New("Pi native settling marker does not belong to the owned Run")
+		turn.fail(err)
+		return err
+	}
+	return turn.recordSettling(leaf)
 }
 
 func (p *Wrapper) readHistory(ctx context.Context, since string) (nativeHistory, error) {
@@ -511,7 +676,10 @@ func (p *Wrapper) readHistory(ctx context.Context, since string) (nativeHistory,
 
 func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prompt string) (*piNativeTurn, error) {
 	if !validPiText(prompt, 1<<20, false) || strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("Pi lane prompt is empty or exceeds its native bound")
+		return nil, &piPromptFailure{err: errors.New("Pi lane prompt is empty or exceeds its native bound")}
+	}
+	if err := p.awaitNativeIdle(ctx); err != nil {
+		return nil, err
 	}
 	pre, err := p.readHistory(ctx, "")
 	if err != nil {
@@ -533,12 +701,27 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	turn.mu.Lock()
 	turn.submitted = submitted
 	turn.mu.Unlock()
+	var refused *nativeRPCError
+	if errors.As(callErr, &refused) {
+		// Pi may be running work of its own: a run it started at the same
+		// time is why it refuses a prompt with no streaming behaviour.
+		p.mu.Lock()
+		p.ownWork = true
+		p.mu.Unlock()
+		p.finishNativeTurn(turn)
+		return nil, &piPromptRefusal{err: callErr}
+	}
 	if callErr != nil {
 		if submitted {
 			turn.fail(callErr)
 			return turn, nil
 		}
 		p.finishNativeTurn(turn)
+		if errors.Is(callErr, errNativeRPCInputTooLarge) {
+			// JSON escaping can grow a prompt within the raw bound past one
+			// frame. Nothing was written, so only this Run fails.
+			return nil, &piPromptFailure{err: fmt.Errorf("Pi lane prompt exceeds the %d-byte native input frame once encoded", p.rpc.limits.maxInputFrame)}
+		}
 		return nil, callErr
 	}
 	if err = context.Cause(ctx); err != nil {
@@ -647,6 +830,16 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		}
 		return turn, startErr
 	})
+	var refusal *piPromptRefusal
+	var failure *piPromptFailure
+	if errors.As(err, &refusal) || errors.As(err, &failure) {
+		// The handoff returned its staged messages to the queue; the seed was
+		// not saved.
+		if seed.Delivery != nil {
+			err = errors.Join(err, run.ReportDelivery(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "not_submitted"}, nil))
+		}
+		return sessionkit.TurnResult{}, err
+	}
 	if !nativeAdmitted && errors.Is(context.Cause(runCtx), errPiRunInterrupted) {
 		var reportErr error
 		if seed.Delivery != nil {

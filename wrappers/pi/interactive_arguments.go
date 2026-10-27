@@ -4,6 +4,7 @@ package pi
 
 import (
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -23,7 +24,14 @@ var interactiveValueOptions = []string{
 	"--tui-mode",
 }
 
-var passthroughCommands = []string{"install", "remove", "uninstall", "update", "list", "config", "auth"}
+// Native Pi's own first-word commands, which it handles before any session
+// starts (Pi 1.2.0 dist/main.js: auth, package commands, config, mcp at :486).
+// Pi recognises a command only as the first argument, and a managed launch
+// puts --extension first (interactive_launch.go), while Pi's command parsers
+// reject an --extension after the command. A first word that is not a command
+// is a prompt, so no general rule replaces this list: these go to native Pi
+// unchanged.
+var passthroughCommands = []string{"install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"}
 
 // InteractivePlan classifies native maintenance/help before adding managed
 // identity. Passthrough retains the original argv and environment byte values.
@@ -104,16 +112,85 @@ func validateManagedToolArguments(arguments []string) error {
 			index++
 		}
 	}
-	if allowedSet && !slices.Contains(allowed, "sessionbus") {
-		return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
+	if allowedSet {
+		// Pi's --tools list is either plain names and patterns or only
+		// +name/-name entries, which change the default selection in order
+		// (Pi settings-manager.js:37-73, sdk.js:149-156); a list mixing both
+		// is Pi's own error and passes through. Native arguments pass through
+		// unchanged; only a list that leaves sessionbus out is refused.
+		switch modifiers := toolModifierCount(allowed); modifiers {
+		case 0:
+			if !nativeToolListMatches(allowed, "sessionbus") {
+				return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
+			}
+		case len(allowed):
+			// --no-tools starts the selection empty, so the list must add
+			// our tool; otherwise it is on unless the list removes it last.
+			if !toolModifiersKeep(allowed, "sessionbus", !noTools) {
+				if noTools {
+					return errors.New("argument disables managed Pi Sessionbus tool: --no-tools with --tools modifiers must add +sessionbus")
+				}
+				return errors.New("argument disables managed Pi Sessionbus tool: --tools removes sessionbus")
+			}
+		}
 	}
-	if excludedSet && slices.Contains(excluded, "sessionbus") {
+	if excludedSet && nativeToolListMatches(excluded, "sessionbus") {
 		return errors.New("argument disables managed Pi Sessionbus tool: --exclude-tools contains sessionbus")
 	}
 	if noTools && !allowedSet {
 		return errors.New("argument disables managed Pi Sessionbus tool: --no-tools")
 	}
 	return nil
+}
+
+// toolModifierCount counts Pi's +name/-name entries (Pi settings-manager.js
+// isToolModifier).
+func toolModifierCount(entries []string) int {
+	count := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "+") || strings.HasPrefix(entry, "-") {
+			count++
+		}
+	}
+	return count
+}
+
+// toolModifiersKeep applies the +name/-name entries for name in order, as
+// Pi's applyToolModifiers does, from whether it starts selected.
+func toolModifiersKeep(entries []string, name string, selected bool) bool {
+	for _, entry := range entries {
+		switch entry {
+		case "+" + name:
+			selected = true
+		case "-" + name:
+			selected = false
+		}
+	}
+	return selected
+}
+
+// nativeToolListMatches reports whether a --tools or --exclude-tools list
+// selects name as Pi's createToolNameMatcher does: an entry is an exact name,
+// or a pattern whose "*" matches any characters over the whole name (Pi 1.4.0
+// mcp-servers.js toolPatternRegExp, createToolNameMatcher; sdk.js:158-160,
+// agent-session.js:193-197).
+func nativeToolListMatches(entries []string, name string) bool {
+	for _, entry := range entries {
+		if !strings.Contains(entry, "*") {
+			if entry == name {
+				return true
+			}
+			continue
+		}
+		parts := strings.Split(entry, "*")
+		for index, part := range parts {
+			parts[index] = regexp.QuoteMeta(part)
+		}
+		if regexp.MustCompile("^" + strings.Join(parts, ".*") + "$").MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeToolList(value string) []string {

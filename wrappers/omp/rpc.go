@@ -26,6 +26,9 @@ var (
 	errNativeRPCBusy     = errors.New("OMP native RPC is busy")
 	errNativeRPCClosed   = errors.New("OMP native RPC is closed")
 	errNativeRPCProtocol = errors.New("OMP native RPC protocol violation")
+	// errNativeRPCInputTooLarge is a command that does not fit one native
+	// input frame once encoded. It is refused before anything is written.
+	errNativeRPCInputTooLarge = fmt.Errorf("%w: input frame exceeds its bound", errNativeRPCProtocol)
 )
 
 type nativeRPCLimits struct {
@@ -82,10 +85,41 @@ func (e *nativeRPCError) Error() string {
 	return fmt.Sprintf("OMP native %s: %s", e.Command, e.Message)
 }
 
+// nativePromptRefusal is OMP's error answer as the first response to our own
+// prompt. OMP 18.11.0 answers so before admission, for example with
+// AgentBusyError while its own work runs (agent-session.ts:7356-7364), so the
+// prompt never reached the agent.
+type nativePromptRefusal struct{ err error }
+
+func (refusal *nativePromptRefusal) Error() string { return refusal.err.Error() }
+func (refusal *nativePromptRefusal) Unwrap() error { return refusal.err }
+
+// nativePromptFailure is our prompt failing before OMP's run for it started:
+// our own validation refused it before anything was written, or OMP admitted
+// it and then answered success:false before handing it to the agent, for
+// example with no model or no API key (agent-session.ts 18.12.2:8196-8301).
+// Nothing of the prompt reached the agent, so as for a refusal only the Run
+// fails and the lane stays.
+type nativePromptFailure struct{ err error }
+
+func (failure *nativePromptFailure) Error() string { return failure.err.Error() }
+func (failure *nativePromptFailure) Unwrap() error { return failure.err }
+
+// nativeRefusedPrompt is the one prompt whose first response was an error.
+// OMP 18.11.0 still writes a success response for the same id and then a
+// prompt_result with agentInvoked:false (rpc-prompt-results.ts:286-296,
+// rpc-mode.ts:1835-1882). Each may be absorbed once, by that exact id.
+type nativeRefusedPrompt struct {
+	id            string
+	success       bool
+	noAgentResult bool
+}
+
 type nativeRPCResult struct {
-	data  json.RawMessage
-	err   error
-	bytes int
+	data    json.RawMessage
+	err     error
+	bytes   int
+	refusal bool
 }
 
 type nativeRPCPending struct {
@@ -168,6 +202,7 @@ type nativeRPC struct {
 	chunks         *nativeRPCChunks
 	nextID         uint64
 	pending        map[string]*nativeRPCPending
+	refused        nativeRefusedPrompt
 	retainedBytes  int
 	pendingWrites  int
 	pendingBytes   int
@@ -302,9 +337,14 @@ func (rpc *nativeRPC) StartPrompt(ctx context.Context, message string) (*nativeP
 		return nil, false, fmt.Errorf("%w: protocol is not negotiated", errNativeRPCProtocol)
 	}
 	if message == "" || !utf8.ValidString(message) || len(message) > rpc.limits.maxInputFrame {
-		return nil, false, errors.New("OMP native prompt is invalid")
+		return nil, false, &nativePromptFailure{err: errors.New("OMP native prompt is invalid")}
 	}
 	id, pending, write, err := rpc.admitPrompt(ctx, map[string]any{"message": message})
+	if errors.Is(err, errNativeRPCInputTooLarge) {
+		// JSON escaping can grow a prompt within the raw bound past one
+		// frame. Nothing was written, so only this Run fails.
+		return nil, false, &nativePromptFailure{err: fmt.Errorf("OMP lane prompt exceeds the %d-byte native input frame once encoded", rpc.limits.maxInputFrame)}
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -334,6 +374,12 @@ func (rpc *nativeRPC) StartPrompt(ctx context.Context, message string) (*nativeP
 }
 
 func (rpc *nativeRPC) completePromptStart(id string, pending *nativeRPCPending, completed nativeRPCResult) (*nativePrompt, bool, error) {
+	if completed.refusal {
+		// The refusal was the first response and removed the correlation, so
+		// no late result can be retained for it.
+		_ = rpc.consumeResult(completed, nil)
+		return nil, true, &nativePromptRefusal{err: completed.err}
+	}
 	agentInvoked, known, err := rpc.consumePromptStart(completed)
 	if err != nil {
 		var late nativeRPCResult
@@ -598,7 +644,7 @@ func (rpc *nativeRPC) encodeCommand(id, command string, fields map[string]any) (
 		return nil, fmt.Errorf("encode OMP native RPC command: %w", err)
 	}
 	if len(body) == 0 || len(body)+1 > rpc.limits.maxInputFrame {
-		return nil, fmt.Errorf("%w: input frame exceeds %d bytes", errNativeRPCProtocol, rpc.limits.maxInputFrame)
+		return nil, fmt.Errorf("%w (%d bytes)", errNativeRPCInputTooLarge, rpc.limits.maxInputFrame)
 	}
 	return append(body, '\n'), nil
 }
@@ -729,6 +775,7 @@ func (rpc *nativeRPC) stop(err error, intentional bool) {
 	}
 	rpc.stopped = true
 	rpc.intentional = intentional
+	rpc.refused = nativeRefusedPrompt{}
 	if err != nil && !intentional {
 		rpc.failure = err
 	}
@@ -968,6 +1015,9 @@ func (rpc *nativeRPC) acceptLogicalFrame(line []byte) error {
 	if kind == "response" {
 		return rpc.acceptResponse(object, line)
 	}
+	if kind == "prompt_result" && rpc.absorbRefusedPromptResult(object) {
+		return nil
+	}
 	if !negotiated {
 		// OMP can publish startup metadata after ready and before the
 		// negotiation response. These are valid protocol-v1 physical events.
@@ -1131,6 +1181,11 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 	rpc.mu.Lock()
 	pending := rpc.pending[id]
 	if pending == nil {
+		if success && command == "prompt" && rpc.refused.success && rpc.refused.id == id {
+			rpc.refused.success = false
+			rpc.mu.Unlock()
+			return nil
+		}
 		rpc.mu.Unlock()
 		return fmt.Errorf("%w: unknown or duplicate response id %q", errNativeRPCProtocol, id)
 	}
@@ -1169,6 +1224,10 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 			pending.responded = true
 			if !success {
 				delete(rpc.pending, id)
+				completed.refusal = true
+				rpc.refused = nativeRefusedPrompt{id: id, success: true, noAgentResult: true}
+			} else {
+				rpc.refused = nativeRefusedPrompt{}
 			}
 			pending.result <- completed
 			rpc.mu.Unlock()
@@ -1181,6 +1240,11 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 		}
 		delete(rpc.pending, id)
 		rpc.setPromptLateLocked(pending, completed)
+		// OMP writes the failed prompt's agentInvoked:false prompt_result right
+		// after this answer (rpc-prompt-results.ts 18.12.2:109-111, 149-166,
+		// 292-296). Absorb it once, as for a refusal, so that it reaches
+		// neither the next Run nor the lane.
+		rpc.refused = nativeRefusedPrompt{id: id, noAgentResult: true}
 		rpc.mu.Unlock()
 		return nil
 	}
@@ -1197,6 +1261,23 @@ func (rpc *nativeRPC) setPromptLateLocked(pending *nativeRPCPending, completed n
 	pending.late = completed
 	pending.lateSet = true
 	close(pending.lateReady)
+}
+
+// absorbRefusedPromptResult takes the refused prompt's own agentInvoked:false
+// prompt_result before any turn sees it. Any other prompt_result, including
+// agentInvoked:true for that id, is left to the observer.
+func (rpc *nativeRPC) absorbRefusedPromptResult(object map[string]json.RawMessage) bool {
+	id, err := nativeRPCString(object, "id", 128)
+	if err != nil || !bytes.Equal(bytes.TrimSpace(object["agentInvoked"]), []byte("false")) {
+		return false
+	}
+	rpc.mu.Lock()
+	defer rpc.mu.Unlock()
+	if !rpc.refused.noAgentResult || rpc.refused.id != id {
+		return false
+	}
+	rpc.refused.noAgentResult = false
+	return true
 }
 
 func (rpc *nativeRPC) abandonPending(id string, pending *nativeRPCPending) (nativeRPCResult, bool) {

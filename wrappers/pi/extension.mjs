@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
-import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import {
   BridgeCallError,
   BridgeClosedError,
-  BridgeProtocolError,
-  connectBridge,
 } from "../pifamily/extension/bridge.mjs";
-import { appendNative, customMessageType, describeNative } from "./native.mjs";
+import { connectPiInheritedBridge } from "../pifamily/extension/inherited.mjs";
+import { appendNative, customMessageType, describeNative, historyNative, nativeLeaf, steerNative } from "./native.mjs";
+import { connectPiInteractivePeer } from "./peer.mjs";
 
 export const launchEnvironmentName = "SESSIONBUS_PI_LAUNCH";
 export const toolName = "sessionbus";
@@ -22,7 +21,7 @@ const actions = Object.freeze([
 const topologyMode = Object.freeze({ lane: "rpc", interactive: "tui" });
 const drainWitnesses = Object.freeze([
   "before_agent_start", "agent_settled", "session_before_tree_cancelled",
-  "session_compact", "session_compact_failed", "session_tree",
+  "session_compact", "session_compact_failed", "session_tree", "quit",
 ]);
 const sessionEndReasons = Object.freeze(["quit", "reload", "new", "resume", "fork"]);
 
@@ -87,24 +86,13 @@ function combinedSignal(...signals) {
   return AbortSignal.any(present);
 }
 
-function validatePhysicalLaunch(launch, fs = { lstatSync, realpathSync }) {
-  const directory = fs.lstatSync(launch.directory);
-  if (!directory.isDirectory() || directory.isSymbolicLink() ||
-      (directory.mode & 0o777) !== 0o700 || directory.uid !== process.getuid() ||
-      fs.realpathSync(launch.directory) !== launch.directory) {
-    throw new Error("Pi managed launch directory is not private, physical, and owned");
-  }
-  const socket = fs.lstatSync(launch.socket);
-  if (!socket.isSocket() || socket.isSymbolicLink() || socket.uid !== process.getuid() ||
-      path.dirname(launch.socket) !== launch.directory) {
-    throw new Error("Pi managed bridge socket is not physical and owned");
-  }
-}
-
 // Capture and scrub before native tools or nested processes can inherit the
-// owner binding. A missing binding remains inert until Pi tries to load this
-// explicitly managed extension, where it fails closed.
-export function captureLaunch(environment = process.env, parent = process.ppid, fs = { lstatSync, realpathSync }) {
+// owner binding. The launcher passes this extension first among CLI
+// --extension paths, and Pi evaluates CLI extensions in CLI order before
+// discovered ones, so no other extension module observes the descriptor.
+// A missing binding remains inert until Pi tries to load this explicitly
+// managed extension, where it fails closed.
+export function captureLaunch(environment = process.env) {
   const raw = environment[launchEnvironmentName];
   delete environment[launchEnvironmentName];
   if (raw === undefined) return null;
@@ -117,14 +105,23 @@ export function captureLaunch(environment = process.env, parent = process.ppid, 
   } catch {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  exactKeys(launch, ["directory", "owner_pid", "socket", "topology"], "managed launch metadata");
-  if (!Number.isSafeInteger(launch.owner_pid) || launch.owner_pid <= 1 || launch.owner_pid !== parent ||
-      !Object.hasOwn(topologyMode, launch.topology) ||
-      !path.isAbsolute(boundedString(launch.directory, 4096, "managed launch directory")) ||
-      !path.isAbsolute(boundedString(launch.socket, 4096, "managed bridge socket"))) {
+  if (!Object.hasOwn(topologyMode, launch.topology)) {
     throw new Error("Pi managed launch metadata is invalid");
   }
-  validatePhysicalLaunch(launch, fs);
+  if (launch.topology === "lane") {
+    exactKeys(launch, ["bridge_fd", "topology"], "managed launch metadata");
+    if (!Number.isSafeInteger(launch.bridge_fd) || launch.bridge_fd < 3) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+  } else {
+    exactKeys(launch, ["socket", "name", "groups", "topology"], "managed launch metadata");
+    if (!path.isAbsolute(boundedString(launch.socket, 4096, "managed Sessionbus socket")) ||
+        typeof launch.name !== "string" || Buffer.byteLength(launch.name) > 4096 || /\0/u.test(launch.name) ||
+        !Array.isArray(launch.groups) || launch.groups.some((group) =>
+          typeof group !== "string" || group.length === 0 || Buffer.byteLength(group) > 256 || /\0/u.test(group))) {
+      throw new Error("Pi managed launch metadata is invalid");
+    }
+  }
   return Object.freeze({ ...launch });
 }
 
@@ -174,17 +171,27 @@ function toolParameters() {
 
 export function createPiExtension({
   launch,
-  connect = connectBridge,
+  connect = (endpoint, options) => typeof endpoint === "number"
+    ? connectPiInheritedBridge(endpoint, options)
+    : connectPiInteractivePeer(endpoint, options),
   describe = describeNative,
   append = appendNative,
+  steer = steerNative,
+  history = historyNative,
+  quitWaitMs = 2000,
 } = {}) {
   const lifetime = new AbortController();
+  // Set once a quit begins: no settled drain may start a run while Pi quits.
+  let quitting = false;
   let bridgePromise;
   let bridge;
   let bridgeClosing = false;
   let current;
   let failure;
   let settling = false;
+  // Pi runs one at a time and ends each with one agent_settled; this counts
+  // them so Go can tell the owned run's stdout frames from Pi's own.
+  let settledRuns = 0;
 
   function stop(ctx, error) {
     if (failure) return;
@@ -227,6 +234,13 @@ export function createPiExtension({
           throw new BridgeCallError("stale_session", "Pi native session identity does not match");
         }
         throwIfAborted(signal);
+        // While Pi quits a delivery starts no turn: once Pi is idle it is
+        // written to history, as the quit drain does; before that it waits.
+        if (quitting) {
+          if (!record.ctx.isIdle()) return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "busy" };
+          history(record.pi, record.ctx, params);
+          return { session_id: record.session_id, message_id: params.message_id, accepted: true };
+        }
         if (record.branchSummaryBusy) {
           if (record.ctx.isIdle()) record.branchSummaryBusy = false;
           else return {
@@ -234,6 +248,13 @@ export function createPiExtension({
             accepted: false, reason: "branch_summary_busy",
           };
         }
+        // During this extension's agent_settled drain Pi defers the send (see
+        // appendNative): accept one and answer busy after it, so one held
+        // message starts the next turn, as on Pi 0.85.1.
+        if (record.settledAppend === "sent") {
+          return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "busy" };
+        }
+        const deferred = record.settledAppend === "open";
         const result = append(record.pi, record.ctx, params);
         throwIfAborted(signal);
         if (result.accepted === false) {
@@ -243,7 +264,35 @@ export function createPiExtension({
         }
         exactKeys(result, ["accepted"], "native.append result");
         if (result.accepted !== true) throw new Error("Pi native append result is invalid");
+        if (deferred) record.settledAppend = "sent";
         record.admittedMessages.set(params.message_id, { body: params.body, started: false });
+        return { session_id: record.session_id, message_id: params.message_id, accepted: true };
+      }
+      case "native.steer": {
+        exactKeys(params, ["session_id", "message_id", "body", "run"], "native.steer parameters");
+        if (params.session_id !== record.session_id) {
+          throw new BridgeCallError("stale_session", "Pi native session identity does not match");
+        }
+        // An interactive session has no Run: a steer goes into whatever
+        // native run is active, and its owner shares this process.
+        if (launch.topology === "interactive" && params.run !== null) {
+          throw new Error("Pi interactive native.steer run must be null");
+        }
+        throwIfAborted(signal);
+        // A lane's Run token, Pi's run state and the send are one synchronous
+        // step, so a steer made for an earlier Run never enters a later one.
+        const owned = launch.topology === "interactive" ||
+          (typeof params.run === "string" && params.run === record.runToken);
+        const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };
+        throwIfAborted(signal);
+        if (result.accepted === false) {
+          exactKeys(result, ["accepted", "reason"], "native.steer result");
+          if (result.reason !== "idle") throw new Error("Pi native steer rejection is invalid");
+          return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "idle" };
+        }
+        exactKeys(result, ["accepted"], "native.steer result");
+        if (result.accepted !== true) throw new Error("Pi native steer result is invalid");
+        record.admittedMessages.set(params.message_id, { body: params.body, started: false, steered: true });
         return { session_id: record.session_id, message_id: params.message_id, accepted: true };
       }
       default:
@@ -255,7 +304,7 @@ export function createPiExtension({
     if (!launch) throw new Error("Pi managed launch metadata is missing");
     if (failure) throw failure;
     if (!bridgePromise) {
-      bridgePromise = Promise.resolve(connect(launch.socket, {
+      bridgePromise = Promise.resolve(connect(launch.topology === "lane" ? launch.bridge_fd : launch, {
         role: "native",
         handler: nativeRequest,
         signal: lifetime.signal,
@@ -289,6 +338,18 @@ export function createPiExtension({
     }
   }
 
+  // A managed session always has its comms tool (owner rule). Pi 1.3.0
+  // restores a resumed session's recorded tool loadout in place of the active
+  // set, which drops a tool its transcript never declared (agent-session.js
+  // 1.3.0:214-215, 1374-1383); session_start fires for every startup, reload,
+  // new, resume and fork. Only our tool is added, after the others, and an
+  // active one changes nothing.
+  function keepSessionbusActive(pi) {
+    const active = pi.getActiveTools();
+    if (!Array.isArray(active)) throw new Error("Pi active tool list is invalid");
+    if (!active.includes(toolName)) pi.setActiveTools([...active, toolName]);
+  }
+
   async function ready(pi, ctx) {
     requireMode(ctx);
     if (current) throw new Error("Pi native session started before its predecessor ended");
@@ -296,12 +357,11 @@ export function createPiExtension({
     current = {
       pi, ctx, session_id: nativeID(info.session_id),
       controller: new AbortController(), branchSummaryBusy: false,
-      admittedMessages: new Map(),
+      admittedMessages: new Map(), running: false, runToken: null,
     };
     settling = false;
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: current.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });
@@ -312,7 +372,6 @@ export function createPiExtension({
     const { record, info } = live(ctx, pi);
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
-      directory: launch.directory,
       session_id: record.session_id,
       name: boundedString(info.name, 4096, "native name", { empty: true }),
     });
@@ -322,6 +381,9 @@ export function createPiExtension({
   async function drain(ctx, witness) {
     if (launch.topology !== "interactive") return;
     if (!drainWitnesses.includes(witness)) throw new Error("Pi native drain witness is invalid");
+    // One gate for every drain, scheduled or crossing: while Pi quits only
+    // the quit drain runs, and it writes history instead of starting a turn.
+    if (quitting !== (witness === "quit")) return;
     const { record } = live(ctx);
     const result = await hostCall(ctx, "owner.drain", { session_id: record.session_id, witness });
     exactKeys(result, ["session_id", "drained"], "owner.drain response");
@@ -341,11 +403,90 @@ export function createPiExtension({
     });
   }
 
+  // DEF-04, owner decision 2026-10-19 ("Clear the queue first"), applied at
+  // every settle since 2026-10-28: a steered peer message whose message_start
+  // never fired did not reach the model; Pi saves a steered message only at
+  // its own message_end. A settle without an abort can hold one too: Pi
+  // dropped it from its queue (Alt+Up, a failed compaction-queue flush) or
+  // still holds it for a later run (Pi 1.4.0 _runBeforeSettleBoundary when
+  // the context cannot continue). Extensions cannot see which
+  // (hasPendingMessages counts typed text only), so the clear below makes
+  // both one history copy and no queued copy. The abort comes only with such
+  // a message; at a settle Pi's run is no longer active, so it requests no
+  // run abort and leaves the deferred starts of settled handlers (Pi 1.4.0
+  // agent-session.js:683-706, 1866-1867), including this extension's drain
+  // that follows, untouched. Escape and the TUI's other aborts clear Pi's queues first and
+  // drop it. A mid-run /compact or session switch aborts without that clear
+  // and leaves it queued for a later run. So ctx.abort() first runs the clear
+  // Escape runs (restoreQueuedMessagesToEditor({abort:true}), Pi 1.2.0
+  // interactive-mode.js:1732-1734, 3891-3910): no queued copy is delivered
+  // later, and text the user queued returns to the editor. Each such message
+  // is then written to history once, with no turn. One that already started
+  // is left as it is. Pi is idle at every settle; if a native change made it
+  // busy here, a plain send would steer, so nothing is cleared or written.
+  function keepNeverStarted(record, ctx) {
+    const candidates = [...record.admittedMessages].filter(([, admitted]) => admitted.steered && !admitted.started);
+    if (candidates.length === 0 || !ctx.isIdle()) return;
+    ctx.abort();
+    for (const [messageID, admitted] of candidates) {
+      record.admittedMessages.delete(messageID);
+      history(record.pi, ctx, { session_id: record.session_id, message_id: messageID, body: admitted.body });
+    }
+  }
+
+  // A settle without an abort can leave a steer in Pi's queue for a later
+  // run (Pi 1.4.0 agent-session.js _runBeforeSettleBoundary, when the context
+  // cannot continue). Quitting while Pi is idle ends the session before that
+  // run, so each steer that never started is written to history once, with
+  // no turn, and a resumed session shows it. Pi awaits session_shutdown
+  // before it disposes the session (agent-session-runtime.js:296-303); no
+  // run follows, so no queued copy is delivered again.
+  function keepUnreadAtQuit(record, ctx) {
+    for (const [messageID, admitted] of [...record.admittedMessages]) {
+      if (!admitted.steered || admitted.started) continue;
+      record.admittedMessages.delete(messageID);
+      history(record.pi, ctx, { session_id: record.session_id, message_id: messageID, body: admitted.body });
+    }
+  }
+
+  // Pi does not abort a running task before session_shutdown on quit
+  // (agent-session-runtime.js:296-303), and a history write during a task
+  // would only steer again. With a steer that never started, the task is
+  // aborted, as Escape does, and Pi is given quitWaitMs to settle; Pi awaits
+  // this handler with no bound of its own. Past the bound nothing is written
+  // and quit goes on.
+  async function settleForQuit(record, ctx) {
+    if (ctx.isIdle() || ![...record.admittedMessages.values()].some((admitted) => admitted.steered && !admitted.started)) return;
+    ctx.abort();
+    const deadline = Date.now() + quitWaitMs;
+    while (!ctx.isIdle() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
   async function laneWitness(ctx, method, params) {
     if (launch.topology !== "lane") return;
     const { record } = live(ctx);
     const result = await hostCall(ctx, method, { session_id: record.session_id, ...params });
     validateEcho(result, record.session_id);
+  }
+
+  // Go answers the owned run's preflight with its token, and Pi's own work
+  // with null. Pi awaits this hook before the run goes on, so the record's
+  // run is still this one when the answer arrives.
+  async function lanePreflight(ctx, event) {
+    const { record } = live(ctx);
+    const result = await hostCall(ctx, "run.preflight", {
+      session_id: record.session_id,
+      prompt: boundedString(event.prompt, 1 << 20, "native preflight prompt", { empty: true }),
+      settling,
+      leaf: nativeLeaf(ctx),
+      settled: settledRuns,
+    });
+    exactKeys(result, ["session_id", "run"], "run.preflight response");
+    if (result.session_id !== record.session_id ||
+        (result.run !== null && (typeof result.run !== "string" || !/^[0-9a-f]{32}$/u.test(result.run)))) {
+      throw new Error("Pi run.preflight response is invalid");
+    }
+    if (current === record && record.running) record.runToken = result.run;
   }
 
   return function sessionbusPiExtension(pi) {
@@ -388,7 +529,7 @@ export function createPiExtension({
     });
 
     pi.on("session_start", async (_event, ctx) => {
-      try { await ready(pi, ctx); } catch (error) { stop(ctx, error); }
+      try { keepSessionbusActive(pi); await ready(pi, ctx); } catch (error) { stop(ctx, error); }
     });
 
     pi.on("session_info_changed", async (_event, ctx) => {
@@ -396,8 +537,10 @@ export function createPiExtension({
     });
 
     pi.on("input", (event, ctx) => {
-      if (launch.topology !== "lane") return { action: "continue" };
-      if (event.source === "rpc") settling = false;
+      // Only the lane's own rpc prompt starts its Run; other input is Pi's
+      // own work and is not reported.
+      if (launch.topology !== "lane" || event.source !== "rpc") return { action: "continue" };
+      settling = false;
       return (async () => {
         try {
           if (event.images?.length) throw new Error("Pi lane input does not support images");
@@ -414,20 +557,25 @@ export function createPiExtension({
       })();
     });
 
-    pi.on("before_agent_start", (_event, ctx) => {
-      if (current) current.branchSummaryBusy = false;
+    pi.on("before_agent_start", (event, ctx) => {
+      // Pi marks its run active before this hook and clears it only at
+      // agent_settled (Pi 1.2.0 agent-session.js:1392, :686).
+      if (current) { current.branchSummaryBusy = false; current.running = true; current.runToken = null; }
       if (launch.topology === "interactive") {
         return drain(ctx, "before_agent_start").catch((error) => stop(ctx, error));
       }
-      return laneWitness(ctx, "run.preflight", {
-        prompt: boundedString(_event.prompt, 1 << 20, "native preflight prompt", { empty: true }),
-        settling,
-      }).catch((error) => stop(ctx, error));
+      // A lane's Run is the run of its own rpc prompt: one started by a user
+      // message after that prompt's input and before the next settle. Any
+      // other run, including one a custom message starts, is Pi's own work:
+      // it gets no token and is not reported.
+      if (settling || event.messageType === "custom") return;
+      return lanePreflight(ctx, event).catch((error) => stop(ctx, error));
     });
 
     pi.on("agent_start", (_event, ctx) => {
-      if (launch.topology !== "lane") return;
-      return laneWitness(ctx, "run.start", { settling }).catch((error) => stop(ctx, error));
+      const token = current?.runToken;
+      if (launch.topology !== "lane" || !token) return;
+      return laneWitness(ctx, "run.start", { run: token, settling }).catch((error) => stop(ctx, error));
     });
 
     for (const type of ["message_start", "message_end"]) {
@@ -455,15 +603,32 @@ export function createPiExtension({
       });
     }
 
-    pi.on("agent_settled", (_event, ctx) => {
-      // This prefix runs in the first CLI extension before any await or global
-      // settled handler. Pi has already cleared its active flag.
+    pi.on("agent_settled", (event, ctx) => {
+      // Pi clears its active flag, then runs agent_settled handlers in
+      // extension order: CLI first, then discovered. The managed extension is
+      // first, so this prefix counts the settle and marks settling before any
+      // await and before every other settled handler. Pi has saved the run's
+      // messages by now (agent-core awaits its listeners), so the leaf read
+      // here is the run's last entry. Work another handler starts after this
+      // is Pi's own: by owner decision a lane's Run ends when Pi settles.
+      settledRuns += 1;
       settling = true;
-      if (current) current.branchSummaryBusy = false;
+      const record = current;
+      const token = record?.runToken ?? null;
+      if (record) { record.branchSummaryBusy = false; record.running = false; record.runToken = null; }
       if (launch.topology === "interactive") {
-        return drain(ctx, "agent_settled").catch((error) => stop(ctx, error));
+        if (record) {
+          try { keepNeverStarted(record, ctx); } catch (error) { stop(ctx, error); return; }
+        }
+        if (record) record.settledAppend = "open";
+        return drain(ctx, "agent_settled").catch((error) => stop(ctx, error)).finally(() => {
+          if (record) record.settledAppend = undefined;
+        });
       }
-      return laneWitness(ctx, "run.settling", {}).catch((error) => stop(ctx, error));
+      if (!token) return;
+      let leaf;
+      try { leaf = nativeLeaf(ctx); } catch (error) { stop(ctx, error); return; }
+      return laneWitness(ctx, "run.settling", { run: token, leaf }).catch((error) => stop(ctx, error));
     });
 
     pi.on("session_before_tree", async (_event, ctx) => {
@@ -517,6 +682,16 @@ export function createPiExtension({
       try {
         if (!sessionEndReasons.includes(event.reason)) throw new Error("Pi native shutdown reason is invalid");
         live(ctx, pi);
+        if (event.reason === "quit" && launch.topology === "interactive") {
+          quitting = true;
+          await settleForQuit(record, ctx);
+          if (ctx.isIdle()) {
+            keepUnreadAtQuit(record, ctx);
+            // Then the owner's queued deliveries, in arrival order, before
+            // session_end discards them.
+            await drain(ctx, "quit");
+          }
+        }
         const result = await hostCall(ctx, "session_end", {
           topology: launch.topology,
           session_id: record.session_id,

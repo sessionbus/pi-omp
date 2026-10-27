@@ -19,7 +19,7 @@ CGO_ENABLED=0 GOOS="$platform" GOARCH="$arch" peer_go_build "$stage/$product-pee
 mkdir "$stage/plugin"
 if [ "$product" = pi ]; then
  mkdir -p "$stage/plugin/pi" "$stage/plugin/pifamily/extension"
- cp wrappers/pi/extension.mjs wrappers/pi/native.mjs "$stage/plugin/pi/"
+ cp wrappers/pi/extension.mjs wrappers/pi/native.mjs wrappers/pi/peer.mjs "$stage/plugin/pi/"
  cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs "$stage/plugin/pifamily/extension/"
 else
  mkdir -p "$stage/plugin/omp" "$stage/plugin/pifamily/extension"
