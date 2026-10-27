@@ -205,12 +205,23 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 			turn.settleLocked()
 		}
 	case "prompt_result":
-		invoked, err := turn.decodePromptResult(raw)
+		invoked, status, message, err := turn.decodePromptResult(raw)
 		if err != nil {
 			turn.failLocked(err)
 			return err
 		}
-		if !invoked {
+		if invoked && turn.notDispatchedLocked(status) {
+			// OMP admitted our prompt and ended it before any run, for example
+			// on a usage-preflight denial: the prompt still counts as invoked
+			// and its result reports no run (agent-session.ts 18.12.2:8203,
+			// 7829-7838; rpc-prompt-results.ts 18.12.2:89-101). 18.13.x adds
+			// its cost cap to the same report. Only the Run fails, with OMP's
+			// text when it gives one; the lane stays.
+			if message == "" {
+				message = "OMP ended the prompt before its run (" + status + ")"
+			}
+			turn.promptFailure = &nativePromptFailure{err: errors.New(message)}
+		} else if !invoked {
 			if turn.starts != 0 || turn.preflight || turn.yielded || len(turn.assistants) != 0 {
 				err = errors.New("OMP no-agent result contradicts native Run evidence")
 				turn.failLocked(err)
@@ -237,24 +248,49 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	return nil
 }
 
-func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, error) {
+// decodePromptResult returns the prompt_result's agentInvoked, its status and
+// OMP's error text, which is empty when OMP gives none.
+func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, string, string, error) {
 	var event struct {
 		ID           *string         `json:"id"`
 		AgentInvoked json.RawMessage `json:"agentInvoked"`
+		Status       json.RawMessage `json:"status"`
+		Error        json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &event) != nil || event.ID == nil || !validOwnerID(*event.ID) || turn.promptResultSeen ||
 		(turn.native != nil && *event.ID != turn.native.id) {
-		return false, errors.New("OMP native prompt_result is invalid")
+		return false, "", "", errors.New("OMP native prompt_result is invalid")
 	}
 	trimmed := bytes.TrimSpace(event.AgentInvoked)
 	var invoked bool
 	if json.Unmarshal(trimmed, &invoked) != nil || (!bytes.Equal(trimmed, []byte("true")) && !bytes.Equal(trimmed, []byte("false"))) {
-		return false, errors.New("OMP native prompt_result is invalid")
+		return false, "", "", errors.New("OMP native prompt_result is invalid")
+	}
+	// Status and error text only classify a report without a run; any other
+	// shape leaves them empty, as before they were read.
+	var status string
+	_ = json.Unmarshal(event.Status, &status)
+	var detail struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(event.Error, &detail)
+	message := detail.Message
+	if len(message) > 64<<10 {
+		message = ""
 	}
 	turn.promptResultSeen = true
 	turn.promptResultID = *event.ID
 	turn.promptInvoked = invoked
-	return invoked, nil
+	return invoked, status, message, nil
+}
+
+// notDispatchedLocked reports an agent-invoked prompt_result that OMP wrote
+// for our prompt without any run: status aborted or error, and no run start,
+// yield or assistant message. Our preflight may already be recorded, since
+// OMP emits before_agent_start before it hands the prompt to the agent.
+func (turn *ompNativeTurn) notDispatchedLocked(status string) bool {
+	return (status == "aborted" || status == "error") && turn.failure == nil && turn.promptFailure == nil &&
+		turn.starts == 0 && !turn.yielded && len(turn.assistants) == 0 && !turn.noAgent && !turn.resultReady
 }
 
 // decodeOMPYield applies OMP's own prompt-report rule, `yielded ??
@@ -359,6 +395,9 @@ func (turn *ompNativeTurn) admission() (bool, bool, <-chan struct{}, error) {
 	defer turn.mu.Unlock()
 	if turn.failure != nil {
 		return false, false, turn.changed, turn.failure
+	}
+	if turn.promptFailure != nil {
+		return false, false, turn.changed, turn.promptFailure
 	}
 	return turn.preflight && turn.starts > 0, turn.noAgent, turn.changed, nil
 }

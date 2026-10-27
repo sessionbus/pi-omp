@@ -280,3 +280,100 @@ func TestOMPWorkerSeedFailedBeforeItsRunIsNotSubmittedAndLaneStays(t *testing.T)
 	fixture.completeOwnedRun(t, 1, "next prompt", "next answer")
 	fixture.requireLane(t)
 }
+
+// endPromptBeforeRun writes OMP's report for a prompt it admitted and ended
+// before any run, such as a usage-preflight denial or (18.13.x) its cost cap:
+// prompt_result agentInvoked:true, with no agent_start (agent-session.ts
+// 18.12.2:8203, 7829-7838; rpc-prompt-results.ts 18.12.2:89-101).
+func (fixture *ompRunFixture) endPromptBeforeRun(t *testing.T, id, status, message string) {
+	t.Helper()
+	frame := `{"type":"prompt_result","id":` + mustOMPJSONText(t, id) + `,"agentInvoked":true,"status":"` + status + `","sessionSettled":true`
+	if message != "" {
+		frame += `,"error":{"message":` + mustOMPJSONText(t, message) + `,"retryable":false,"code":"cost_cap"}`
+	}
+	fixture.peer.write(t, frame+`}`)
+}
+
+// OMP can admit our prompt and end it before any run while still reporting
+// it as invoked. Only the Run fails, with OMP's text when it gives one; the
+// lane stays and its next Run is unaffected. Before this change the lane
+// ended.
+func TestOMPPromptEndedBeforeItsRunEndsOnlyTheRun(t *testing.T) {
+	for _, report := range []struct{ status, message, want string }{
+		{"aborted", "", "OMP ended the prompt before its run (aborted)"},
+		{"error", "Cost cap reached: this session spent $1.20 of its $1.00 cap.", "Cost cap reached: this session spent $1.20 of its $1.00 cap."},
+	} {
+		for name, preflight := range map[string]bool{"before our preflight": false, "after our preflight": true} {
+			t.Run(report.status+" "+name, func(t *testing.T) {
+				fixture := newOMPRunFixture(t)
+				id, started := fixture.prompt(t, "owned prompt", "")
+				sequence := uint64(1)
+				if preflight {
+					fixture.preflight(t, sequence, "ended-run", "owned prompt")
+					sequence++
+				}
+				fixture.endPromptBeforeRun(t, id, report.status, report.message)
+				start := <-started
+				if start.err != nil || start.turn == nil {
+					t.Fatalf("start = %#v, %v", start.turn, start.err)
+				}
+				_, err := start.turn.Wait(nativeRPCTestContext(t))
+				var failure *nativePromptFailure
+				if !errors.As(err, &failure) || err.Error() != report.want {
+					t.Fatalf("prompt ended before its run = %v", err)
+				}
+				fixture.requireLane(t)
+				fixture.completeOwnedRun(t, sequence, "next prompt", "next answer")
+				fixture.requireLane(t)
+			})
+		}
+	}
+}
+
+// The same report after a run start is not a prompt that never ran: the
+// lane still ends, as before this change.
+func TestOMPAbortedResultAfterARunStartWithoutOurPreflightStillEndsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.endPromptBeforeRun(t, id, "aborted", "")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	_, err := start.turn.Wait(nativeRPCTestContext(t))
+	var failure *nativePromptFailure
+	if err == nil || errors.As(err, &failure) {
+		t.Fatalf("aborted result after a run start = %v", err)
+	}
+	fixture.wrapper.mu.Lock()
+	lost := fixture.wrapper.failure
+	fixture.wrapper.mu.Unlock()
+	if lost == nil {
+		t.Fatal("the lane stayed after an aborted result that followed a run start")
+	}
+}
+
+// OMP reports a prompt it ended before any run only as aborted or error. An
+// agent-invoked completed report without a run is not that report: the lane
+// still ends, as before this change.
+func TestOMPCompletedResultWithoutARunStillEndsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.endPromptBeforeRun(t, id, "completed", "")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	_, err := start.turn.Wait(nativeRPCTestContext(t))
+	var failure *nativePromptFailure
+	if err == nil || errors.As(err, &failure) {
+		t.Fatalf("completed result without a run = %v", err)
+	}
+	fixture.wrapper.mu.Lock()
+	lost := fixture.wrapper.failure
+	fixture.wrapper.mu.Unlock()
+	if lost == nil {
+		t.Fatal("the lane stayed after a completed result without a run")
+	}
+}
