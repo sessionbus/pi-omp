@@ -525,6 +525,71 @@ test("interactive settle rescue runs before its own drain and leaves the drain's
   assert.equal(native.shutdown(), 0);
 });
 
+// A settle that arrives while a quit waits for Pi still keeps the unread
+// steer, and its drain starts no run; the quit drain then writes the queued
+// delivery to history once, after the steer.
+test("interactive settle during quit keeps the steer and starts no run", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 1000 })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "queued", body: "peer", run: null });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "for the next task" });
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(native.aborted(), 1);
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  await quitting;
+  assert.deepEqual(sends.slice(1), [{ id: "queued", options: undefined }, { id: "waiting", options: undefined }]);
+  assert.equal(queue.length, 0);
+});
+
+// dev1's control (pi-unread-steer-rescue-read-dev1-20261028): a compaction
+// schedules a drain before its task settles; quit then aborts the task and
+// waits for session_end. Neither that scheduled drain nor the settle's starts
+// a run while Pi quits; the quit drain writes the waiting delivery to history
+// once, after the never-started steer, and nothing is left queued.
+test("interactive quit starts no run from a scheduled or settle drain and writes queued deliveries after steers", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 200 })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "held", body: "peer", run: null });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued for the next task" });
+  await native.emit("session_compact", { type: "session_compact", reason: "threshold" });
+  native.onAbort(() => native.setIdle(true));
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends.filter((send) => send.options?.triggerTurn && !send.options.deliverAs), [], "a run started during quit");
+  assert.deepEqual(sends.slice(1).map((send) => [send.id, send.options]), [["held", undefined], ["waiting", undefined]]);
+  assert.equal(queue.length, 0);
+});
+
 // Quitting while Pi is idle ends the session before Pi's next task: the
 // steers it never read are written to history first, then the deliveries
 // still queued for that task, in arrival order, each once and with no run.
@@ -615,18 +680,19 @@ test("interactive delivery crossing a quit is busy while Pi is busy and history 
   assert.equal(native.aborted(), 0);
 });
 
-// Quitting while Pi is idle with a steer that never started, before a settle
-// rescued it, ends the session before any later run. Each such steer is
-// written to history once, with no turn and no abort; one that started stays
-// as it is. Quitting while Pi is still busy writes nothing here (unchanged).
-// Before this change the idle case lost the steer.
-test("interactive quit while idle writes never-started steers to history once", async () => {
-  for (const busyAtQuit of [false, true]) {
+// Quitting with a steer that never started ends the session before any later
+// run. Idle at quit: it is written to history once, with no turn and no
+// abort. Busy at quit: Pi does not abort the task first, so the extension
+// aborts it as Escape does and gives Pi a bounded time to settle; settled, the
+// steer is written once; still busy at the bound, nothing is written and quit
+// goes on. A started steer stays as it is. Before this change all were lost.
+test("interactive quit keeps never-started steers when Pi is or becomes idle", async () => {
+  for (const atQuit of ["idle", "settles after abort", "stays busy"]) {
     const native = nativeFixture("interactive-1", "tui");
     const sends = [];
-    native.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+    native.pi.sendMessage = (message, options) => { sends.push({ message, options, aborts: native.aborted() }); };
     const owner = fakeConnection({ topology: "interactive" });
-    createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 200 })(native.pi);
     await native.emit("session_start", { type: "session_start", reason: "startup" });
     const peer = (id) => ({ customType: "sessionbus.message", content: `body ${id}`, display: true, details: { message_id: id } });
     const steer = (id) => owner.native("native.steer", { session_id: "interactive-1", message_id: id, body: `body ${id}`, run: null });
@@ -635,19 +701,17 @@ test("interactive quit while idle writes never-started steers to history once", 
     for (const id of ["started", "queued"]) await steer(id);
     await native.emit("message_start", { type: "message_start", message: { role: "custom", ...peer("started") } });
     const steered = sends.length;
-    if (!busyAtQuit) native.setIdle(true);
+    if (atQuit === "idle") native.setIdle(true);
+    if (atQuit === "settles after abort") native.onAbort(() => setTimeout(() => native.setIdle(true), 30));
+    const started = Date.now();
     await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
-    assert.deepEqual(sends.slice(steered), busyAtQuit ? [] : [{ message: peer("queued"), options: undefined }], `busyAtQuit=${busyAtQuit}`);
-    assert.equal(native.aborted(), 0, `busyAtQuit=${busyAtQuit}`);
+    const expected = atQuit === "stays busy" ? [] : [{ message: peer("queued"), options: undefined, aborts: atQuit === "idle" ? 0 : 1 }];
+    assert.deepEqual(sends.slice(steered), expected, atQuit);
+    assert.equal(native.aborted(), atQuit === "idle" ? 0 : 1, atQuit);
+    if (atQuit === "stays busy") assert.ok(Date.now() - started < 1000, "quit goes on at the bound");
   }
 });
 
-// Pi's queue at an aborted settle, modelled: a mid-run /compact aborts without
-// clearing it, so one steer is still queued; in the P3 case the loop had
-// dequeued the other and lost it to a throw before its message_start. In both
-// the message ends up once in history and not in the queue, so no later run
-// delivers it again. Before this change the first stayed queued and the
-// second was lost.
 test("interactive aborted settle leaves one history copy and no queued copy of a never-started steer", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const queue = [];

@@ -66,11 +66,12 @@ steered peer message unread: when Pi restored its queue to the editor
 (Alt+Up) or a flush of its compaction queue failed, and when Pi keeps the
 message for a later task because the task could not continue. Before writing,
 the extension clears Pi's queues as Escape does, so text you had queued
-returns to the editor. Quitting Pi while it is idle also writes such a message
-to history before the session ends, then the peer messages still waiting for
-Pi's next task, in arrival order; no new task starts while Pi quits.
-
-Not covered: quitting Pi while a task runs.
+returns to the editor. Quitting Pi also writes such a message to history
+before the session ends. If a task is still running then, the extension
+aborts it, as Escape does, and waits up to 2 seconds for Pi to settle; if Pi
+has not settled by then, nothing is written and Pi quits. Peer messages still
+waiting for Pi's next task are written to history the same way, after those,
+in arrival order; no new task starts while Pi quits.
 
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:

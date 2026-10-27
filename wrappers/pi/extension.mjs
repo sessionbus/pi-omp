@@ -178,6 +178,7 @@ export function createPiExtension({
   append = appendNative,
   steer = steerNative,
   history = historyNative,
+  quitWaitMs = 2000,
 } = {}) {
   const lifetime = new AbortController();
   // Set once a quit begins: no settled drain may start a run while Pi quits.
@@ -448,6 +449,19 @@ export function createPiExtension({
     }
   }
 
+  // Pi does not abort a running task before session_shutdown on quit
+  // (agent-session-runtime.js:296-303), and a history write during a task
+  // would only steer again. With a steer that never started, the task is
+  // aborted, as Escape does, and Pi is given quitWaitMs to settle; Pi awaits
+  // this handler with no bound of its own. Past the bound nothing is written
+  // and quit goes on.
+  async function settleForQuit(record, ctx) {
+    if (ctx.isIdle() || ![...record.admittedMessages.values()].some((admitted) => admitted.steered && !admitted.started)) return;
+    ctx.abort();
+    const deadline = Date.now() + quitWaitMs;
+    while (!ctx.isIdle() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
   async function laneWitness(ctx, method, params) {
     if (launch.topology !== "lane") return;
     const { record } = live(ctx);
@@ -670,6 +684,7 @@ export function createPiExtension({
         live(ctx, pi);
         if (event.reason === "quit" && launch.topology === "interactive") {
           quitting = true;
+          await settleForQuit(record, ctx);
           if (ctx.isIdle()) {
             keepUnreadAtQuit(record, ctx);
             // Then the owner's queued deliveries, in arrival order, before
