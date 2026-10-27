@@ -22,6 +22,9 @@ var (
 	errNativeRPCBusy     = errors.New("Pi native RPC is busy")
 	errNativeRPCClosed   = errors.New("Pi native RPC is closed")
 	errNativeRPCProtocol = errors.New("Pi native RPC protocol violation")
+	// errNativeRPCInputTooLarge is a command that does not fit one native
+	// input frame once encoded. It is refused before anything is written.
+	errNativeRPCInputTooLarge = fmt.Errorf("%w: input frame exceeds its bound", errNativeRPCProtocol)
 )
 
 type nativeRPCLimits struct {
@@ -338,7 +341,7 @@ func (rpc *nativeRPC) encodeCommand(id, command string, fields map[string]any) (
 		return nil, fmt.Errorf("encode Pi native RPC command: %w", err)
 	}
 	if len(body) == 0 || len(body) > rpc.limits.maxInputFrame {
-		return nil, fmt.Errorf("%w: input frame exceeds %d bytes", errNativeRPCProtocol, rpc.limits.maxInputFrame)
+		return nil, fmt.Errorf("%w (%d bytes)", errNativeRPCInputTooLarge, rpc.limits.maxInputFrame)
 	}
 	return append(body, '\n'), nil
 }

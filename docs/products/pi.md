@@ -11,6 +11,14 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## A lane prompt refused before it reaches Pi (2026-10-28)
+
+A blank lane prompt, and one whose JSON encoding exceeds the 1 MiB native
+input frame (Go escapes `<`, `>` and `&` as six bytes each), were refused
+before anything was written but ended the lane. Decision (2026-10-28): both
+now end only the Run, with the reason, as Pi's own refusal does; nothing is
+written or replayed, and the lane stays.
+
 ## Tool loadout on resume (Pi 1.3.0, 2026-10-19)
 
 Pi 1.3.0 restores a resumed session's recorded tool loadout whenever

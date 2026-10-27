@@ -26,6 +26,9 @@ var (
 	errNativeRPCBusy     = errors.New("OMP native RPC is busy")
 	errNativeRPCClosed   = errors.New("OMP native RPC is closed")
 	errNativeRPCProtocol = errors.New("OMP native RPC protocol violation")
+	// errNativeRPCInputTooLarge is a command that does not fit one native
+	// input frame once encoded. It is refused before anything is written.
+	errNativeRPCInputTooLarge = fmt.Errorf("%w: input frame exceeds its bound", errNativeRPCProtocol)
 )
 
 type nativeRPCLimits struct {
@@ -337,6 +340,11 @@ func (rpc *nativeRPC) StartPrompt(ctx context.Context, message string) (*nativeP
 		return nil, false, &nativePromptFailure{err: errors.New("OMP native prompt is invalid")}
 	}
 	id, pending, write, err := rpc.admitPrompt(ctx, map[string]any{"message": message})
+	if errors.Is(err, errNativeRPCInputTooLarge) {
+		// JSON escaping can grow a prompt within the raw bound past one
+		// frame. Nothing was written, so only this Run fails.
+		return nil, false, &nativePromptFailure{err: fmt.Errorf("OMP lane prompt exceeds the %d-byte native input frame once encoded", rpc.limits.maxInputFrame)}
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -636,7 +644,7 @@ func (rpc *nativeRPC) encodeCommand(id, command string, fields map[string]any) (
 		return nil, fmt.Errorf("encode OMP native RPC command: %w", err)
 	}
 	if len(body) == 0 || len(body)+1 > rpc.limits.maxInputFrame {
-		return nil, fmt.Errorf("%w: input frame exceeds %d bytes", errNativeRPCProtocol, rpc.limits.maxInputFrame)
+		return nil, fmt.Errorf("%w (%d bytes)", errNativeRPCInputTooLarge, rpc.limits.maxInputFrame)
 	}
 	return append(body, '\n'), nil
 }

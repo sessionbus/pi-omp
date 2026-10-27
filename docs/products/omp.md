@@ -6,6 +6,18 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## A lane prompt over the native frame once encoded (2026-10-28)
+
+The lane checks a prompt's raw length against the 1 MiB native input frame,
+but its JSON encoding can be larger: Go escapes `<`, `>` and `&` as six bytes
+each, and a peer message that starts a Run adds its rendered envelope and a
+word joiner before each mention `@`. The encoder refused such a frame as a
+protocol violation before writing it, and the lane ended. Decision
+(2026-10-28): that refusal is now a Run-only failure with the reason, nothing
+is written or replayed, and the lane stays. A direct Run input cannot reach
+it through the bus, whose 1 MiB frame carries the same escaped input with more
+envelope; a peer message with many mention boundaries can.
+
 ## Interactive delivery when OMP binds the extension late (2026-10-27)
 
 OMP 18.13.1 and later can bind a startup-safe extension, ours included, after

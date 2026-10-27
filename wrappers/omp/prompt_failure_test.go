@@ -377,3 +377,22 @@ func TestOMPCompletedResultWithoutARunStillEndsTheLane(t *testing.T) {
 		t.Fatal("the lane stayed after a completed result without a run")
 	}
 }
+
+// JSON escaping can grow a prompt within the raw bound past one native input
+// frame: each "<" is encoded as six bytes. Nothing is written to OMP; only
+// the Run fails with the reason and the lane stays. Before this change the
+// lane ended.
+func TestOMPRunWithAPromptOverTheFrameOnceEncodedEndsOnlyTheRun(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	prompt := strings.Repeat("<", 200000)
+	_, err := fixture.wrapper.Run(nativeRPCTestContext(t), &kit.Run{}, kit.RunInput{Text: &prompt})
+	var failure *nativePromptFailure
+	if !errors.As(err, &failure) || !strings.Contains(err.Error(), "native input frame once encoded") {
+		t.Fatalf("oversized encoded prompt Run = %v", err)
+	}
+	fixture.requireLane(t)
+	// Nothing of the refused prompt was written: the next prompt is the
+	// first command OMP reads.
+	fixture.completeOwnedRun(t, 1, "next prompt", "next answer")
+	fixture.requireLane(t)
+}

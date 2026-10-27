@@ -1022,3 +1022,56 @@ func TestPiResultFinalizationRejectsLateOwnedWork(t *testing.T) {
 		})
 	}
 }
+
+// A lane prompt refused by our own validation (blank input) ends only its
+// Run; the lane stays for the next Run. Before this change the lane ended.
+func TestPiBlankPromptEndsOnlyItsRun(t *testing.T) {
+	lane := newPiSDKLane(t, "run")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: " \n\t"})
+	if state, _, reason := lane.terminal(responses); state != "unavailable" || !strings.Contains(reason, "empty or exceeds its native bound") {
+		t.Fatalf("blank Run = %s, %q", state, reason)
+	}
+	lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "owned prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("Run after the blank one = %s, %s, %q", state, outcome, reason)
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after a blank prompt: %v", failure)
+	}
+}
+
+// JSON escaping can grow a prompt within the raw bound past one native input
+// frame (each "<" is encoded as six bytes). Nothing is written to Pi: the
+// start is refused as a Run-only failure and the lane keeps no turn and no
+// failure. Before this change the lane ended.
+func TestPiPromptOverTheFrameOnceEncodedIsARunOnlyFailure(t *testing.T) {
+	rpc, peer := newNativeRPCTest(t, nil, nativeRPCLimits{})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test complete")) })
+	wrapper := &Wrapper{ctx: ctx, cancel: cancel, rpc: rpc, opened: true, id: "native", extension: "/managed.mjs"}
+	started := make(chan error, 1)
+	go func() {
+		_, err := wrapper.startNativeTurn(context.Background(), nil, strings.Repeat("<", 200000))
+		started <- err
+	}()
+	request := peer.read(t)
+	if nativeRPCField(t, request, "type") != "get_entries" {
+		t.Fatalf("first command = %#v", request)
+	}
+	peer.write(t, `{"id":"`+nativeRPCField(t, request, "id")+`","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}`)
+	// The reason names the encoded frame, not a protocol violation; Run
+	// treats this start error as Run-only (TestPiBlankPromptEndsOnlyItsRun).
+	if err := <-started; err == nil || !strings.Contains(err.Error(), "native input frame once encoded") || errors.Is(err, errNativeRPCProtocol) {
+		t.Fatalf("oversized encoded prompt = %v", err)
+	}
+	wrapper.mu.Lock()
+	active, lost := wrapper.active, wrapper.failure
+	wrapper.mu.Unlock()
+	if active != nil || lost != nil {
+		t.Fatalf("oversized prompt left turn %v, lane failure %v", active, lost)
+	}
+}

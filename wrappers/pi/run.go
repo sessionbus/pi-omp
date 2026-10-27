@@ -28,6 +28,14 @@ type piPromptRefusal struct{ err error }
 func (refusal *piPromptRefusal) Error() string { return refusal.err.Error() }
 func (refusal *piPromptRefusal) Unwrap() error { return refusal.err }
 
+// piPromptFailure is a lane prompt refused before anything reached Pi: our
+// own validation, or a prompt that does not fit one native input frame once
+// encoded. Like a refusal, only the Run fails and the lane stays.
+type piPromptFailure struct{ err error }
+
+func (failure *piPromptFailure) Error() string { return failure.err.Error() }
+func (failure *piPromptFailure) Unwrap() error { return failure.err }
+
 // newPiRunToken names one owned native run. The managed extension holds it
 // from the run's preflight acknowledgement to its settle, and native.steer
 // must carry it, so a steer made for one Run never enters a later one.
@@ -668,7 +676,7 @@ func (p *Wrapper) readHistory(ctx context.Context, since string) (nativeHistory,
 
 func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prompt string) (*piNativeTurn, error) {
 	if !validPiText(prompt, 1<<20, false) || strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("Pi lane prompt is empty or exceeds its native bound")
+		return nil, &piPromptFailure{err: errors.New("Pi lane prompt is empty or exceeds its native bound")}
 	}
 	if err := p.awaitNativeIdle(ctx); err != nil {
 		return nil, err
@@ -709,6 +717,11 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 		p.finishNativeTurn(turn)
+		if errors.Is(callErr, errNativeRPCInputTooLarge) {
+			// JSON escaping can grow a prompt within the raw bound past one
+			// frame. Nothing was written, so only this Run fails.
+			return nil, &piPromptFailure{err: fmt.Errorf("Pi lane prompt exceeds the %d-byte native input frame once encoded", p.rpc.limits.maxInputFrame)}
+		}
 		return nil, callErr
 	}
 	if err = context.Cause(ctx); err != nil {
@@ -818,7 +831,8 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		return turn, startErr
 	})
 	var refusal *piPromptRefusal
-	if errors.As(err, &refusal) {
+	var failure *piPromptFailure
+	if errors.As(err, &refusal) || errors.As(err, &failure) {
 		// The handoff returned its staged messages to the queue; the seed was
 		// not saved.
 		if seed.Delivery != nil {
