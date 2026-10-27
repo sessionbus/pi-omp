@@ -17,13 +17,13 @@ func TestVersionGuardAcceptsDevelopmentAndMatchingStableTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, release := range []string{"development", "v0.5.12"} {
+	for _, release := range []string{"development", "v0.5.13"} {
 		t.Run(release, func(t *testing.T) {
 			output, err := runVersionGuard(root, release)
 			if err != nil {
 				t.Fatalf("guard: %v\n%s", err, output)
 			}
-			want := "0.5.12|" + release + "|" + fixtureRevision + "\n"
+			want := "0.5.13|" + release + "|" + fixtureRevision + "\n"
 			if string(output) != want {
 				t.Fatalf("output=%q want=%q", output, want)
 			}
