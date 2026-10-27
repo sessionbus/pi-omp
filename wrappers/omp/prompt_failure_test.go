@@ -84,6 +84,32 @@ func TestOMPPromptFailureAfterItsRunStartedStillEndsTheLane(t *testing.T) {
 	}
 }
 
+// OMP's run start can reach our turn before our preflight report does; the
+// turn is then still waiting for admission. A late failure there followed a
+// run start, so it still ends the lane. The control above fails only after
+// admission, which does not reach this check.
+func TestOMPPromptFailureAfterARunStartBeforeOurPreflightStillEndsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":false,"error":"failed after start"}`)
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	_, err := start.turn.Wait(nativeRPCTestContext(t))
+	var failure *nativePromptFailure
+	if err == nil || errors.As(err, &failure) || !strings.Contains(err.Error(), "failed after start") {
+		t.Fatalf("late failure after a run start = %v", err)
+	}
+	fixture.wrapper.mu.Lock()
+	lost := fixture.wrapper.failure
+	fixture.wrapper.mu.Unlock()
+	if lost == nil {
+		t.Fatal("the lane stayed after a late failure that followed a run start")
+	}
+}
+
 // A Run whose prompt our own validation refuses writes nothing to OMP; only
 // the Run fails and the lane stays. Before this change the lane ended.
 func TestOMPRunWithAnInvalidPromptEndsOnlyTheRun(t *testing.T) {
