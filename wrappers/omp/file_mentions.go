@@ -7,17 +7,20 @@ import (
 	"unicode/utf8"
 )
 
-// wordJoiner is U+2060 WORD JOINER: invisible, and neither whitespace nor an
-// @ to OMP's file-mention rule.
+// wordJoiner is U+2060 WORD JOINER: invisible, and neither whitespace nor one
+// of the characters after which OMP reads an @ as a file mention.
 const wordJoiner = "\u2060"
 
-// escapeFileMentions inserts a word joiner right after each @ that OMP would
+// escapeFileMentions inserts a word joiner right before each @ that OMP would
 // read as the start of a file mention. OMP 18.12.2 reads the files that every
 // "@path" in a prompt names (agent-session.ts #promptWithMessage), with no
-// option to turn that off. An @ starts a mention at the start of the text or
-// after whitespace or one of ([{<"'` (utils/file-mentions.ts
-// isMentionBoundary). After the joiner, any mention OMP extracts there begins
-// with U+2060 and names no file, and the visible text is unchanged.
+// option to turn that off. An @ starts a mention only at the start of the text
+// or after whitespace or one of ([{<"'` (utils/file-mentions.ts
+// isMentionBoundary, checked by extractFileMentions for every match). After
+// the joiner the @ is at neither, so OMP extracts no mention there and
+// resolves no path; the visible text is unchanged. A joiner after the @ would
+// not do: the mention would still be extracted, and path resolution cancels
+// its first segment against a following "..".
 func escapeFileMentions(text string) string {
 	var output strings.Builder
 	last := 0
@@ -26,11 +29,11 @@ func escapeFileMentions(text string) string {
 		if text[index] != '@' || !fileMentionBoundary(text[:index]) {
 			continue
 		}
-		output.WriteString(text[last : index+1])
+		output.WriteString(text[last:index])
 		output.WriteString(wordJoiner)
-		last = index + 1
+		last = index
 	}
-	if last == 0 {
+	if output.Len() == 0 {
 		return text
 	}
 	output.WriteString(text[last:])

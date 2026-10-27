@@ -54,9 +54,9 @@ the lane stays.
 
 OMP reads the files that each `@path` in a prompt names, with no option to
 turn that off. In a peer message that starts a lane Run, the lane therefore
-puts an invisible word joiner (U+2060) right after each `@` that OMP would
-read as the start of a file mention, so OMP reads no file for it and the model
-sees the same visible text. The owner's own Run input is sent unchanged, and
+puts an invisible word joiner (U+2060) right before each `@` that OMP would
+read as the start of a file mention. The `@` then starts no mention, so OMP
+reads no file for it, and the model sees the same visible text. The owner's own Run input is sent unchanged, and
 OMP does not read file mentions in a steered message.
 
 Every managed factory exposes the one `sessionbus` tool directly with OMP's

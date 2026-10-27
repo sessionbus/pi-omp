@@ -34,7 +34,8 @@ var (
 
 // ompMentionPaths applies OMP's extractFileMentions match and boundary rule
 // (file-mentions.ts:168-178) and returns each mention's path before OMP trims
-// punctuation from it.
+// punctuation from it. Only an extracted mention is resolved and read
+// (file-mentions.ts:192-209), so none extracted means no file read.
 func ompMentionPaths(text string) []string {
 	var paths []string
 	for _, match := range ompMentionPattern.FindAllStringSubmatchIndex(text, -1) {
@@ -58,55 +59,62 @@ func TestEscapeFileMentionsMarksEachMentionBoundaryAt(t *testing.T) {
 	for _, test := range []struct{ text, want string }{
 		{"", ""},
 		{"no mention here", "no mention here"},
-		{"@notes.txt", "@\u2060notes.txt"},
-		{"read @notes.txt", "read @\u2060notes.txt"},
-		{"(@a) [@b] {@c} <@d> \"@e\" '@f' `@g`", "(@\u2060a) [@\u2060b] {@\u2060c} <@\u2060d> \"@\u2060e\" '@\u2060f' `@\u2060g`"},
-		{"\t@a\n@b\r@c\v@d\f@e", "\t@\u2060a\n@\u2060b\r@\u2060c\v@\u2060d\f@\u2060e"},
+		{"@notes.txt", "\u2060@notes.txt"},
+		{"read @notes.txt", "read \u2060@notes.txt"},
+		{"(@a) [@b] {@c} <@d> \"@e\" '@f' `@g`", "(\u2060@a) [\u2060@b] {\u2060@c} <\u2060@d> \"\u2060@e\" '\u2060@f' `\u2060@g`"},
+		{"\t@a\n@b\r@c\v@d\f@e", "\t\u2060@a\n\u2060@b\r\u2060@c\v\u2060@d\f\u2060@e"},
 		{"\u00a0@a\u1680@b\u2000@c\u200a@d\u2028@e\u2029@f\u202f@g\u205f@h\u3000@i\ufeff@j",
-			"\u00a0@\u2060a\u1680@\u2060b\u2000@\u2060c\u200a@\u2060d\u2028@\u2060e\u2029@\u2060f\u202f@\u2060g\u205f@\u2060h\u3000@\u2060i\ufeff@\u2060j"},
-		{"@\"two words.txt\"", "@\u2060\"two words.txt\""},
-		// The second @ is inside OMP's quoted mention; once the first is
-		// escaped OMP no longer reads the quotes, so it is escaped too.
-		{"@\"a @b\"", "@\u2060\"a @\u2060b\""},
-		{"x@y.z user@host a@@b @@c", "x@y.z user@host a@@b @\u2060@c"},
+			"\u00a0\u2060@a\u1680\u2060@b\u2000\u2060@c\u200a\u2060@d\u2028\u2060@e\u2029\u2060@f\u202f\u2060@g\u205f\u2060@h\u3000\u2060@i\ufeff\u2060@j"},
+		{"@\"two words.txt\"", "\u2060@\"two words.txt\""},
+		// Both @ are at a mention boundary, so both are escaped.
+		{"@\"a @b\"", "\u2060@\"a \u2060@b\""},
+		{"x@y.z user@host a@@b @@c", "x@y.z user@host a@@b \u2060@@c"},
 		// Not JavaScript whitespace, so no mention boundary.
 		{"\u0085@a \u2060@b \u00e9@c", "\u0085@a \u2060@b \u00e9@c"},
+		// The read of 918fab1: with the joiner after the @, OMP still extracted
+		// these, and path resolution cancelled the joiner's segment.
+		{"read @missing/../notes.txt", "read \u2060@missing/../notes.txt"},
+		{"see @missing/../notes.txt.", "see \u2060@missing/../notes.txt."},
+		{"(@missing/../../outside.txt)", "(\u2060@missing/../../outside.txt)"},
 	} {
 		got := escapeFileMentions(test.text)
 		if got != test.want {
 			t.Errorf("escapeFileMentions(%q) = %q, want %q", test.text, got, test.want)
 		}
-		for _, path := range ompMentionPaths(got) {
-			if !strings.HasPrefix(path, wordJoiner) {
-				t.Errorf("escapeFileMentions(%q) leaves OMP mention %q", test.text, path)
-			}
+		if paths := ompMentionPaths(got); len(paths) != 0 {
+			t.Errorf("escapeFileMentions(%q) leaves OMP mentions %q", test.text, paths)
+		}
+	}
+	// OMP's rule finds each reproduction's mention before the escape.
+	for _, text := range []string{"read @missing/../notes.txt", "see @missing/../notes.txt.", "(@missing/../../outside.txt)"} {
+		if paths := ompMentionPaths(text); len(paths) != 1 {
+			t.Errorf("OMP mentions in %q = %q", text, paths)
 		}
 	}
 }
 
-// A peer message that starts a lane Run reaches OMP with every file mention
-// escaped and its other text unchanged; the owner's own Run input is sent as
-// given.
+// A peer message that starts a lane Run reaches OMP with no file mention left
+// and its other text unchanged; the owner's own Run input is sent as given.
 func TestRunInputEscapesOnlyThePeerSeed(t *testing.T) {
 	delivery := kit.DeliveryRequest{
-		MessageID: "mention", Body: "read @notes.txt, then @\"plan b.md\" and mail x@y.z",
+		MessageID: "mention", Body: "read @notes.txt, then @\"plan b.md\", @missing/../notes.txt and mail x@y.z",
 		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
 	}
 	rendered, err := host.RenderNativeMessage(delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ompMentionPaths(rendered); !slices.Equal(got, []string{"notes.txt,", "plan b.md"}) {
+	if got := ompMentionPaths(rendered); !slices.Equal(got, []string{"notes.txt,", "plan b.md", "missing/../notes.txt"}) {
 		t.Fatalf("OMP mentions in the rendered message = %q", got)
 	}
 	seed, err := runInput(kit.RunInput{Delivery: &delivery})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(seed, wordJoiner) != 2 || strings.ReplaceAll(seed, wordJoiner, "") != rendered {
+	if strings.Count(seed, wordJoiner) != 3 || strings.ReplaceAll(seed, wordJoiner, "") != rendered {
 		t.Fatalf("seed = %q, rendered %q", seed, rendered)
 	}
-	if got := ompMentionPaths(seed); len(got) != 2 || !strings.HasPrefix(got[0], wordJoiner) || !strings.HasPrefix(got[1], wordJoiner) {
+	if got := ompMentionPaths(seed); len(got) != 0 {
 		t.Fatalf("OMP mentions in the seed = %q", got)
 	}
 
@@ -180,8 +188,8 @@ func TestOMPWorkerDeliverySeedReachesOMPWithItsMentionsEscaped(t *testing.T) {
 	write(protocol.RequestBytes(2, "message.deliver", delivery))
 	command := fixture.peer.read(t)
 	message := nativeRPCField(t, command, "message")
-	if nativeRPCField(t, command, "type") != "prompt" || !strings.Contains(message, "read @\u2060notes.txt") ||
-		strings.Contains(message, "@notes.txt") {
+	if nativeRPCField(t, command, "type") != "prompt" || !strings.Contains(message, "read \u2060@notes.txt") ||
+		strings.Contains(message, "read @notes.txt") {
 		t.Fatalf("seed prompt = %q", message)
 	}
 	// End the Run through OMP's refusal, whose frames are known.

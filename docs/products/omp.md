@@ -40,10 +40,14 @@ that are neither whitespace nor `@`.
 
 An idle lane starts a Run for a peer message by sending the rendered message
 as its RPC `prompt`, so OMP would read files that the peer names. Owner
-decision (2026-10-27): the lane inserts U+2060 WORD JOINER right after each
-`@` at a mention boundary in that message. The model sees the same visible
-text, and any mention OMP extracts there begins with U+2060, so it names no
-ordinary file. Only that path changes. The owner's Run input is sent as given;
+decision (2026-10-27): the lane inserts U+2060 WORD JOINER right before each
+`@` at a mention boundary in that message. U+2060 is neither whitespace nor
+one of those characters, so the `@` starts no mention: OMP extracts none there
+and resolves no path. The model sees the same visible text. A joiner right
+after the `@`, the first version, did not suffice: OMP still extracted the
+mention, and path resolution cancels the joiner-carrying first segment against
+a following `..`, so `@x/../notes.txt` still read `notes.txt`. Only that path
+changes. The owner's Run input is sent as given;
 a steered message (OMP's steering queue) and the interactive primary's
 deliveries (the steering queue or OMP's agent-initiated prompt) do not pass
 through `#promptWithMessage` and are unchanged.
