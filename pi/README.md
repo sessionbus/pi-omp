@@ -67,7 +67,8 @@ steered peer message unread: when Pi restored its queue to the editor
 message for a later task because the task could not continue. Before writing,
 the extension clears Pi's queues as Escape does, so text you had queued
 returns to the editor. Quitting Pi while it is idle also writes such a message
-to history before the session ends.
+to history before the session ends, then the peer messages still waiting for
+Pi's next task, in arrival order; no new task starts while Pi quits.
 
 Not covered: quitting Pi while a task runs.
 

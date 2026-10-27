@@ -21,7 +21,7 @@ const actions = Object.freeze([
 const topologyMode = Object.freeze({ lane: "rpc", interactive: "tui" });
 const drainWitnesses = Object.freeze([
   "before_agent_start", "agent_settled", "session_before_tree_cancelled",
-  "session_compact", "session_compact_failed", "session_tree",
+  "session_compact", "session_compact_failed", "session_tree", "quit",
 ]);
 const sessionEndReasons = Object.freeze(["quit", "reload", "new", "resume", "fork"]);
 
@@ -180,6 +180,8 @@ export function createPiExtension({
   history = historyNative,
 } = {}) {
   const lifetime = new AbortController();
+  // Set once a quit begins: no settled drain may start a run while Pi quits.
+  let quitting = false;
   let bridgePromise;
   let bridge;
   let bridgeClosing = false;
@@ -231,6 +233,13 @@ export function createPiExtension({
           throw new BridgeCallError("stale_session", "Pi native session identity does not match");
         }
         throwIfAborted(signal);
+        // While Pi quits a delivery starts no turn: once Pi is idle it is
+        // written to history, as the quit drain does; before that it waits.
+        if (quitting) {
+          if (!record.ctx.isIdle()) return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "busy" };
+          history(record.pi, record.ctx, params);
+          return { session_id: record.session_id, message_id: params.message_id, accepted: true };
+        }
         if (record.branchSummaryBusy) {
           if (record.ctx.isIdle()) record.branchSummaryBusy = false;
           else return {
@@ -371,6 +380,9 @@ export function createPiExtension({
   async function drain(ctx, witness) {
     if (launch.topology !== "interactive") return;
     if (!drainWitnesses.includes(witness)) throw new Error("Pi native drain witness is invalid");
+    // One gate for every drain, scheduled or crossing: while Pi quits only
+    // the quit drain runs, and it writes history instead of starting a turn.
+    if (quitting !== (witness === "quit")) return;
     const { record } = live(ctx);
     const result = await hostCall(ctx, "owner.drain", { session_id: record.session_id, witness });
     exactKeys(result, ["session_id", "drained"], "owner.drain response");
@@ -656,7 +668,15 @@ export function createPiExtension({
       try {
         if (!sessionEndReasons.includes(event.reason)) throw new Error("Pi native shutdown reason is invalid");
         live(ctx, pi);
-        if (event.reason === "quit" && launch.topology === "interactive" && ctx.isIdle()) keepUnreadAtQuit(record, ctx);
+        if (event.reason === "quit" && launch.topology === "interactive") {
+          quitting = true;
+          if (ctx.isIdle()) {
+            keepUnreadAtQuit(record, ctx);
+            // Then the owner's queued deliveries, in arrival order, before
+            // session_end discards them.
+            await drain(ctx, "quit");
+          }
+        }
         const result = await hostCall(ctx, "session_end", {
           topology: launch.topology,
           session_id: record.session_id,

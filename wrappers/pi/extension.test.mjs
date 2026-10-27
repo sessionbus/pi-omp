@@ -525,6 +525,96 @@ test("interactive settle rescue runs before its own drain and leaves the drain's
   assert.equal(native.shutdown(), 0);
 });
 
+// Quitting while Pi is idle ends the session before Pi's next task: the
+// steers it never read are written to history first, then the deliveries
+// still queued for that task, in arrival order, each once and with no run.
+// This does not depend on aborting a busy task.
+test("interactive idle quit writes never-started steers, then queued deliveries in order, with no run", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  await owner.native("native.steer", { session_id: "interactive-1", message_id: "held", body: "peer", run: null });
+  queue.push(
+    { session_id: "interactive-1", message_id: "waiting-1", body: "first queued" },
+    { session_id: "interactive-1", message_id: "waiting-2", body: "second queued" },
+  );
+  native.setIdle(true);
+  await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  assert.deepEqual(sends.slice(1).map((send) => [send.id, send.options]),
+    [["held", undefined], ["waiting-1", undefined], ["waiting-2", undefined]]);
+  assert.equal(queue.length, 0);
+  assert.equal(native.aborted(), 0);
+});
+
+// A drain a compaction scheduled before quit starts no run while quit waits
+// for session_end; the quit drain alone writes the queued delivery, once.
+test("interactive idle quit gates a scheduled drain while session_end is pending", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued" });
+  await native.emit("session_compact", { type: "session_compact", reason: "threshold" });
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends, [{ id: "waiting", options: undefined }]);
+  assert.equal(queue.length, 0);
+});
+
+// A delivery crossing the quit while Pi is still busy is answered busy and
+// starts nothing; with Pi idle it is written to history and accepted.
+test("interactive delivery crossing a quit is busy while Pi is busy and history once idle", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const owner = fakeConnection({ topology: "interactive" });
+  let releaseEnd;
+  const ended = new Promise((resolve) => { releaseEnd = resolve; });
+  const call = owner.bridge.call.bind(owner.bridge);
+  owner.bridge.call = async (method, ...args) => {
+    if (method === "session_end") await ended;
+    return call(method, ...args);
+  };
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  native.setIdle(false);
+  const quitting = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  try {
+    assert.deepEqual(await owner.native("native.append", { session_id: "interactive-1", message_id: "busy", body: "crossing" }),
+      { session_id: "interactive-1", message_id: "busy", accepted: false, reason: "busy" });
+    native.setIdle(true);
+    assert.deepEqual(await owner.native("native.append", { session_id: "interactive-1", message_id: "idle", body: "crossing" }),
+      { session_id: "interactive-1", message_id: "idle", accepted: true });
+  } finally {
+    releaseEnd();
+    await quitting;
+  }
+  assert.deepEqual(sends, [{ id: "idle", options: undefined }]);
+  assert.equal(native.aborted(), 0);
+});
+
 // Quitting while Pi is idle with a steer that never started, before a settle
 // rescued it, ends the session before any later run. Each such steer is
 // written to history once, with no turn and no abort; one that started stays

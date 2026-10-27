@@ -32,9 +32,12 @@ untouched (`agent-session.js:683-706, 1866-1867`). A message held for a later
 task therefore reaches history at once instead of at that task. Quitting
 while Pi is idle writes any such message too, since Pi awaits
 `session_shutdown` before it disposes the session
-(`agent-session-runtime.js:296-303`). A steered message that started stays
-as it is: attempted, consumption unknown. Quitting while a task runs is not
-covered.
+(`agent-session-runtime.js:296-303`), and then the deliveries still queued
+for Pi's next task, in arrival order, each once with no turn. While Pi quits
+every drain is gated, and a delivery crossing the quit is written to history
+once Pi is idle (answered busy before that), so no task starts. A steered
+message that started stays as it is: attempted, consumption unknown. Quitting
+while a task runs is not covered.
 
 ## A lane prompt refused before it reaches Pi (2026-10-28)
 
