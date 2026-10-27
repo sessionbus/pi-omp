@@ -590,6 +590,49 @@ test("interactive aborted settle leaves one history copy and no queued copy of a
   assert.equal(native.shutdown(), 0);
 });
 
+// Pi can settle without an abort while our steer is still in agent-core's
+// queue (Pi 1.4.0 _runBeforeSettleBoundary, when the context cannot
+// continue). The rescue's ctx.abort() runs restoreQueuedMessagesToEditor
+// ({abort:true}), which clears agent-core's steering queue whether or not a
+// run is active (Pi 1.4.0 interactive-mode.js:1732-1734, 3820-3822;
+// agent-session.js:1944-1949; agent-core agent.js:195-206). The message is
+// then in history once, and a later run finds no queued copy to deliver.
+test("interactive no-abort settle with a still-queued steer writes it once and leaves no queued copy", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const history = [];
+  native.pi.sendMessage = (message, options) => {
+    if (options?.deliverAs === "steer") queue.push(message.details.message_id);
+    else if (options === undefined) history.push(message.details.message_id);
+    else assert.fail(`unexpected send options ${JSON.stringify(options)}`);
+  };
+  native.onAbort(() => { queue.length = 0; });
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  assert.equal((await owner.native("native.steer", {
+    session_id: "interactive-1", message_id: "held", body: "body held", run: null,
+  })).accepted, true);
+  assert.deepEqual(queue, ["held"]);
+
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.deepEqual(queue, []);
+  assert.deepEqual(history, ["held"]);
+  assert.equal(native.aborted(), 1);
+
+  // A later run drains Pi's queue: nothing of "held" is left to deliver, and
+  // its settle writes nothing more.
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "later" });
+  assert.deepEqual(queue, []);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: false });
+  assert.deepEqual(history, ["held"]);
+  assert.equal(native.aborted(), 1);
+  assert.equal(native.shutdown(), 0);
+});
+
 // A lane's rpc abort leaves Pi's queue in place and the next run drains it
 // (Pi 1.2.0 rpc-mode.js:327-329), so a lane's aborted settle neither clears
 // nor writes anything.
