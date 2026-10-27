@@ -675,6 +675,13 @@ func (registry *OwnerRegistry) applyReportLocked(state *ownerRegistryState, repo
 	} else if !slices.Equal(request.MessageIDs, batch.messageIDs) {
 		return registry.protocolFailureLocked("OMP delivery observation changed batch identity")
 	}
+	if phase == deliveryPhaseAbandoned {
+		// The extension ended a claimed batch whose native events no longer
+		// matched what it sent. The attempt is retired with its consumption
+		// unknown: its receipt stands and it is not replayed.
+		registry.retireDeliveryBatchLocked(state, request.BatchToken, batch)
+		return nil
+	}
 	if phase != batch.phase+1 {
 		return registry.protocolFailureLocked("OMP delivery observation phase is out of order")
 	}
@@ -682,19 +689,25 @@ func (registry *OwnerRegistry) applyReportLocked(state *ownerRegistryState, repo
 	// were read in order. report_sequence reconstructs that per-factory order.
 	batch.phase = phase
 	if phase == 4 {
-		for _, messageID := range batch.messageIDs {
-			registry.releaseStateLocked(state, len(messageID))
-		}
-		delete(state.batches, request.BatchToken)
-		state.completed = append(state.completed, request.BatchToken)
-		state.completedSet[request.BatchToken] = struct{}{}
-		if len(state.completed) > maxOwnerTrackedItems {
-			registry.releaseStateLocked(state, len(state.completed[0]))
-			delete(state.completedSet, state.completed[0])
-			state.completed = state.completed[1:]
-		}
+		registry.retireDeliveryBatchLocked(state, request.BatchToken, batch)
 	}
 	return nil
+}
+
+// retireDeliveryBatchLocked stops tracking a completed or abandoned batch.
+// Its token stays recorded, within the bound, so it cannot be claimed again.
+func (registry *OwnerRegistry) retireDeliveryBatchLocked(state *ownerRegistryState, token string, batch *ownerDeliveryBatch) {
+	for _, messageID := range batch.messageIDs {
+		registry.releaseStateLocked(state, len(messageID))
+	}
+	delete(state.batches, token)
+	state.completed = append(state.completed, token)
+	state.completedSet[token] = struct{}{}
+	if len(state.completed) > maxOwnerTrackedItems {
+		registry.releaseStateLocked(state, len(state.completed[0]))
+		delete(state.completedSet, state.completed[0])
+		state.completed = state.completed[1:]
+	}
 }
 
 func (registry *OwnerRegistry) admit(ctx context.Context, scope, mode string, description ownerDescribeResult) error {
@@ -1645,7 +1658,13 @@ func deliveryPhaseIndex(phase string) int {
 		return 3
 	case "context":
 		return 4
+	case "abandoned":
+		return deliveryPhaseAbandoned
 	default:
 		return 0
 	}
 }
+
+// deliveryPhaseAbandoned ends a claimed batch from any phase; it is outside
+// the claimed, message_start, message_end, context sequence.
+const deliveryPhaseAbandoned = 5

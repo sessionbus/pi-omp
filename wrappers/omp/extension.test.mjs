@@ -605,7 +605,29 @@ test("interactive delivery accepts OMP's context before its own message events",
   }
 });
 
-test("interactive context before its message events still rejects a changed or repeated delivery", async () => {
+// deliverNext stages one delivery and walks it through OMP's normal order,
+// proving the session still delivers after an abandoned attempt.
+async function deliverNext(native, owner, token, sessionID, id) {
+  assert.equal((await owner.native("native.stage", {
+    owner_token: token, session_id: sessionID, message_id: id, body: `${id} body`,
+  })).queued, true);
+  const message = nativeCustom(native.scheduled().at(-1));
+  await native.emit("context", { type: "context", messages: [message] }, native.context());
+  await native.emit("message_start", { type: "message_start", message }, native.context());
+  await native.emit("message_end", { type: "message_end", message }, native.context());
+  await owner.waitFor((calls) => calls.some((call) =>
+    call.method === "delivery.observe" && call.params.phase === "context" && call.params.message_ids.includes(id)));
+}
+
+function deliveryPhases(owner) {
+  return owner.calls.filter((call) => call.method === "delivery.observe")
+    .map((call) => `${call.params.message_ids.join(",")}:${call.params.phase}`);
+}
+
+// A changed or repeated copy of a claimed delivery ends only that attempt:
+// its receipt stands, it is not sent again, and the session keeps
+// delivering. Before this change the session was aborted and shut down.
+test("interactive context that does not preserve a delivery abandons only that delivery", async () => {
   for (const [name, contextOf] of [
     ["changed copy", (message) => [{ ...message, content: "changed body" }]],
     ["two copies", (message) => [message, { ...message }]],
@@ -621,9 +643,79 @@ test("interactive context before its message events still rejects a changed or r
     })).queued, true);
     const message = nativeCustom(native.scheduled()[0]);
     await native.emit("context", { type: "context", messages: contextOf(message) }, native.context());
-    assert.equal(native.aborts(), 1, name);
-    assert.equal(native.shutdowns(), 1, name);
+    assert.equal(native.aborts(), 0, name);
+    assert.equal(native.shutdowns(), 0, name);
+    await owner.waitFor((calls) => calls.some((call) => call.method === "delivery.observe" && call.params.phase === "abandoned"));
+    // A later event for the abandoned attempt is not tracked again.
+    await native.emit("message_start", { type: "message_start", message }, native.context());
+    await deliverNext(native, owner, token, "interactive-main", "second");
+    assert.equal(native.scheduled().length, 2, name);
+    assert.deepEqual(deliveryPhases(owner), [
+      "first:claimed", "first:abandoned",
+      "second:claimed", "second:message_start", "second:message_end", "second:context",
+    ], name);
+    assert.equal(native.aborts(), 0, name);
+    assert.equal(native.shutdowns(), 0, name);
   }
+});
+
+// OMP hands a message's start and end to extensions on concurrent paths; an
+// extension bound after startup runs after OMP's own message_start handler
+// and can see message_end first (agent.ts 18.13.2:2233-2245; runner.ts
+// :1111-1142, 1740-1750). The delivery completes in its usual order. Before
+// this change the session was aborted and shut down.
+test("interactive delivery accepts OMP's message_end before its message_start", async () => {
+  for (const contextFirst of [true, false]) {
+    const owner = new FakeOwner();
+    const native = nativeFixture("interactive-main", "tui");
+    const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+    await start(extension, native, owner);
+    const token = owner.calls[0].params.owner_token;
+    assert.equal((await owner.native("native.stage", {
+      owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+    })).queued, true);
+    const message = nativeCustom(native.scheduled()[0]);
+    if (contextFirst) await native.emit("context", { type: "context", messages: [message] }, native.context());
+    await native.emit("message_end", { type: "message_end", message }, native.context());
+    await native.emit("message_start", { type: "message_start", message }, native.context());
+    if (!contextFirst) await native.emit("context", { type: "context", messages: [message] }, native.context());
+    assert.equal(native.aborts(), 0, `contextFirst=${contextFirst}`);
+    assert.equal(native.shutdowns(), 0, `contextFirst=${contextFirst}`);
+    await owner.waitFor((calls) => calls.filter((call) => call.method === "delivery.observe").length === 4);
+    assert.deepEqual(deliveryPhases(owner), ["first:claimed", "first:message_start", "first:message_end", "first:context"]);
+    await deliverNext(native, owner, token, "interactive-main", "second");
+  }
+});
+
+// A held message_end whose message_start never comes ends with its run: the
+// attempt is abandoned, never kept waiting, and the session goes on.
+test("interactive held message_end without its message_start is abandoned at the run's end", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture("interactive-main", "tui");
+  const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  assert.equal((await owner.native("native.stage", {
+    owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+  })).queued, true);
+  const message = nativeCustom(native.scheduled()[0]);
+  await native.emit("context", { type: "context", messages: [message] }, native.context());
+  await native.emit("message_end", { type: "message_end", message }, native.context());
+  await flush();
+  assert.equal(native.aborts(), 0);
+  assert.deepEqual(deliveryPhases(owner), ["first:claimed"]);
+  await native.emit("agent_end", { type: "agent_end", messages: [] }, native.context());
+  assert.equal(native.aborts(), 0);
+  await owner.waitFor((calls) => calls.some((call) => call.method === "delivery.observe" && call.params.phase === "abandoned"));
+  // The run that ended took no part of a claimed batch's ordinary order.
+  await native.emit("message_start", { type: "message_start", message }, native.context());
+  await deliverNext(native, owner, token, "interactive-main", "second");
+  assert.deepEqual(deliveryPhases(owner), [
+    "first:claimed", "first:abandoned",
+    "second:claimed", "second:message_start", "second:message_end", "second:context",
+  ]);
+  assert.equal(native.aborts(), 0);
+  assert.equal(native.shutdowns(), 0);
 });
 
 test("interactive scheduling failure retires the owner and releases the claimed batch", async () => {
@@ -674,7 +766,10 @@ test("interactive batch reservation failure retires without later native submiss
   assert.deepEqual(extension.stats(), { bindings: 0, reports: 0, retainedBytes: 0 });
 });
 
-test("interactive claimed batch retires on a new durable reset boundary", async () => {
+// A user's /clear while a delivery is pending abandons that attempt; the
+// session stays and keeps delivering. Before this change the session was
+// aborted and shut down.
+test("interactive claimed batch is abandoned on a new durable reset boundary", async () => {
   const owner = new FakeOwner();
   const native = nativeFixture("interactive-main", "tui");
   native.addResetBoundary("old-reset");
@@ -692,11 +787,16 @@ test("interactive claimed batch retires on a new durable reset boundary", async 
   assert.equal(native.aborts(), 0);
   native.addResetBoundary("new-reset");
   await native.emit("context", { type: "context", messages: [] }, native.context());
-  assert.equal(native.aborts(), 1);
-  assert.equal(native.shutdowns(), 1);
-  await assert.rejects(owner.native("native.stage", {
-    owner_token: token, session_id: "interactive-main", message_id: "after-reset", body: "must not queue",
-  }), /deliverable factory/);
+  assert.equal(native.aborts(), 0);
+  assert.equal(native.shutdowns(), 0);
+  await owner.waitFor((calls) => calls.some((call) => call.method === "delivery.observe" && call.params.phase === "abandoned"));
+  await deliverNext(native, owner, token, "interactive-main", "after-reset");
+  assert.deepEqual(deliveryPhases(owner), [
+    "message-one:claimed", "message-one:abandoned",
+    "after-reset:claimed", "after-reset:message_start", "after-reset:message_end", "after-reset:context",
+  ]);
+  assert.equal(native.aborts(), 0);
+  assert.equal(native.shutdowns(), 0);
 });
 
 test("interactive FIFO enforces and releases its process retained-payload bound", async () => {
@@ -837,13 +937,13 @@ test("failed Task child reports its end without retiring the healthy primary", a
   const heldReport = owner.hold("delivery.observe");
   const injected = await child.emit("before_agent_start", { type: "before_agent_start", prompt: "child prompt" }, child.context());
   await heldReport.entered;
-  const altered = nativeCustom({
-    ...injected.message,
-    content: "changed body",
-  });
-  await child.emit("message_start", { type: "message_start", message: altered }, child.context());
+  // A native identity change without a lifecycle event still fails the
+  // child; a changed delivery copy now ends only that delivery.
+  child.setSessionID("child-replaced");
+  await child.emit("message_start", { type: "message_start", message: injected.message }, child.context());
   assert.equal(child.aborts(), 1);
   assert.equal(child.shutdowns(), 0);
+  child.setSessionID("child-session");
 
   const ending = child.emit("session_shutdown", { type: "session_shutdown" }, child.context());
   await flush();
@@ -851,7 +951,7 @@ test("failed Task child reports its end without retiring the healthy primary", a
   heldReport.release();
   await assert.rejects(
     ending,
-    /changed Sessionbus delivery identity/,
+    /session identity changed without a lifecycle event/,
   );
   const end = owner.calls.find((call) => call.method === "session_end" && call.params.scope === "child");
   assert.equal(end.params.owner_token, childReady.owner_token);
@@ -962,15 +1062,14 @@ test("actual Unix bridge reports a failed Task child end while the primary remai
     prompt: "child prompt",
   }, child.context());
   await deliveryEntered.promise;
-  await child.emit("message_start", {
-    type: "message_start",
-    message: nativeCustom({ ...injected.message, content: "changed body" }),
-  }, child.context());
+  child.setSessionID("unix-child-replaced");
+  await child.emit("message_start", { type: "message_start", message: injected.message }, child.context());
+  child.setSessionID("unix-child");
   const ending = child.emit("session_shutdown", { type: "session_shutdown" }, child.context());
   const ended = await childEnd.promise;
   assert.equal(ended.owner_token, "token2-child-2");
   releaseDelivery.resolve();
-  await assert.rejects(ending, /changed Sessionbus delivery identity/);
+  await assert.rejects(ending, /session identity changed without a lifecycle event/);
 
   const primaryResult = await primary.pi.tool.execute(
     "unix-primary-after-child",
@@ -1091,4 +1190,30 @@ test("native tool arguments match the shared closed MCP field declaration", () =
   assert.deepEqual(native.pi.tool.parameters.properties.arguments, declaration.inputSchema.properties.arguments);
   assert.equal(native.pi.tool.parameters.properties.arguments.additionalProperties, false);
   assert.equal(Object.hasOwn(native.pi.tool.parameters.properties.arguments.properties, "summary"), false);
+});
+
+// A /clear after a held message_end abandons that batch once; the run's end
+// then finds nothing held and reports nothing more.
+test("interactive held message_end and a reset at the run's end abandon the batch once", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture("interactive-main", "tui");
+  const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  assert.equal((await owner.native("native.stage", {
+    owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+  })).queued, true);
+  const message = nativeCustom(native.scheduled()[0]);
+  await native.emit("message_end", { type: "message_end", message }, native.context());
+  native.addResetBoundary("cleared");
+  await native.emit("agent_end", { type: "agent_end", messages: [] }, native.context());
+  assert.equal(native.aborts(), 0);
+  assert.equal(native.shutdowns(), 0);
+  await owner.waitFor((calls) => calls.some((call) => call.method === "delivery.observe" && call.params.phase === "abandoned"));
+  await flush();
+  await deliverNext(native, owner, token, "interactive-main", "second");
+  assert.deepEqual(deliveryPhases(owner), [
+    "first:claimed", "first:abandoned",
+    "second:claimed", "second:message_start", "second:message_end", "second:context",
+  ]);
 });

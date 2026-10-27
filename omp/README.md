@@ -22,7 +22,10 @@ when it arrives. If OMP is busy at that moment, the running task reads it at
 its next boundary and the receipt is `injected`; if OMP is idle, it starts a
 turn with it and the receipt is `written`. Both are decided when the message
 is handed over, and OMP confirms neither. A native Task child's receipt stays
-`queued_for_next_turn`.
+`queued_for_next_turn`. If OMP's events for a handed-over message no longer
+match what was sent, or you clear the session (`/clear`) while it is pending,
+only that message's attempt ends: its receipt stays, it is not sent again,
+and the session stays connected for later messages.
 
 Pressing Escape while OMP shows its working animation returns a steered peer
 message that OMP had not read yet to your editor, as if you had typed it. It
@@ -49,8 +52,9 @@ interrupt, is answered by OMP's own continuation after the Run: it reaches the
 model and its answer is in the native history, but not in the Run's result.
 Without an active Run the lane is not running and the daemon starts a later
 Run. If OMP fails the lane's prompt before starting work on it, for example
-with no model or no API key, the Run is `unavailable` with OMP's message and
-the lane stays.
+with no model or no API key, or ends it before any run, for example on a
+usage-limit denial, the Run is `unavailable` with OMP's message when it gives
+one, and the lane stays.
 
 OMP reads the files that each `@path` in a prompt names, with no option to
 turn that off. In a peer message that starts a lane Run, the lane therefore

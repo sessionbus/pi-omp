@@ -2464,3 +2464,82 @@ func TestOwnerRegistryTaskChildKeepsItsQueuedReceipt(t *testing.T) {
 		})
 	}
 }
+
+// The extension abandons a claimed batch whose native events no longer match
+// what it sent. The owner stops tracking it, keeps the receipt it gave, and
+// keeps serving later deliveries; an abandon before any claim is still a
+// protocol failure.
+func TestOwnerRegistryRetiresAnAbandonedDeliveryBatchAndStaysHealthy(t *testing.T) {
+	for _, abandonBeforeClaim := range []bool{false, true} {
+		listener := ownerBusListener(t)
+		directory := t.TempDir()
+		fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+			"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+		}}
+		registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+			Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+			Groups: []string{"interactive"},
+		}, fixture)
+		_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+			Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+			Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one",
+		})
+		deliver := func(id int64, messageID string) {
+			t.Helper()
+			body, err := protocol.RequestBytes(id, "message.deliver", kit.DeliveryRequest{
+				MessageID: messageID,
+				From:      kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}},
+				Body:      "hello " + messageID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownerWrite(t, public, body)
+			var receipt kit.DeliveryReceipt
+			if frame := ownerFrame(t, scanner); frame.Error != nil ||
+				protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "written" {
+				t.Fatalf("delivery %s receipt = %+v, %+v", messageID, frame, receipt)
+			}
+		}
+		sequence := uint64(0)
+		observe := func(batch, phase, messageID string) error {
+			sequence++
+			return native.Call(ownerTestContext(t), "delivery.observe", ownerDeliveryObserveRequest{
+				OwnerToken: "owner-one", SessionID: "session-one", BatchToken: batch,
+				ReportSequence: sequence, Phase: phase, MessageIDs: []string{messageID},
+			}, nil)
+		}
+		deliver(40, "first")
+		if abandonBeforeClaim {
+			if err := observe("batch-one", "abandoned", "first"); err == nil {
+				t.Fatal("an abandon before its claim was accepted")
+			}
+			select {
+			case <-registry.Done():
+			case <-ownerTestContext(t).Done():
+				t.Fatal("an abandon before its claim did not fail the registry")
+			}
+			continue
+		}
+		for _, phase := range []string{"claimed", "message_start", "abandoned"} {
+			if err := observe("batch-one", phase, "first"); err != nil {
+				t.Fatalf("batch-one %s = %v", phase, err)
+			}
+		}
+		deliver(41, "second")
+		for _, phase := range []string{"claimed", "message_start", "message_end", "context"} {
+			if err := observe("batch-two", phase, "second"); err != nil {
+				t.Fatalf("batch-two %s after an abandon = %v", phase, err)
+			}
+		}
+		select {
+		case <-registry.Done():
+			t.Fatal("an abandoned batch retired the registry")
+		default:
+		}
+		// The abandoned batch's token is retired like a completed one.
+		if err := observe("batch-one", "claimed", "first"); err == nil {
+			t.Fatal("an abandoned delivery batch was claimed again")
+		}
+	}
+}

@@ -6,6 +6,53 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## Interactive delivery when OMP binds the extension late (2026-10-27)
+
+OMP 18.13.1 and later can bind a startup-safe extension, ours included, after
+the first frame of an interactive launch (`startup-deferral.ts`; `main.ts`
+18.13.2:2455-2464, 2683). `ExtensionRunner.addExtensions` appends it after
+every extension already bound and replays `session_start` to it
+(`runner.ts:1111-1142`). OMP hands each agent event to listeners without
+awaiting them, and the session dispatches every event on its own path
+(`agent-core agent.ts` 18.13.2:2233-2245; `agent-session.ts:3895-3900`).
+Within one event the runner awaits each extension's handlers in order
+(`runner.ts:1740-1750`). A late-bound extension therefore runs after OMP's own
+`message_start` handler (the warp event bridge, `warp-events.ts:182`), which
+has no `message_end` handler, and can see a message's `message_end` before its
+`message_start`. Bound at startup, ours runs first and sees them in order. A
+second fresh interactive launch on UMKA reproduced this once: OMP rendered
+"OMP native delivery message event is out of order" and the session ended.
+
+Decision (2026-10-27): a state OMP can legitimately be in must not end the
+user's session. A `message_end` that arrives before its `message_start` is
+held, and both are reported to the owner in their order. A held end whose
+start never comes is abandoned at that run's `agent_end`. Any other delivery
+event that no longer matches the claimed batch (a changed or repeated copy,
+an event out of order, a context that does not hold exactly one copy) and a
+new `reset_boundary` (`/clear`) while a batch is pending abandon only that
+batch. The owner bridge gains one phase, `abandoned`, which retires the batch
+like completion: the attempt's consumption is unknown, its `written` or
+`injected` receipt stands, it is never sent again, and the session, the
+peer's presence and later deliveries stay. This supersedes the reset-boundary
+retirement described under the mandatory-wake source boundary below. The
+context-before-message order of 2026-10-19 still holds on 18.13.x.
+
+## A lane prompt that OMP ends before its run (2026-10-27)
+
+OMP can also admit a lane prompt and end it before any run while still
+reporting it as invoked: on a usage-preflight denial `#promptWithMessage`
+returns `false`, its caller still returns `true`, and RPC writes
+`prompt_result` with `agentInvoked:true`, `status:"aborted"` and no
+`agent_start` (`agent-session.ts` 18.12.2:8203, 7829-7838;
+`rpc-prompt-results.ts:89-101`). 18.13.x adds its cost cap
+(`session.maxCost`, `--max-cost`) to the same report as `status:"error"`
+with code `cost_cap`. The lane treated this as agent work without a run and
+ended. Decision (2026-10-27): on exactly that report, with no run start,
+yield or assistant message, only the Run fails, with OMP's text when it gives
+one; the lane stays and nothing is replayed. The same report after a run
+start, or an agent-invoked `completed` report without a run, still ends the
+lane.
+
 ## A lane prompt that fails before OMP's run (2026-10-27)
 
 OMP admits a prompt and answers `success`, and can then still fail it before
