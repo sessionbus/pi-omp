@@ -75,10 +75,12 @@ Not covered: quitting Pi while a task runs.
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:
 - `--no-tools` without an overriding `--tools` list that keeps `sessionbus`;
-- an explicit `--tools` list of names that omits it;
+- an explicit `--tools` list of names and `*` patterns none of which matches
+  it;
 - a `--tools` list of Pi's `+name`/`-name` modifiers that removes it last, or
   that does not add `+sessionbus` after `--no-tools`;
-- `--exclude-tools` containing it.
+- an `--exclude-tools` name or `*` pattern that matches it, such as
+  `session*`.
 
 Modifier lists that keep the tool, such as `--tools +read` or `-bash`, pass
 through unchanged.

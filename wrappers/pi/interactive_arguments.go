@@ -4,6 +4,7 @@ package pi
 
 import (
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -119,7 +120,7 @@ func validateManagedToolArguments(arguments []string) error {
 		// unchanged; only a list that leaves sessionbus out is refused.
 		switch modifiers := toolModifierCount(allowed); modifiers {
 		case 0:
-			if !slices.Contains(allowed, "sessionbus") {
+			if !nativeToolListMatches(allowed, "sessionbus") {
 				return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
 			}
 		case len(allowed):
@@ -133,7 +134,7 @@ func validateManagedToolArguments(arguments []string) error {
 			}
 		}
 	}
-	if excludedSet && slices.Contains(excluded, "sessionbus") {
+	if excludedSet && nativeToolListMatches(excluded, "sessionbus") {
 		return errors.New("argument disables managed Pi Sessionbus tool: --exclude-tools contains sessionbus")
 	}
 	if noTools && !allowedSet {
@@ -166,6 +167,30 @@ func toolModifiersKeep(entries []string, name string, selected bool) bool {
 		}
 	}
 	return selected
+}
+
+// nativeToolListMatches reports whether a --tools or --exclude-tools list
+// selects name as Pi's createToolNameMatcher does: an entry is an exact name,
+// or a pattern whose "*" matches any characters over the whole name (Pi 1.4.0
+// mcp-servers.js toolPatternRegExp, createToolNameMatcher; sdk.js:158-160,
+// agent-session.js:193-197).
+func nativeToolListMatches(entries []string, name string) bool {
+	for _, entry := range entries {
+		if !strings.Contains(entry, "*") {
+			if entry == name {
+				return true
+			}
+			continue
+		}
+		parts := strings.Split(entry, "*")
+		for index, part := range parts {
+			parts[index] = regexp.QuoteMeta(part)
+		}
+		if regexp.MustCompile("^" + strings.Join(parts, ".*") + "$").MatchString(name) {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeToolList(value string) []string {

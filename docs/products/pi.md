@@ -11,6 +11,20 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## Tool-list patterns in managed launches (2026-10-28)
+
+Pi matches `--tools` and `--exclude-tools` entries as exact names or as
+patterns whose `*` matches any characters over the whole name
+(`mcp-servers.js` `toolPatternRegExp`, `createToolNameMatcher`; applied in
+`sdk.js:158-160` and `agent-session.js:193-197`). An excluded tool is never
+registered, so the extension cannot restore it. The managed launch guard
+compared both lists by exact name only, so `--exclude-tools 'session*'` (found
+by the PR #9 review bot) removed the Sessionbus tool unnoticed, and an
+allowlist pattern such as `--tools '*'` was refused although it keeps the
+tool. Decision (2026-10-28): the guard matches both lists as Pi does. Exact
+names, `+name`/`-name` modifier lists and lists that do not select the tool
+keep their earlier handling.
+
 ## Steered peer messages left unread without an abort (2026-10-28)
 
 Pi 1.4.0 can end a task with a steered peer message never started and no
