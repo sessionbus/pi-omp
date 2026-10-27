@@ -390,10 +390,19 @@ export function createPiExtension({
     });
   }
 
-  // DEF-04, owner decision 2026-10-19 ("Clear the queue first"): after an
-  // aborted run, a steered peer message whose message_start never fired did
-  // not reach the model; Pi saves a steered message only at its own
-  // message_end. Escape and the TUI's other aborts clear Pi's queues first and
+  // DEF-04, owner decision 2026-10-19 ("Clear the queue first"), applied at
+  // every settle since 2026-10-28: a steered peer message whose message_start
+  // never fired did not reach the model; Pi saves a steered message only at
+  // its own message_end. A settle without an abort can hold one too: Pi
+  // dropped it from its queue (Alt+Up, a failed compaction-queue flush) or
+  // still holds it for a later run (Pi 1.4.0 _runBeforeSettleBoundary when
+  // the context cannot continue). Extensions cannot see which
+  // (hasPendingMessages counts typed text only), so the clear below makes
+  // both one history copy and no queued copy. The abort comes only with such
+  // a message; at a settle Pi's run is no longer active, so it requests no
+  // run abort and leaves the deferred starts of settled handlers (Pi 1.4.0
+  // agent-session.js:683-706, 1866-1867), including this extension's drain
+  // that follows, untouched. Escape and the TUI's other aborts clear Pi's queues first and
   // drop it. A mid-run /compact or session switch aborts without that clear
   // and leaves it queued for a later run. So ctx.abort() first runs the clear
   // Escape runs (restoreQueuedMessagesToEditor({abort:true}), Pi 1.2.0
@@ -407,6 +416,21 @@ export function createPiExtension({
     if (candidates.length === 0 || !ctx.isIdle()) return;
     ctx.abort();
     for (const [messageID, admitted] of candidates) {
+      record.admittedMessages.delete(messageID);
+      history(record.pi, ctx, { session_id: record.session_id, message_id: messageID, body: admitted.body });
+    }
+  }
+
+  // A settle without an abort can leave a steer in Pi's queue for a later
+  // run (Pi 1.4.0 agent-session.js _runBeforeSettleBoundary, when the context
+  // cannot continue). Quitting while Pi is idle ends the session before that
+  // run, so each steer that never started is written to history once, with
+  // no turn, and a resumed session shows it. Pi awaits session_shutdown
+  // before it disposes the session (agent-session-runtime.js:296-303); no
+  // run follows, so no queued copy is delivered again.
+  function keepUnreadAtQuit(record, ctx) {
+    for (const [messageID, admitted] of [...record.admittedMessages]) {
+      if (!admitted.steered || admitted.started) continue;
       record.admittedMessages.delete(messageID);
       history(record.pi, ctx, { session_id: record.session_id, message_id: messageID, body: admitted.body });
     }
@@ -567,7 +591,7 @@ export function createPiExtension({
       const token = record?.runToken ?? null;
       if (record) { record.branchSummaryBusy = false; record.running = false; record.runToken = null; }
       if (launch.topology === "interactive") {
-        if (record && event?.aborted === true) {
+        if (record) {
           try { keepNeverStarted(record, ctx); } catch (error) { stop(ctx, error); return; }
         }
         if (record) record.settledAppend = "open";
@@ -632,6 +656,7 @@ export function createPiExtension({
       try {
         if (!sessionEndReasons.includes(event.reason)) throw new Error("Pi native shutdown reason is invalid");
         live(ctx, pi);
+        if (event.reason === "quit" && launch.topology === "interactive" && ctx.isIdle()) keepUnreadAtQuit(record, ctx);
         const result = await hostCall(ctx, "session_end", {
           topology: launch.topology,
           session_id: record.session_id,

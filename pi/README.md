@@ -61,12 +61,15 @@ session being left. Before it writes, the extension clears Pi's queues as
 Escape does, so text you had queued returns to the editor. A steered message
 the task had already read stays in history as it is.
 
-Not covered:
-- a task that ends without an abort before reading a steered message, for
-  example after a failure while preparing its next turn;
-- a queue clear without an abort, such as restoring queued messages to the
-  editor (Alt+Up) during a task, or a failed flush of the compaction queue;
-- quitting Pi while a task runs.
+A task that ends without an abort is handled the same way when it leaves a
+steered peer message unread: when Pi restored its queue to the editor
+(Alt+Up) or a flush of its compaction queue failed, and when Pi keeps the
+message for a later task because the task could not continue. Before writing,
+the extension clears Pi's queues as Escape does, so text you had queued
+returns to the editor. Quitting Pi while it is idle also writes such a message
+to history before the session ends.
+
+Not covered: quitting Pi while a task runs.
 
 A managed interactive launch requires the exact `sessionbus` extension tool.
 The wrapper therefore rejects an effective tool selection that removes it:

@@ -11,6 +11,31 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## Steered peer messages left unread without an abort (2026-10-28)
+
+Pi 1.4.0 can end a task with a steered peer message never started and no
+abort: Alt+Up restores Pi's queue to the editor and clears agent-core's queue
+(`interactive-mode.js:3645-3652, 3852-3870`; `agent-session.js:1944-1952`), a
+failed compaction-queue flush clears it (`interactive-mode.js:3886-3899`), and
+a task whose context cannot continue settles with the message still queued
+(`_runBeforeSettleBoundary`). Only typed text returns to the editor; our
+custom steer lives in agent-core's queue, and `ctx.hasPendingMessages()`
+counts typed text only, so an extension cannot tell a dropped message from a
+held one. Decision (2026-10-28, the owner's "Clear the queue first" and
+"History only, no new turn"): at every settle, not only an aborted one, a
+steered message that never started is kept as at Escape: one `ctx.abort()`
+clears Pi's queues, then the message is written to history once with no
+turn. The abort comes only with such a message; at a settle Pi's run is no
+longer active, so it requests no run abort and leaves the deferred starts of
+settled handlers, including the extension's own drain that follows,
+untouched (`agent-session.js:683-706, 1866-1867`). A message held for a later
+task therefore reaches history at once instead of at that task. Quitting
+while Pi is idle writes any such message too, since Pi awaits
+`session_shutdown` before it disposes the session
+(`agent-session-runtime.js:296-303`). A steered message that started stays
+as it is: attempted, consumption unknown. Quitting while a task runs is not
+covered.
+
 ## A lane prompt refused before it reaches Pi (2026-10-28)
 
 A blank lane prompt, and one whose JSON encoding exceeds the 1 MiB native
