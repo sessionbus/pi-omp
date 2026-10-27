@@ -50,6 +50,13 @@ model and its answer is in the native history, but not in the Run's result.
 Without an active Run the lane is not running and the daemon starts a later
 Run.
 
+OMP reads the files that each `@path` in a prompt names, with no option to
+turn that off. In a peer message that starts a lane Run, the lane therefore
+puts an invisible word joiner (U+2060) right after each `@` that OMP would
+read as the start of a file mention, so OMP reads no file for it and the model
+sees the same visible text. The owner's own Run input is sent unchanged, and
+OMP does not read file mentions in a steered message.
+
 Every managed factory exposes the one `sessionbus` tool directly with OMP's
 `loadMode: "essential"` and `{tier: "exec", policy: "allow"}` approval.
 This covers the lane, interactive

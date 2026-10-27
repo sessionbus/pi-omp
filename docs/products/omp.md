@@ -6,6 +6,25 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## Peer messages that start a lane Run on OMP 18.12.2 (2026-10-27)
+
+OMP's prompt path reads the files that each `@path` in the prompt names and
+adds their contents for the model (`agent-session.ts` `#promptWithMessage`,
+`utils/file-mentions.ts`). No prompt option or RPC field turns it off. An `@`
+starts a mention at the start of the text or after whitespace or one of
+`([{<"'`; the mention is a quoted path or the following run of characters
+that are neither whitespace nor `@`.
+
+An idle lane starts a Run for a peer message by sending the rendered message
+as its RPC `prompt`, so OMP would read files that the peer names. Owner
+decision (2026-10-27): the lane inserts U+2060 WORD JOINER right after each
+`@` at a mention boundary in that message. The model sees the same visible
+text, and any mention OMP extracts there begins with U+2060, so it names no
+ordinary file. Only that path changes. The owner's Run input is sent as given;
+a steered message (OMP's steering queue) and the interactive primary's
+deliveries (the steering queue or OMP's agent-initiated prompt) do not pass
+through `#promptWithMessage` and are unchanged.
+
 ## Lane Run boundary on OMP 18.11.0 (2026-10-19)
 
 Owner decision (2026-10-15): an OMP lane Run ends at OMP's own done report for

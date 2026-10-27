@@ -828,9 +828,7 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		return reject(errors.New("OMP Run was interrupted before native submission"))
 	}
 	var input string
-	if seed.Text != nil {
-		input = *seed.Text
-	} else if input, err = host.RenderNativeMessage(*seed.Delivery); err != nil {
+	if input, err = runInput(seed); err != nil {
 		return reject(err)
 	}
 	p.mu.Lock()
@@ -910,4 +908,18 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		}
 	}
 	return result, err
+}
+
+// runInput is a Run seed's prompt: the owner's text as given, or the rendered
+// peer message with its file mentions escaped, so that OMP reads no file a
+// peer names. Steered messages do not reach OMP's prompt path.
+func runInput(seed sessionkit.RunInput) (string, error) {
+	if seed.Text != nil {
+		return *seed.Text, nil
+	}
+	rendered, err := host.RenderNativeMessage(*seed.Delivery)
+	if err != nil {
+		return "", err
+	}
+	return escapeFileMentions(rendered), nil
 }
