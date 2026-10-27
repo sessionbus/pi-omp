@@ -659,6 +659,29 @@ test("interactive context that does not preserve a delivery abandons only that d
   }
 });
 
+// The exactly-one-copy rule holds in every phase: a changed copy of the
+// delivery in a context after its message events also abandons it, never
+// completes it (found by dev1's read of 3a77ad3).
+test("interactive context after the message events with a changed copy abandons the delivery", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture("interactive-main", "tui");
+  const extension = createOMPExtension({ launch: launch("interactive"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  assert.equal((await owner.native("native.stage", {
+    owner_token: token, session_id: "interactive-main", message_id: "first", body: "first body",
+  })).queued, true);
+  const message = nativeCustom(native.scheduled()[0]);
+  await native.emit("message_start", { type: "message_start", message }, native.context());
+  await native.emit("message_end", { type: "message_end", message }, native.context());
+  await native.emit("context", { type: "context", messages: [message, { ...message, content: "changed body" }] }, native.context());
+  await owner.waitFor((calls) => calls.filter((call) => call.method === "delivery.observe").length === 4);
+  assert.deepEqual(deliveryPhases(owner), ["first:claimed", "first:message_start", "first:message_end", "first:abandoned"]);
+  assert.equal(native.aborts(), 0);
+  assert.equal(native.shutdowns(), 0);
+  await deliverNext(native, owner, token, "interactive-main", "second");
+});
+
 // OMP hands a message's start and end to extensions on concurrent paths; an
 // extension bound after startup runs after OMP's own message_start handler
 // and can see message_end first (agent.ts 18.13.2:2233-2245; runner.ts

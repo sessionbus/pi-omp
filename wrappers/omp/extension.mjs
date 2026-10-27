@@ -838,7 +838,8 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     const abandoned = [];
     for (const batch of state.batches.values()) {
       const matches = list.filter((message) => matchingDelivery(message, state, batch));
-      const referenced = list.some((message) => referencesDeliveryBatch(message, state, batch));
+      const references = list.filter((message) => referencesDeliveryBatch(message, state, batch)).length;
+      const referenced = references > 0;
       if (batch.phase < 3) {
         // A different active or preparing native turn may emit context while
         // this independently submitted batch has not emitted its own message
@@ -850,7 +851,6 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         // an idle prompt and for a steer drained at a turn boundary alike. One
         // exact copy is that order: note it, and complete at message_end. Any
         // other reference changed the delivery's identity.
-        const references = list.filter((message) => referencesDeliveryBatch(message, state, batch)).length;
         if (matches.length !== 1 || references !== 1) {
           abandoned.push(batch);
           continue;
@@ -858,7 +858,9 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         batch.contextSeen = true;
         continue;
       }
-      if (matches.length !== 1 || batch.phase !== 3) {
+      // After its message events too, the context must hold exactly one copy:
+      // the exact one, and no changed copy beside it.
+      if (matches.length !== 1 || references !== 1 || batch.phase !== 3) {
         abandoned.push(batch);
         continue;
       }
