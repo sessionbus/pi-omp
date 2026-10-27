@@ -48,7 +48,9 @@ message OMP queues after the task's last check for steering, or before an
 interrupt, is answered by OMP's own continuation after the Run: it reaches the
 model and its answer is in the native history, but not in the Run's result.
 Without an active Run the lane is not running and the daemon starts a later
-Run.
+Run. If OMP fails the lane's prompt before starting work on it, for example
+with no model or no API key, the Run is `unavailable` with OMP's message and
+the lane stays.
 
 OMP reads the files that each `@path` in a prompt names, with no option to
 turn that off. In a peer message that starts a lane Run, the lane therefore

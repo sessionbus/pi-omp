@@ -6,6 +6,29 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## A lane prompt that fails before OMP's run (2026-10-27)
+
+OMP admits a prompt and answers `success`, and can then still fail it before
+it hands the message to the agent: no model, no API key, a failed `@path`
+read, pre-prompt compaction or a `before_agent_start` handler
+(`agent-session.ts` 18.12.2:8196-8301). RPC then writes a second,
+`success:false` response for the same id, followed by `prompt_result` with
+`agentInvoked:false` and `status:"error"` (`rpc-mode.ts:1621-1622`,
+`rpc-prompt-results.ts:109-111, 149-166, 292-296`). An error as the first
+response is OMP's refusal and was already handled.
+
+Decision (2026-10-27): a Run must end with its reason and the lane must
+stay. Such a failure, with no run start, yield or assistant message for our
+prompt, now ends only the Run: it is `unavailable` with OMP's text, a seed
+message is reported `rejected`/`not_submitted`, and the failed prompt's
+trailing `prompt_result` is absorbed once. Before, the failure ended the lane,
+and the Run's record went with it. A prompt our own validation refuses
+(empty, or over the native bound of 1 MiB less 1024 bytes) likewise ends only
+the Run. A late failure after OMP's run started, and transport or protocol
+faults, still end the lane. The Run terminal has no field for a failure
+reason, so a Run that OMP's provider error ends after its start stays `done`,
+outcome `failed`, native stop reason `error`, without OMP's text.
+
 ## Peer messages that start a lane Run on OMP 18.12.2 (2026-10-27)
 
 OMP's prompt path reads the files that each `@path` in the prompt names and

@@ -91,6 +91,17 @@ type nativePromptRefusal struct{ err error }
 func (refusal *nativePromptRefusal) Error() string { return refusal.err.Error() }
 func (refusal *nativePromptRefusal) Unwrap() error { return refusal.err }
 
+// nativePromptFailure is our prompt failing before OMP's run for it started:
+// our own validation refused it before anything was written, or OMP admitted
+// it and then answered success:false before handing it to the agent, for
+// example with no model or no API key (agent-session.ts 18.12.2:8196-8301).
+// Nothing of the prompt reached the agent, so as for a refusal only the Run
+// fails and the lane stays.
+type nativePromptFailure struct{ err error }
+
+func (failure *nativePromptFailure) Error() string { return failure.err.Error() }
+func (failure *nativePromptFailure) Unwrap() error { return failure.err }
+
 // nativeRefusedPrompt is the one prompt whose first response was an error.
 // OMP 18.11.0 still writes a success response for the same id and then a
 // prompt_result with agentInvoked:false (rpc-prompt-results.ts:286-296,
@@ -323,7 +334,7 @@ func (rpc *nativeRPC) StartPrompt(ctx context.Context, message string) (*nativeP
 		return nil, false, fmt.Errorf("%w: protocol is not negotiated", errNativeRPCProtocol)
 	}
 	if message == "" || !utf8.ValidString(message) || len(message) > rpc.limits.maxInputFrame {
-		return nil, false, errors.New("OMP native prompt is invalid")
+		return nil, false, &nativePromptFailure{err: errors.New("OMP native prompt is invalid")}
 	}
 	id, pending, write, err := rpc.admitPrompt(ctx, map[string]any{"message": message})
 	if err != nil {
@@ -1221,6 +1232,11 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 		}
 		delete(rpc.pending, id)
 		rpc.setPromptLateLocked(pending, completed)
+		// OMP writes the failed prompt's agentInvoked:false prompt_result right
+		// after this answer (rpc-prompt-results.ts 18.12.2:109-111, 149-166,
+		// 292-296). Absorb it once, as for a refusal, so that it reaches
+		// neither the next Run nor the lane.
+		rpc.refused = nativeRefusedPrompt{id: id, noAgentResult: true}
 		rpc.mu.Unlock()
 		return nil
 	}

@@ -51,6 +51,7 @@ type ompNativeTurn struct {
 	assistantBytes   int
 	result           sessionkit.TurnResult
 	resultReady      bool
+	promptFailure    *nativePromptFailure
 	retirement       error
 	finalized        bool
 	uiClosed         bool
@@ -120,7 +121,7 @@ func (turn *ompNativeTurn) recordPreflight(token string, foreign int) error {
 // prompt at its run's first yielded agent_end (rpc-prompt-results.ts:129-147),
 // so later runs, until and after our prompt_result, are OMP's own work.
 func (turn *ompNativeTurn) ownEndedLocked() bool {
-	return turn.yielded || turn.noAgent || turn.resultReady || turn.finalized
+	return turn.yielded || turn.noAgent || turn.resultReady || turn.finalized || turn.promptFailure != nil
 }
 
 // settleLocked ends the Run at our own agent-invoked prompt_result once our
@@ -368,6 +369,9 @@ func (turn *ompNativeTurn) completion() (bool, <-chan struct{}, error) {
 	if turn.failure != nil {
 		return false, turn.changed, turn.failure
 	}
+	if turn.promptFailure != nil {
+		return false, turn.changed, turn.promptFailure
+	}
 	return turn.resultReady && turn.pendingUI == 0, turn.changed, nil
 }
 
@@ -375,6 +379,27 @@ func (turn *ompNativeTurn) hasResult() bool {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	return turn.resultReady
+}
+
+// failBeforeRun records OMP's own late answer to our admitted prompt as the
+// Run's failure when OMP's run for it never started: no run start, yield or
+// assistant message. Our preflight may already be recorded, since OMP emits
+// before_agent_start before it hands the prompt to the agent. Any other late
+// failure is left to the caller.
+func (turn *ompNativeTurn) failBeforeRun(err error) bool {
+	var native *nativeRPCError
+	if !errors.As(err, &native) || native.Command != "prompt" {
+		return false
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if turn.failure != nil || turn.starts != 0 || turn.yielded || len(turn.assistants) != 0 ||
+		turn.promptResultSeen || turn.noAgent || turn.resultReady {
+		return false
+	}
+	turn.promptFailure = &nativePromptFailure{err: err}
+	turn.signalLocked()
+	return true
 }
 
 func (turn *ompNativeTurn) awaitCompletion(ctx context.Context) error {
@@ -532,7 +557,12 @@ func (turn *ompNativeTurn) Wait(ctx context.Context) (result sessionkit.TurnResu
 	turn.uiClosed = true
 	turn.signalLocked()
 	retirement := turn.retirement
+	promptFailure, failure := turn.promptFailure, turn.failure
 	turn.mu.Unlock()
+	if promptFailure != nil && failure == nil && !interruptStarted && retirement == nil {
+		// OMP failed our prompt before its run: only the Run fails.
+		return sessionkit.TurnResult{}, promptFailure
+	}
 	if err != nil {
 		turn.owner.lose(err)
 	} else if retirement != nil {
@@ -643,7 +673,7 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 
 func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prompt string) (*ompNativeTurn, error) {
 	if !validOMPArgument(prompt, nativeRPCPhysicalFrameBytes-1024) || strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("OMP lane prompt is empty or exceeds its native bound")
+		return nil, &nativePromptFailure{err: errors.New("OMP lane prompt is empty or exceeds its native bound")}
 	}
 	p.mu.Lock()
 	if !p.opened || p.closing || p.failure != nil || p.ctx.Err() != nil || p.active != nil || p.owner == nil {
@@ -759,6 +789,8 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			err := native.Finish()
 			if err == nil {
 				err = errors.New("OMP native prompt correlation ended before admission")
+			} else if turn.failBeforeRun(err) {
+				return turn, nil
 			}
 			turn.fail(err)
 			return turn, nil
@@ -869,9 +901,11 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		return turn, startErr
 	})
 	var refusal *nativePromptRefusal
-	if errors.As(err, &refusal) {
+	var failure *nativePromptFailure
+	if errors.As(err, &refusal) || errors.As(err, &failure) {
 		// The handoff returned its staged messages to the queue; the seed was
-		// not submitted. As for Pi, the refused Run fails and the lane stays.
+		// not submitted. As for Pi, the refused Run fails and the lane stays,
+		// as does a Run whose prompt failed before OMP's run for it started.
 		if seed.Delivery != nil {
 			err = errors.Join(err, run.ReportDelivery(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "not_submitted"}, nil))
 		}
