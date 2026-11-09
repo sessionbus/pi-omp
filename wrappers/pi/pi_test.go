@@ -184,7 +184,7 @@ func runPiNativeHelper(mode string) error {
 	settled, turns := 0, 0
 	ownDialog := false
 	// ownMode keeps history across prompts and honours the append cursor.
-	ownMode := strings.HasPrefix(mode, "run-own-") || mode == "run-refuse"
+	ownMode := strings.HasPrefix(mode, "run-own-") || mode == "run-refuse" || mode == "run-refuse-witnessed"
 	// Pi's own run, which another extension started: its entries and its
 	// stdout frames, which the lag mode writes after the owned preflight.
 	ownEntries := func() {
@@ -280,7 +280,7 @@ func runPiNativeHelper(mode string) error {
 			}
 		case "prompt":
 			var prompt string
-			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" && mode != "run-refuse-witnessed" && !ownMode || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
+			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" && !ownMode || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
 				return errors.New("helper received invalid native prompt")
 			}
 			turns++

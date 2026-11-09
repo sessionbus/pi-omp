@@ -577,8 +577,14 @@ func TestPiRefusedPromptAfterAWitnessedRunKeepsOwningIt(t *testing.T) {
 	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
 		t.Fatalf("witnessed Run after a refusal = %s, %s, %q", state, outcome, reason)
 	}
-	if frame, ok := responses[2]; !ok || frame.Error != nil {
-		t.Fatalf("execute response = %+v", frame)
+	lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "next prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("Run after the witnessed one = %s, %s, %q", state, outcome, reason)
+	}
+	for _, id := range []int64{2, 3} {
+		if frame, ok := responses[id]; !ok || frame.Error != nil {
+			t.Fatalf("execute %d response = %+v", id, frame)
+		}
 	}
 	lane.wrapper.mu.Lock()
 	failure := lane.wrapper.failure
@@ -1216,9 +1222,16 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
 		calls++
-		return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected call")
+		var steer struct {
+			SessionID string `json:"session_id"`
+			MessageID string `json:"message_id"`
+		}
+		if method != "native.steer" || json.Unmarshal(raw, &steer) != nil {
+			return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected call")
+		}
+		return json.Marshal(map[string]any{"session_id": steer.SessionID, "message_id": steer.MessageID, "accepted": true})
 	}, pifamily.BridgeLimits{})
 	if err != nil {
 		t.Fatal(err)
@@ -1236,5 +1249,11 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
 	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "invalid Pi native delivery" || calls != 0 {
 		t.Fatalf("oversized lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+	}
+	// The lane goes on: the next valid delivery is steered as usual.
+	receipt, err = wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "message-after", Body: "note",
+		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
+	if err != nil || receipt.Disposition != "injected" || calls != 1 {
+		t.Fatalf("next lane delivery = %+v, %v, native calls %d", receipt, err, calls)
 	}
 }

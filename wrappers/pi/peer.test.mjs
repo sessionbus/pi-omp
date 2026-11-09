@@ -1035,10 +1035,12 @@ test("a delivery past the native bound once rendered is refused before it is que
     if (queued) assert.deepEqual(await deliver(inbound("held")), { disposition: "queued_for_next_turn" });
     assert.deepEqual(await deliver(oversized), { disposition: "rejected", reason: "invalid Pi native delivery" });
     assert.equal(fixture.appended().length, 0);
+    // The owner goes on: the next valid delivery waits as usual.
+    assert.deepEqual(await deliver(inbound("after")), { disposition: "queued_for_next_turn" });
     fixture.setBusy(false);
     const drained = await fixture.owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" });
-    assert.equal(drained.drained, queued ? 1 : 0, "the oversized delivery entered the FIFO");
-    assert.deepEqual(fixture.appended().map((params) => params.message_id), queued ? ["held"] : []);
+    assert.equal(drained.drained, queued ? 2 : 1, "the oversized delivery entered the FIFO");
+    assert.deepEqual(fixture.appended().map((params) => params.message_id), queued ? ["held", "after"] : ["after"]);
     await fixture.owner.close();
   }
 });
