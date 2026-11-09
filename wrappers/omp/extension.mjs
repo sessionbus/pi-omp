@@ -27,6 +27,9 @@ const maxQueuedDeliveries = 256;
 const maxReportWork = 256;
 const maxTextBytes = 1 << 20;
 const maxRetainedBytes = 32 << 20;
+// Unread lane steers' own share of the retained reservation, so they cannot
+// starve bindings.
+const maxLaneSteerBytes = 8 << 20;
 const maxBatchItems = 64;
 const maxBatchBytes = 1 << 20;
 
@@ -445,7 +448,8 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
           return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "idle" };
         }
         // A steer OMP has not taken yet counts against the existing delivery
-        // limits, reserved before the send. OMP reports no event for a steer
+        // limits (entries, and 8 MiB of the retained bytes), reserved before
+        // the send. OMP reports no event for a steer
         // it drops, so an entry is freed at its message_end or when the next
         // Run's preflight replaces this Run's token (see releaseLaneSteers).
         state.laneSteers ??= new Map();
@@ -453,7 +457,8 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
           throw new BridgeCallError("duplicate_message", "OMP steered delivery identity is already owned");
         }
         const bytes = deliveryEntryBytes({ messageID: id, body });
-        if (state.laneSteers.size >= limit.queuedDeliveries || !reserve(bytes)) {
+        const held = [...state.laneSteers.values()].reduce((sum, entry) => sum + entry.bytes, 0);
+        if (state.laneSteers.size >= limit.queuedDeliveries || bytes > maxLaneSteerBytes - held || !reserve(bytes)) {
           return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "queue_full" };
         }
         state.laneSteers.set(id, { bytes, runToken });

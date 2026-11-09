@@ -246,8 +246,9 @@ when the Run ends is the existing late-steer case.
 ## Lane steer limit (2026-11-09)
 
 Steers handed to a lane Run that OMP has not taken yet are counted against the
-extension's existing delivery limits (256 entries; bytes from the same 32 MiB
-reservation as staged deliveries), reserved before `sendMessage`. At the limit
+extension's existing delivery limits (256 entries) and 8 MiB of their own,
+reserved before `sendMessage` from the same 32 MiB retained bytes as staged
+deliveries and bindings; the 8 MiB share keeps them from starving bindings. At the limit
 `native.steer` answers `queue_full` and sends nothing; the Go owner answers
 that delivery `rejected` with `queue_full`, the stage path's reason. OMP
 18.13.2 gives extensions no event when it drops or carries a steer:

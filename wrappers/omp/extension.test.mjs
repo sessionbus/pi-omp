@@ -1305,5 +1305,41 @@ test("lane steers are capped at the delivery limit and freed at message_end or t
   assert.deepEqual(await steer("f", second), result("f", true));
   assert.deepEqual(await steer("g", second), result("g", false, "queue_full"));
   assert.deepEqual(native.steered().map((message) => message.details.message_ids[0]), ["a", "b", "c", "e", "f"]);
+
+  // A delayed end of the first Run after this preflight frees nothing of
+  // this Run's: it clears the token (the recorded delayed delivery), and
+  // e and f still count until OMP takes them or a later Run preflights.
+  await native.emit("agent_end", { type: "agent_end", messages: [] }, native.context());
+  assert.deepEqual(await steer("h", second), result("h", false, "idle"));
+  await taken("e");
+  await taken("b");
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "third prompt" }, native.context());
+  await owner.waitFor(() => preflights().length === 3);
+  const third = preflights()[2];
+  await taken("f");
+  assert.deepEqual(await steer("i", third), result("i", true));
+  assert.deepEqual(await steer("j", third), result("j", true));
+  assert.deepEqual(await steer("k", third), result("k", false, "queue_full"));
   assert.equal(owner.calls.some((call) => call.method === "session_end"), false);
+});
+
+// Unread lane steers hold at most 8 MiB of the retained bytes.
+test("lane steers hold at most their share of the retained bytes", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture();
+  const extension = createOMPExtension({ launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  const body = "x".repeat((1 << 20) - 64);
+  const steer = (messageID, runToken) => owner.native("native.steer", {
+    owner_token: token, session_id: "native-main", message_id: messageID, body, run_token: runToken,
+  });
+  native.setIdle(false);
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "owned prompt" }, native.context());
+  await owner.waitFor(() => owner.calls.some((call) => call.method === "run.preflight"));
+  const runToken = owner.calls.find((call) => call.method === "run.preflight").params.run_token;
+  const answers = [];
+  for (let index = 0; index < 9; index += 1) answers.push((await steer(`b-${index}`, runToken)).accepted);
+  assert.deepEqual(answers, [true, true, true, true, true, true, true, true, false]);
+  assert.equal(native.steered().length, 8);
 });

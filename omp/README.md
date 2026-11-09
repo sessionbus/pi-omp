@@ -53,8 +53,8 @@ interrupt, is answered by OMP's own continuation after the Run: it reaches the
 model and its answer is in the native history, but not in the Run's result.
 Without an active Run the lane is not running and the daemon starts a later
 Run. Messages handed to a Run that OMP has not taken yet count against the
-lane's delivery limits (256 messages, with staged deliveries in the same
-32 MiB): a further message is refused with `queue_full`. If another extension is slow to handle `agent_end`, OMP's end of the
+lane's delivery limits (256 messages and 8 MiB): a further message is
+refused with `queue_full`. If another extension is slow to handle `agent_end`, OMP's end of the
 previous Run can reach the managed extension after the next Run started;
 peer messages for that Run are then not running and go to a later Run.
 Nothing is lost and no receipt is wrong. If OMP fails the lane's prompt before starting work on it, for example
