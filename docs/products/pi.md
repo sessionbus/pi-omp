@@ -25,8 +25,11 @@ and `event: "send_user_message"` (:2774-2780, `rpc-mode.js:259-260`), before
 or after the busy reply. The wrapper arms the Run's window before it sends
 the prompt and takes exactly that frame only inside it (our input and
 preflight witnessed, the preflight's settle generation, no start yet); the
-Run is then unavailable with both answers, nothing is replayed, and the
-lane stays. Any other extension error is handled as before. Another
+Run is then unavailable with both answers and the lane stays. The
+forwarding extension received the input, so the turn is consumed: staged
+messages are not requeued, and a delivery seed gets the uncertain receipt
+(the Worker's Internal `uncertain_submission` error, `no_receipt` for the
+sender). Any other extension error is handled as before. Another
 extension's own failed `sendUserMessage` in that same window also ends the
 Run as unavailable; if the forwarded run then starts, it is Pi's own work.
 
@@ -42,9 +45,14 @@ missing-preflight failure. A later preflight of the extension's run is
 Pi's own work while no next Run has recorded its input. Limit: Pi's
 preflight carries no prompt identity, so if that late preflight arrives
 after the next Run recorded its input and before its own preflight, the
-next Run can take it. A dialog that an owned forwarded window raised is
-cancelled and joined before the Run ends; a failed cancellation ends the
-lane, as elsewhere.
+next Run can take it. A dialog that our turn owned is cancelled and joined
+before the turn is consumed, also before a `handled` answer is taken; a
+failed cancellation ends the lane, as elsewhere, and a preflight that wins
+during that join is followed. Once consumed, the turn is no longer ours:
+stdout frames, Run witnesses and dialogs that still reach it are Pi's own
+work. Limit: an interrupt while an owned dialog's cancellation is still
+being written waits for that write; if Pi stops reading its input, the Run
+ends only when the lane closes, as at the normal end of a Run.
 
 ## Steer limit (2026-11-09)
 

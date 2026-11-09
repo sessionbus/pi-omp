@@ -701,29 +701,69 @@ func TestPiHandledPromptBeforeOurPreflightEndsOnlyTheRun(t *testing.T) {
 	}
 }
 
-// A handled delivery seed was consumed by the extension: its receipt is the
-// uncertain one carrying Pi's answer, never not_submitted, so the sender
-// does not resend it.
-func TestPiHandledDeliverySeedIsNotResent(t *testing.T) {
-	lane := newPiSDKLane(t, "handled-early")
-	responses := map[int64]protocol.Frame{}
-	lane.request(2, "message.deliver", sessionkit.DeliveryRequest{
-		RunID: "g/1", MessageID: "handled-seed", Body: "handled delivery",
-		From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
-	})
-	if state, _, reason := lane.terminal(responses); state != "unavailable" || reason != "Pi native prompt: handled" {
-		t.Fatalf("handled delivery Run = %s, %q", state, reason)
+// A delivery seed that an extension received, by a handled answer or a
+// forwarded prompt that failed before it started, is uncertain on the wire
+// (an Internal uncertain_submission error, public no_receipt), so the sender
+// does not take it as refused and resend it. Before this change it was a
+// definite rejected receipt.
+func TestPiConsumedDeliverySeedIsUncertain(t *testing.T) {
+	for mode, reason := range map[string]string{
+		"handled-early":                  "Pi native prompt: handled",
+		"run-refuse-forward-fail-before": "forwarded prompt failed",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			lane := newPiSDKLane(t, mode)
+			responses := map[int64]protocol.Frame{}
+			lane.request(2, "message.deliver", sessionkit.DeliveryRequest{
+				RunID: "g/1", MessageID: "consumed-seed", Body: "consumed delivery",
+				From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
+			})
+			if state, _, got := lane.terminal(responses); state != "unavailable" || !strings.Contains(got, reason) {
+				t.Fatalf("consumed delivery Run = %s, %q", state, got)
+			}
+			if frame, ok := responses[2]; !ok || frame.Error == nil || frame.Error.Code != protocol.Internal ||
+				string(frame.Error.Data) != `"uncertain_submission"` {
+				t.Fatalf("consumed delivery reply = %+v (error %+v)", frame, frame.Error)
+			}
+			lane.wrapper.mu.Lock()
+			failure := lane.wrapper.failure
+			lane.wrapper.mu.Unlock()
+			if failure != nil {
+				t.Fatalf("lane failed after a consumed delivery: %v", failure)
+			}
+		})
 	}
-	var receipt sessionkit.DeliveryReceipt
-	if frame, ok := responses[2]; !ok || frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
-		receipt.Disposition != "rejected" || receipt.Reason == "not_submitted" || !strings.Contains(receipt.Reason, "Pi native prompt: handled") {
-		t.Fatalf("handled delivery receipt = %+v, decoded %+v", frame, receipt)
-	}
-	lane.wrapper.mu.Lock()
-	failure := lane.wrapper.failure
-	lane.wrapper.mu.Unlock()
-	if failure != nil {
-		t.Fatalf("lane failed after a handled delivery: %v", failure)
+}
+
+// A forwarded prompt that failed before its run started was received by the
+// forwarding extension: the Run ends alone and the staged handoff is consumed,
+// not requeued. Before this change the refusal requeued it for the next Run.
+func TestPiForwardedFailureConsumesTheHandoff(t *testing.T) {
+	for _, mode := range []string{"run-refuse-forward-fail-before", "handled-after-fail"} {
+		t.Run(mode, func(t *testing.T) {
+			wrapper, cwd := newPiTestWrapper(t, mode)
+			if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+			receipt, err := wrapper.handoff.Deliver(context.Background(), sessionkit.DeliveryRequest{
+				MessageID: "staged", Body: "staged once",
+				From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"},
+			}, nil)
+			if err != nil || receipt.Disposition != "queued_for_next_turn" {
+				t.Fatalf("stage delivery = %+v, %v", receipt, err)
+			}
+			_, err = wrapper.handoff.Run(context.Background(), &sessionkit.Run{}, "forwarded prompt", func(ctx context.Context, prompt string) (host.Turn, error) {
+				return wrapper.startNativeTurn(ctx, nil, prompt)
+			})
+			var consumed *piPromptHandled
+			if !errors.As(err, &consumed) || !strings.Contains(err.Error(), "forwarded prompt failed") {
+				t.Fatalf("forwarded failure terminal = %v", err)
+			}
+			if queued := wrapper.handoff.Claim(); len(queued) != 0 {
+				t.Fatalf("a received handoff was requeued: %#v", queued)
+			}
+		})
 	}
 }
 
@@ -761,8 +801,9 @@ func TestPiHandledPromptAfterOurPreflightFollowsTheForwardedRun(t *testing.T) {
 }
 
 // Once Pi answered "handled" before our preflight, the turn is closed under
-// its lock: a preflight handler that already holds it gets no Run token, no
-// UI is admitted, and an Interrupt sends no abort for the extension's work.
+// its lock: a preflight handler that already holds it gets no Run token, an
+// Interrupt sends no abort for the extension's work, and a dialog that still
+// reaches it is cancelled as Pi's own work instead of being admitted.
 func TestPiHandledTurnIsClosedBeforeItDetaches(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	t.Cleanup(func() { cancel(errors.New("test done")) })
@@ -774,18 +815,29 @@ func TestPiHandledTurnIsClosedBeforeItDetaches(t *testing.T) {
 	if token, err := turn.recordPreflight("late forwarded", false, "", 0, false); token != "" || err != nil {
 		t.Fatalf("preflight on the handled turn = %q, %v", token, err)
 	}
-	if err := turn.cancelUI("late-dialog"); err == nil {
-		t.Fatal("the handled turn admitted a dialog")
-	}
-	// wrapper.rpc is nil: an abort would panic.
+	// wrapper.rpc is still nil here: an abort would panic.
 	if err := turn.Interrupt(context.Background()); err != nil {
 		t.Fatalf("interrupt of the handled turn = %v", err)
 	}
+	rpc, peer := newNativeRPCTest(t, func(json.RawMessage) error { return nil }, nativeRPCLimits{})
 	wrapper.mu.Lock()
+	wrapper.rpc = rpc
 	own, active := wrapper.ownWork, wrapper.active
 	wrapper.mu.Unlock()
 	if !own || active != nil {
 		t.Fatalf("tombstone = own %v, active %v", own, active)
+	}
+	if err := turn.cancelUI("late-dialog"); err != nil {
+		t.Fatalf("dialog on the handled turn = %v", err)
+	}
+	if cancelled := peer.read(t); string(cancelled["id"]) != `"late-dialog"` {
+		t.Fatalf("own-work cancellation = %v", cancelled)
+	}
+	turn.mu.Lock()
+	failure, pending := turn.failure, turn.pendingUI
+	turn.mu.Unlock()
+	if failure != nil || pending != 0 {
+		t.Fatalf("handled turn admitted the dialog: failure %v, pending %d", failure, pending)
 	}
 }
 
@@ -859,10 +911,180 @@ func TestPiHandledCommitAndPreflightRaceHaveOneWinner(t *testing.T) {
 	}
 }
 
+// A consumed turn (handled, or its forwarded prompt failed before it started)
+// is not ours any more: stdout frames, Run witnesses and dialogs that come
+// while it is still the active turn are Pi's own work, even when the turn
+// kept a preflight and settle base. Before this change they were recorded
+// into it, rejected as outside an owned Run, or failed it.
+func TestPiConsumedTurnFramesAndDialogsArePiOwnWork(t *testing.T) {
+	setup := func(t *testing.T) (*Wrapper, *piNativeTurn, *nativeRPCTestPeer) {
+		rpc, peer := newNativeRPCTest(t, func(json.RawMessage) error { return nil }, nativeRPCLimits{})
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel, rpc: rpc, id: "native"}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "consumed prompt")
+		turn.input = true
+		turn.handled = &piPromptHandled{err: errors.New("Pi native prompt: handled")}
+		turn.terminalOwned, turn.uiClosed = true, true
+		wrapper.active = turn
+		return wrapper, turn, peer
+	}
+	t.Run("frame and witness with a retained preflight", func(t *testing.T) {
+		wrapper, turn, _ := setup(t)
+		turn.preflight, turn.base, turn.token = true, 0, "forwarded-token"
+		if err := wrapper.observeRunEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+			t.Fatalf("agent_start = %v", err)
+		}
+		if err := wrapper.recordRunStart("native", "forwarded-token", false); err != nil {
+			t.Fatalf("run.start = %v", err)
+		}
+		turn.mu.Lock()
+		nativeStarts, started, failure := turn.nativeStarts, turn.started, turn.failure
+		turn.mu.Unlock()
+		if nativeStarts != 0 || started != 0 || failure != nil {
+			t.Fatalf("consumed turn recorded starts %d/%d, failure %v", nativeStarts, started, failure)
+		}
+	})
+	t.Run("frame before own work is published", func(t *testing.T) {
+		wrapper, _, _ := setup(t)
+		if err := wrapper.observeRunEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+			t.Fatalf("agent_start = %v", err)
+		}
+	})
+	t.Run("dialog", func(t *testing.T) {
+		wrapper, turn, peer := setup(t)
+		if err := wrapper.observeNativeUI(json.RawMessage(`{"type":"extension_ui_request","id":"late-dialog","method":"confirm","title":"t","message":"m"}`)); err != nil {
+			t.Fatalf("dialog = %v", err)
+		}
+		cancelled := peer.read(t)
+		if string(cancelled["type"]) != `"extension_ui_response"` || string(cancelled["id"]) != `"late-dialog"` {
+			t.Fatalf("own-work cancellation = %v", cancelled)
+		}
+		turn.mu.Lock()
+		failure := turn.failure
+		turn.mu.Unlock()
+		if failure != nil {
+			t.Fatalf("consumed turn failed on a dialog: %v", failure)
+		}
+	})
+}
+
+// An observer can sample a turn before its consume and call into it after:
+// the turn's own methods then treat the call as Pi's own work under the turn
+// lock. A dialog is cancelled as Pi's own work instead of failing the
+// consumed turn, and stdout frames and Run witnesses are not recorded into
+// it. Before this change cancelUI failed the consumed turn and sent nothing.
+func TestPiConsumedTurnMethodsTreatLateCallsAsPiOwnWork(t *testing.T) {
+	rpc, peer := newNativeRPCTest(t, func(json.RawMessage) error { return nil }, nativeRPCLimits{})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test done")) })
+	wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel, rpc: rpc, id: "native"}
+	turn := newPiNativeTurn(wrapper, nil, "", "", "consumed prompt")
+	turn.input, turn.preflight, turn.token = true, true, "forwarded-token"
+	turn.handled = &piPromptHandled{err: errors.New("Pi native prompt: handled")}
+	turn.terminalOwned, turn.uiClosed = true, true
+	if err := turn.cancelUI("borrowed-dialog"); err != nil {
+		t.Fatalf("dialog on a consumed turn = %v", err)
+	}
+	cancelled := peer.read(t)
+	if string(cancelled["type"]) != `"extension_ui_response"` || string(cancelled["id"]) != `"borrowed-dialog"` {
+		t.Fatalf("own-work cancellation = %v", cancelled)
+	}
+	if err := turn.recordEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+		t.Fatalf("agent_start on a consumed turn = %v", err)
+	}
+	if err := turn.recordStart(false); err != nil {
+		t.Fatalf("run.start on a consumed turn = %v", err)
+	}
+	if err := turn.recordSettling(""); err != nil {
+		t.Fatalf("settling on a consumed turn = %v", err)
+	}
+	turn.mu.Lock()
+	failure, nativeStarts, started, pending := turn.failure, turn.nativeStarts, turn.started, turn.pendingUI
+	turn.mu.Unlock()
+	if failure != nil || nativeStarts != 0 || started != 0 || pending != 0 {
+		t.Fatalf("consumed turn = failure %v, starts %d/%d, pending UI %d", failure, nativeStarts, started, pending)
+	}
+}
+
+// The handled commit joins pending cancellations of dialogs it owned before
+// it decides, under one turn lock: a failed cancellation keeps the failed
+// turn, a preflight that wins during the join leaves UI admission open, and
+// only a clean join commits the consume. Before this change the commit
+// closed the turn at once.
+func TestPiHandledCommitJoinsPendingOwnedCancellations(t *testing.T) {
+	setup := func(t *testing.T) (*Wrapper, *piNativeTurn, chan *piNativeTurn) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "handled prompt")
+		turn.input, turn.pendingUI = true, 1
+		wrapper.active = turn
+		done := make(chan *piNativeTurn, 1)
+		go func() { done <- wrapper.handledBeforePreflight(turn, "handled") }()
+		select {
+		case <-done:
+			t.Fatal("the handled commit returned while a cancellation was pending")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return wrapper, turn, done
+	}
+	t.Run("cancellation fails", func(t *testing.T) {
+		_, turn, done := setup(t)
+		turn.mu.Lock()
+		turn.pendingUI--
+		turn.failLocked(errNativeRPCBusy)
+		turn.mu.Unlock()
+		if closed := <-done; closed != nil {
+			t.Fatal("a failed cancellation was closed as handled")
+		}
+		turn.mu.Lock()
+		handled, failure := turn.handled, turn.failure
+		turn.mu.Unlock()
+		if handled != nil || !errors.Is(failure, errNativeRPCBusy) {
+			t.Fatalf("turn = handled %v, failure %v", handled, failure)
+		}
+	})
+	t.Run("preflight during the join", func(t *testing.T) {
+		_, turn, done := setup(t)
+		turn.mu.Lock()
+		turn.preflight = true
+		turn.signalLocked()
+		turn.mu.Unlock()
+		if closed := <-done; closed != nil {
+			t.Fatal("the commit closed a turn whose preflight won")
+		}
+		turn.mu.Lock()
+		handled, closedUI := turn.handled, turn.uiClosed
+		turn.pendingUI--
+		turn.mu.Unlock()
+		if handled != nil || closedUI {
+			t.Fatalf("turn = handled %v, UI closed %v", handled, closedUI)
+		}
+	})
+	t.Run("cancellation finishes", func(t *testing.T) {
+		wrapper, turn, done := setup(t)
+		turn.mu.Lock()
+		turn.pendingUI--
+		turn.signalLocked()
+		turn.mu.Unlock()
+		if closed := <-done; closed != turn {
+			t.Fatal("a clean join did not commit the consume")
+		}
+		turn.mu.Lock()
+		handled, closedUI := turn.handled, turn.uiClosed
+		turn.mu.Unlock()
+		if handled == nil || !closedUI || wrapper.active != nil {
+			t.Fatalf("turn = handled %v, UI closed %v, active %v", handled, closedUI, wrapper.active)
+		}
+	})
+}
+
 // A forwarded refusal joins the cancellations of dialogs it owned before it
-// detaches, and closes UI admission there, as the terminal does. A failed
-// cancellation is not hidden in the refusal: the failed turn keeps the
-// existing loss path. Before this change the refusal detached at once.
+// consumes the turn, and closes UI admission there, as the terminal does. A
+// failed cancellation is not hidden: the turn keeps its failure and is not
+// consumed, so it takes the existing loss path. Before 1e3a113 the refusal
+// detached at once.
 func TestPiForwardedRefusalJoinsOwnedDialogCancellations(t *testing.T) {
 	setup := func(t *testing.T, pending int) (*Wrapper, *piNativeTurn) {
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -874,54 +1096,46 @@ func TestPiForwardedRefusalJoinsOwnedDialogCancellations(t *testing.T) {
 		return wrapper, turn
 	}
 	refused := errors.New("Pi native prompt: busy")
+	consumedAfterJoin := func(t *testing.T, wrapper *Wrapper, turn *piNativeTurn) {
+		t.Helper()
+		turn.mu.Lock()
+		handled, closed, pending := turn.handled, turn.uiClosed, turn.pendingUI
+		turn.mu.Unlock()
+		if handled == nil || handled.Error() != "Pi native prompt: busy; the forwarded prompt failed before its run started: failed" ||
+			!closed || pending != 0 || wrapper.active != nil {
+			t.Fatalf("turn = consumed %v, UI closed %v with %d pending, active %v", handled, closed, pending, wrapper.active)
+		}
+	}
 	t.Run("nothing pending", func(t *testing.T) {
 		wrapper, turn := setup(t, 0)
-		var refusal *piPromptRefusal
-		if err := wrapper.refuseForwarded(turn, refused, "failed"); !errors.As(err, &refusal) {
-			t.Fatalf("refusal = %v", err)
-		}
-		turn.mu.Lock()
-		closed := turn.uiClosed
-		turn.mu.Unlock()
-		if !closed || wrapper.active != nil {
-			t.Fatalf("UI admission closed = %v, active = %v", closed, wrapper.active)
-		}
+		wrapper.refuseForwarded(turn, refused, "failed")
+		consumedAfterJoin(t, wrapper, turn)
 	})
 	t.Run("pending cancellation finishes", func(t *testing.T) {
 		wrapper, turn := setup(t, 1)
-		done := make(chan error, 1)
-		go func() { done <- wrapper.refuseForwarded(turn, refused, "failed") }()
+		done := make(chan struct{})
+		go func() { wrapper.refuseForwarded(turn, refused, "failed"); close(done) }()
 		turn.mu.Lock()
 		turn.pendingUI--
 		turn.signalLocked()
 		turn.mu.Unlock()
-		var refusal *piPromptRefusal
-		if err := <-done; !errors.As(err, &refusal) {
-			t.Fatalf("refusal = %v", err)
-		}
-		turn.mu.Lock()
-		closed, pending := turn.uiClosed, turn.pendingUI
-		turn.mu.Unlock()
-		if !closed || pending != 0 {
-			t.Fatalf("UI admission closed = %v with %d pending", closed, pending)
-		}
+		<-done
+		consumedAfterJoin(t, wrapper, turn)
 	})
 	t.Run("pending cancellation fails", func(t *testing.T) {
 		wrapper, turn := setup(t, 1)
-		done := make(chan error, 1)
-		go func() { done <- wrapper.refuseForwarded(turn, refused, "failed") }()
+		done := make(chan struct{})
+		go func() { wrapper.refuseForwarded(turn, refused, "failed"); close(done) }()
 		turn.mu.Lock()
 		turn.pendingUI--
 		turn.failLocked(errNativeRPCBusy)
 		turn.mu.Unlock()
-		if err := <-done; err != nil {
-			t.Fatalf("a failed cancellation was returned as %v", err)
-		}
+		<-done
 		turn.mu.Lock()
-		failure := turn.failure
+		handled, failure := turn.handled, turn.failure
 		turn.mu.Unlock()
-		if !errors.Is(failure, errNativeRPCBusy) {
-			t.Fatalf("turn failure = %v", failure)
+		if handled != nil || !errors.Is(failure, errNativeRPCBusy) {
+			t.Fatalf("turn = consumed %v, failure %v", handled, failure)
 		}
 	})
 }

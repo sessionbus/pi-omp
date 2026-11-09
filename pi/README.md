@@ -126,6 +126,9 @@ Run follows the forwarded run; if that forwarded prompt fails before its run
 starts, the Run is unavailable with both answers, and the lane stays open.
 When Pi answers that an extension handled the Run's prompt, the Run follows
 the extension's forwarded run if its preflight came first; otherwise only
-that Run is unavailable (`Pi native prompt: handled`), its input is not
-replayed, and the lane stays open. Dialogs that
+that Run is unavailable (`Pi native prompt: handled`), and the lane stays
+open. In both cases the extension received the input, so it is not replayed,
+and a message that started the Run gets an uncertain receipt and is not
+resent. The extension may still run that prompt later, as Pi's own work
+outside any Run, so a caller that retries can repeat its effects. Dialogs that
 Pi's own work raises in a lane are cancelled, as the lane's own are.

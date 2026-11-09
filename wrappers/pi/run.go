@@ -24,9 +24,11 @@ var errPiRunInterrupted = errors.New("Pi Run interrupted before native admission
 // run which failed before it started.
 var errPiForwardedStartFailed = errors.New("Pi forwarded prompt failed before its run started")
 
-// piPromptHandled is Pi's "handled" answer to the lane's own prompt before
-// any preflight of ours: an extension consumed the prompt, so Pi ran nothing
-// for this Run. Only the Run ends; the handoff was consumed, not replayed.
+// piPromptHandled ends a Run whose prompt an extension received while Pi
+// ran nothing for it: Pi answered "handled" before any preflight of ours, or
+// the prompt an input extension forwarded failed before its run started.
+// Only the Run ends; the handoff is consumed, not replayed, and a delivery
+// seed is uncertain.
 type piPromptHandled struct{ err error }
 
 func (handled *piPromptHandled) Error() string { return handled.err.Error() }
@@ -102,7 +104,8 @@ type piNativeTurn struct {
 	forwardFollowing bool
 	forwardFailed    bool
 	forwardFailure   string
-	// handled: Pi answered "handled" before our preflight (piPromptHandled).
+	// handled: the Run's prompt was consumed (piPromptHandled); the turn is
+	// no longer ours, and later frames, witnesses and dialogs are Pi's own work.
 	handled error
 }
 
@@ -208,6 +211,14 @@ func (turn *piNativeTurn) recordForwardFailure(settled int, text string) {
 	turn.signalLocked()
 }
 
+// consumed reports whether the Run's prompt was consumed (piPromptHandled):
+// the turn is no longer ours.
+func (turn *piNativeTurn) consumed() bool {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	return turn.handled != nil
+}
+
 // uiJoined is ready once every owned dialog's cancellation has finished, and
 // closes UI admission at that boundary, as terminal does.
 func (turn *piNativeTurn) uiJoined() (bool, <-chan struct{}, error) {
@@ -226,6 +237,10 @@ func (turn *piNativeTurn) uiJoined() (bool, <-chan struct{}, error) {
 func (turn *piNativeTurn) recordStart(settling bool) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
+	if turn.handled != nil {
+		// A witness that reached a consumed turn is Pi's own work.
+		return nil
+	}
 	if turn.failure != nil {
 		return turn.failure
 	}
@@ -245,6 +260,9 @@ func (turn *piNativeTurn) recordStart(settling bool) error {
 func (turn *piNativeTurn) recordSettling(leaf string) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
+	if turn.handled != nil {
+		return nil
+	}
 	if turn.failure != nil {
 		return turn.failure
 	}
@@ -261,6 +279,11 @@ func (turn *piNativeTurn) recordSettling(leaf string) error {
 func (turn *piNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
+	if turn.handled != nil {
+		// A frame that reached a consumed turn, after its observer sampled
+		// the turn before the consume, is Pi's own work.
+		return nil
+	}
 	if turn.failure != nil {
 		return turn.failure
 	}
@@ -364,6 +387,13 @@ func (turn *piNativeTurn) terminal() (bool, <-chan struct{}, error) {
 
 func (turn *piNativeTurn) cancelUI(requestID string) error {
 	turn.mu.Lock()
+	if turn.handled != nil {
+		// A dialog that reached a consumed turn, after its observer sampled
+		// the turn before the consume, is cancelled as Pi's own work.
+		turn.mu.Unlock()
+		go turn.owner.cancelOwnWorkUI(turn.owner.ctx, turn.owner.rpc, requestID)
+		return nil
+	}
 	if turn.failure != nil {
 		err := turn.failure
 		turn.mu.Unlock()
@@ -533,7 +563,7 @@ func (p *Wrapper) observeRunEvent(kind string, raw json.RawMessage) error {
 			p.mu.Lock()
 			turn, closing, settled := p.active, p.closing, p.nativeSettles
 			p.mu.Unlock()
-			if turn != nil && !closing {
+			if turn != nil && !closing && !turn.consumed() {
 				turn.recordForwardFailure(settled, event.Error)
 			}
 			return nil
@@ -548,6 +578,10 @@ func (p *Wrapper) observeRunEvent(kind string, raw json.RawMessage) error {
 	p.mu.Unlock()
 	if closing {
 		return nil
+	}
+	if turn != nil && turn.consumed() {
+		// The extension owns what follows a consumed prompt.
+		turn, own = nil, true
 	}
 	if extensionFailure != nil {
 		if turn == nil {
@@ -653,6 +687,10 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 	turn, opened, closing := p.active, p.opened, p.closing
 	settled, own, rpc, ctx := p.nativeSettles, p.ownWork, p.rpc, p.ctx
 	p.mu.Unlock()
+	if turn != nil && turn.consumed() {
+		// A dialog after a consumed prompt is the extension's work.
+		turn, own = nil, true
+	}
 	if !opened || closing || turn == nil && !own {
 		return fmt.Errorf("Pi native requested unsupported startup UI method %q", event.Method)
 	}
@@ -713,11 +751,17 @@ func (p *Wrapper) recordRunInput(sessionID, source, text string, settling bool) 
 // work, which does not end the lane.
 func (p *Wrapper) witnessTurn(sessionID string) (*piNativeTurn, bool, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.opened || p.closing || p.failure != nil || sessionID != p.id || (p.active == nil && !p.ownWork) {
+		p.mu.Unlock()
 		return nil, false, errors.New("Pi Run witness has no matching native owner")
 	}
-	return p.active, p.ownWork, nil
+	turn, own := p.active, p.ownWork
+	p.mu.Unlock()
+	if turn != nil && turn.consumed() {
+		// A consumed turn's witnesses are the extension's work.
+		return nil, true, nil
+	}
+	return turn, own, nil
 }
 
 func (p *Wrapper) recordRunPreflight(sessionID, prompt string, settling bool, leaf string, settled int) (string, error) {
@@ -882,10 +926,10 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			turn.mu.Lock()
 			forwardFailure := turn.forwardFailure
 			turn.mu.Unlock()
-			if refusalErr := p.refuseForwarded(turn, refusal, forwardFailure); refusalErr != nil {
-				return nil, refusalErr
-			}
-			// An owned dialog's cancellation failed: the existing loss path.
+			// Consumed, or the failed turn when an owned dialog's cancellation
+			// failed (the existing loss path): the turn is returned either way,
+			// so the handoff is consumed.
+			p.refuseForwarded(turn, refusal, forwardFailure)
 			return turn, nil
 		}
 		turn.mu.Lock()
@@ -909,26 +953,30 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	return turn, nil
 }
 
-// refuseForwarded ends only this Run, as an unwitnessed refusal does: the
-// run that our input started through an input extension failed before it
-// started, so Pi ran nothing for this Run. Nothing is replayed. A dialog in
-// that window was ours: its cancellation is joined first and UI admission
-// closed, as at the terminal. If a cancellation failed, it returns nil and
-// the failed turn takes the existing loss path.
-func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure string) error {
+// refuseForwarded consumes this Run: the prompt that an input extension
+// forwarded from our input failed before its run started, so Pi ran nothing
+// for this Run, while the extension received the content. A dialog in that
+// window was ours: its cancellation is joined first and UI admission closed,
+// as at the terminal. If a cancellation failed, the turn keeps its failure
+// and takes the existing loss path; otherwise Wait answers piPromptHandled.
+func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure string) {
 	if err := turn.await(p.ctx, turn.uiJoined); err != nil {
 		turn.mu.Lock()
 		if turn.failure == nil {
 			turn.failLocked(err)
 		}
 		turn.mu.Unlock()
-		return nil
+		return
 	}
+	turn.mu.Lock()
+	turn.handled = &piPromptHandled{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
+	turn.terminalOwned = true
+	turn.signalLocked()
+	turn.mu.Unlock()
 	p.mu.Lock()
 	p.ownWork = true
 	p.mu.Unlock()
 	p.finishNativeTurn(turn)
-	return &piPromptRefusal{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
 }
 
 // handledBeforePreflight ends only this Run when Pi answered "handled" and
@@ -944,15 +992,35 @@ func (p *Wrapper) handledBeforePreflight(turn *piNativeTurn, disposition string)
 	// its path and nil is returned. Otherwise a preflight handler that
 	// already holds this turn mints no token for it, no UI is admitted, and
 	// an Interrupt sends no abort for the work that the extension now owns.
-	turn.mu.Lock()
-	if turn.input && turn.preflight || turn.failure != nil {
+	// Dialogs our turn owned before the answer are joined first, inside the
+	// same decision; only the consume closes UI admission.
+	committed := false
+	err := turn.await(p.ctx, func() (bool, <-chan struct{}, error) {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.input && turn.preflight || turn.failure != nil {
+			return true, turn.changed, nil
+		}
+		if turn.pendingUI != 0 {
+			return false, turn.changed, nil
+		}
+		turn.handled = &piPromptHandled{err: fmt.Errorf("Pi native prompt: %s", disposition)}
+		turn.terminalOwned, turn.uiClosed = true, true
+		turn.signalLocked()
+		committed = true
+		return true, turn.changed, nil
+	})
+	if err != nil {
+		turn.mu.Lock()
+		if turn.failure == nil {
+			turn.failLocked(err)
+		}
 		turn.mu.Unlock()
 		return nil
 	}
-	turn.handled = &piPromptHandled{err: fmt.Errorf("Pi native prompt: %s", disposition)}
-	turn.terminalOwned, turn.uiClosed = true, true
-	turn.signalLocked()
-	turn.mu.Unlock()
+	if !committed {
+		return nil
+	}
 	p.mu.Lock()
 	p.ownWork = true
 	p.mu.Unlock()
@@ -1035,11 +1103,11 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 	})
 	var handled *piPromptHandled
 	if errors.As(err, &handled) {
-		// An extension consumed the prompt and Pi ran nothing for it: only
-		// this Run ends. A delivery seed was consumed too, so its receipt is
-		// uncertain and the sender does not resend it.
+		// An extension received the prompt and Pi ran nothing for it: only
+		// this Run ends. A delivery seed was received too, so its receipt is
+		// uncertain (no_receipt) and the sender does not resend it.
 		if seed.Delivery != nil {
-			if reportErr := run.ReportDelivery(sessionkit.DeliveryReceipt{}, err); reportErr != nil {
+			if reportErr := run.ReportDelivery(sessionkit.DeliveryReceipt{}, uncertainSubmission()); reportErr != nil {
 				p.lose(reportErr)
 				return sessionkit.TurnResult{}, errors.Join(err, reportErr)
 			}
