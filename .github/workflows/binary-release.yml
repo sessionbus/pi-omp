@@ -32,6 +32,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install Pi test kit
+        run: npm ci --prefix pi --ignore-scripts
       - name: Validate source and build archives
         env:
           TARGET_OS: ${{ matrix.os }}
