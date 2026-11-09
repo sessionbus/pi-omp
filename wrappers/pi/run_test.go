@@ -597,17 +597,26 @@ func TestPiRefusedPromptAfterAWitnessedRunKeepsOwningIt(t *testing.T) {
 // An input extension forwards our prompt, Pi refuses the original as busy,
 // and the forwarded prompt fails in its preparation after our preflight and
 // before its run starts. Pi reports that only as a runtime send_user_message
-// extension_error, before or after the busy reply. The Run ends unavailable
-// with both texts, nothing is replayed, and the next Run on the lane works.
-// Before this change the Run waited for a start that never came.
+// extension_error, before or after the busy reply, with or without a
+// message. The Run ends unavailable with both texts, nothing is replayed, and
+// the next Run on the lane works. Before this change the Run waited for a
+// start that never came.
 func TestPiForwardedPromptFailingBeforeItsStartEndsOnlyTheRun(t *testing.T) {
-	for _, mode := range []string{"run-refuse-forward-fail-before", "run-refuse-forward-fail-after"} {
+	for _, mode := range []string{
+		"run-refuse-forward-fail-before", "run-refuse-forward-fail-after",
+		"run-refuse-forward-fail-empty-before", "run-refuse-forward-fail-empty-after",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			lane := newPiSDKLane(t, mode)
 			responses := map[int64]protocol.Frame{}
 			lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+			// The forwarded failure's own text, empty included, ends the reason.
+			text := "forwarded prompt failed"
+			if strings.Contains(mode, "-empty-") {
+				text = ""
+			}
 			if state, _, reason := lane.terminal(responses); state != "unavailable" ||
-				!strings.Contains(reason, "Agent is already processing") || !strings.Contains(reason, "forwarded prompt failed") {
+				!strings.Contains(reason, "Agent is already processing") || !strings.HasSuffix(reason, "before its run started: "+text) {
 				t.Fatalf("Run whose forwarded prompt failed = %s, %q", state, reason)
 			}
 			lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "next prompt"})

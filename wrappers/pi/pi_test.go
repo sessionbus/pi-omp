@@ -352,10 +352,15 @@ func runPiNativeHelper(mode string) error {
 				response["success"] = false
 				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 				reply, _ := json.Marshal(response)
-				failure := `{"type":"extension_error","extensionPath":"<runtime>","event":"send_user_message","error":"forwarded prompt failed"}`
-				frames := []string{failure, string(reply)}
-				if mode == "run-refuse-forward-fail-after" {
-					frames = []string{string(reply), failure}
+				// Pi can also throw an Error with an empty message.
+				text := "forwarded prompt failed"
+				if strings.Contains(mode, "-empty-") {
+					text = ""
+				}
+				failure, _ := json.Marshal(map[string]string{"type": "extension_error", "extensionPath": "<runtime>", "event": "send_user_message", "error": text})
+				frames := []string{string(failure), string(reply)}
+				if strings.HasSuffix(mode, "-after") {
+					frames = []string{string(reply), string(failure)}
 				}
 				for _, line := range frames {
 					if _, err = fmt.Fprintln(writer, line); err != nil {

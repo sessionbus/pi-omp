@@ -87,10 +87,12 @@ type piNativeTurn struct {
 	interruptError   error
 	report           func(sessionkit.DeliveryReceipt, error) error
 	// The forwarded-failure window: armed before our prompt is sent; a
-	// forwarded prompt's start failure recorded in it; following once Pi
-	// refused our prompt for the forwarded run that our input started.
+	// forwarded prompt's start failure recorded in it (forwardFailed, with
+	// Pi's text, which can be empty); following once Pi refused our prompt
+	// for the forwarded run that our input started.
 	forwardArmed     bool
 	forwardFollowing bool
+	forwardFailed    bool
 	forwardFailure   string
 }
 
@@ -184,10 +186,10 @@ func (turn *piNativeTurn) recordForwardFailure(settled int, text string) {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	if !turn.forwardArmed || !turn.input || !turn.preflight || turn.base != settled ||
-		turn.started != 0 || turn.nativeStarts != 0 || turn.failure != nil || turn.admitted || turn.forwardFailure != "" {
+		turn.started != 0 || turn.nativeStarts != 0 || turn.failure != nil || turn.admitted || turn.forwardFailed {
 		return
 	}
-	turn.forwardFailure = text
+	turn.forwardFailed, turn.forwardFailure = true, text
 	turn.signalLocked()
 }
 
@@ -302,7 +304,7 @@ func (turn *piNativeTurn) admission() (bool, <-chan struct{}, error) {
 	if turn.failure != nil {
 		return false, turn.changed, turn.failure
 	}
-	if turn.forwardFollowing && turn.forwardFailure != "" {
+	if turn.forwardFollowing && turn.forwardFailed {
 		return false, turn.changed, errPiForwardedStartFailed
 	}
 	ready := turn.input && turn.preflight && turn.started > 0 && turn.nativeStarts > 0 &&
