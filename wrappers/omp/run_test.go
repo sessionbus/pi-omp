@@ -1400,6 +1400,62 @@ func TestOMPOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
 	}
 }
 
+// Close sets closing and ends native input before it cancels the wrapper
+// context, so an own-work dialog cancellation already under way can meet the
+// RPC's closed error while the context is live. That is the orderly end, not
+// a loss: Close would join it and fail a clean close. A busy writer while
+// closing, and a closed RPC while the lane is not closing, are still losses.
+func TestOMPOwnWorkDialogCancelDuringOrderlyCloseIsNoLoss(t *testing.T) {
+	failure := func(fixture *ompRunFixture) error {
+		fixture.wrapper.mu.Lock()
+		defer fixture.wrapper.mu.Unlock()
+		return fixture.wrapper.failure
+	}
+	closing := func(fixture *ompRunFixture) {
+		fixture.wrapper.mu.Lock()
+		fixture.wrapper.closing = true
+		fixture.wrapper.mu.Unlock()
+	}
+	t.Run("orderly close", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		closing(fixture)
+		if err := fixture.rpc.EndInput(nativeRPCTestContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); err != nil {
+			t.Fatalf("an orderly close recorded a loss: %v", err)
+		}
+	})
+	t.Run("busy while closing", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		closing(fixture)
+		fixture.rpc.mu.Lock()
+		saved := fixture.rpc.pendingWrites
+		fixture.rpc.pendingWrites = fixture.rpc.limits.maxPendingWrites
+		fixture.rpc.mu.Unlock()
+		defer func() {
+			fixture.rpc.mu.Lock()
+			fixture.rpc.pendingWrites = saved
+			fixture.rpc.mu.Unlock()
+		}()
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); !errors.Is(err, errNativeRPCBusy) {
+			t.Fatalf("busy cancellation while closing = %v", err)
+		}
+	})
+	t.Run("closed while live", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		if err := fixture.rpc.EndInput(nativeRPCTestContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); !errors.Is(err, errNativeRPCClosed) {
+			t.Fatalf("closed cancellation on a live lane = %v", err)
+		}
+	})
+}
+
 // OMP's prompt_result travels stdout and our run.preflight travels the
 // bridge, so the result can arrive first. The owner waits once for the
 // extension's earlier reports, finds the preflight and completes the Run; the

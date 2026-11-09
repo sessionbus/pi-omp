@@ -587,15 +587,32 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 	if turn != nil && (!own || turn.ownsStdout(settled)) {
 		return turn.cancelUI(event.ID)
 	}
-	// If that cancellation fails while the lane is live, the dialog would
-	// block Pi's own work and every later Run, so the lane ends with the error
-	// through the usual loss path; nothing is retried.
-	go func() {
-		if err := rpc.CancelUI(ctx, event.ID); err != nil && ctx.Err() == nil {
-			p.lose(fmt.Errorf("Pi own-work dialog could not be cancelled: %w", err))
-		}
-	}()
+	go p.cancelOwnWorkUI(ctx, rpc, event.ID)
 	return nil
+}
+
+// cancelOwnWorkUI cancels a dialog of Pi's own work. If that cancellation
+// fails while the lane is live, the dialog would block Pi's own work and
+// every later Run, so the lane ends with the error through the usual loss
+// path; nothing is retried. Close sets closing and ends native input before
+// it cancels the wrapper context, so a cancellation under way then meets the
+// RPC's closed error with the context live: that is the orderly end, not a
+// loss. Every other error, and a closed RPC while the lane is not closing,
+// still ends the lane.
+func (p *Wrapper) cancelOwnWorkUI(ctx context.Context, rpc *nativeRPC, id string) {
+	err := rpc.CancelUI(ctx, id)
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	if errors.Is(err, errNativeRPCClosed) {
+		p.mu.Lock()
+		closing := p.closing
+		p.mu.Unlock()
+		if closing {
+			return
+		}
+	}
+	p.lose(fmt.Errorf("Pi own-work dialog could not be cancelled: %w", err))
 }
 
 func (p *Wrapper) currentNativeTurn(sessionID string) (*piNativeTurn, error) {

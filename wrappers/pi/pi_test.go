@@ -1013,3 +1013,61 @@ func TestPiOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// Close sets closing and ends native input before it cancels the wrapper
+// context, so an own-work dialog cancellation already under way can meet the
+// RPC's closed error while the context is live. That is the orderly end, not
+// a loss: Close would join it and fail a clean close. A busy writer while
+// closing, and a closed RPC while the lane is not closing, are still losses.
+func TestPiOwnWorkDialogCancelDuringOrderlyCloseIsNoLoss(t *testing.T) {
+	lane := func(t *testing.T, closing bool) (*Wrapper, *nativeRPC) {
+		rpc, _ := newNativeRPCTest(t, func(json.RawMessage) error { return nil }, nativeRPCLimits{})
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		return &Wrapper{opened: true, closing: closing, ctx: ctx, cancel: cancel, rpc: rpc}, rpc
+	}
+	failure := func(wrapper *Wrapper) error {
+		wrapper.mu.Lock()
+		defer wrapper.mu.Unlock()
+		return wrapper.failure
+	}
+	endInput := func(t *testing.T, rpc *nativeRPC) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := rpc.EndInput(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("orderly close", func(t *testing.T) {
+		wrapper, rpc := lane(t, true)
+		endInput(t, rpc)
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); err != nil {
+			t.Fatalf("an orderly close recorded a loss: %v", err)
+		}
+	})
+	t.Run("busy while closing", func(t *testing.T) {
+		wrapper, rpc := lane(t, true)
+		rpc.mu.Lock()
+		saved := rpc.pendingWrites
+		rpc.pendingWrites = rpc.limits.maxPendingWrites
+		rpc.mu.Unlock()
+		defer func() {
+			rpc.mu.Lock()
+			rpc.pendingWrites = saved
+			rpc.mu.Unlock()
+		}()
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); !errors.Is(err, errNativeRPCBusy) {
+			t.Fatalf("busy cancellation while closing = %v", err)
+		}
+	})
+	t.Run("closed while live", func(t *testing.T) {
+		wrapper, rpc := lane(t, false)
+		endInput(t, rpc)
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); !errors.Is(err, errNativeRPCClosed) {
+			t.Fatalf("closed cancellation on a live lane = %v", err)
+		}
+	})
+}
