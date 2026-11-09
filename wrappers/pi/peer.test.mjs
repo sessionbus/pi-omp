@@ -88,12 +88,13 @@ function idleSteer(sessionID, params) {
 
 function ownerFixture({ busy = false, running = false } = {}) {
   const fake = fakeKit();
-  let id = "native-one", name = "Native", appended = [], steered = [];
+  let id = "native-one", name = "Native", appended = [], steered = [], steerFull = false;
   const native = async ({ method, params }) => {
     if (method === "native.describe") return { session_id: id, name, cwd: "/work" };
     if (method === "native.steer") {
       assert.equal(params.run, null);
       if (!running) return idleSteer(id, params);
+      if (steerFull) return { session_id: id, message_id: params.message_id, accepted: false, reason: "queue_full" };
       steered.push(params);
       return { session_id: id, message_id: params.message_id, accepted: true };
     }
@@ -108,6 +109,7 @@ function ownerFixture({ busy = false, running = false } = {}) {
   return {
     owner, fake, appended: () => appended, steered: () => steered,
     setBusy: (value) => { busy = value; }, setRunning: (value) => { running = value; },
+    setSteerFull: (value) => { steerFull = value; },
     setIdentity: (next, title = "") => { id = next; name = title; },
   };
 }
@@ -1055,4 +1057,30 @@ test("after owner.quit a delivery that would wait is refused and waiting items s
   assert.deepEqual(await fixture.owner.call("owner.drain", { session_id: "native-one", witness: "quit" }), { session_id: "native-one", drained: 1 });
   assert.deepEqual(fixture.appended().map((params) => params.message_id), ["before"]);
   await fixture.owner.close();
+});
+
+// When Pi's task holds as many unread steers as the FIFO allows, the native
+// steer answers queue_full: the delivery waits in the FIFO for Pi's next task
+// and is refused only when the FIFO itself is full. A drain at that limit
+// leaves its items waiting and appends nothing.
+test("a delivery at the steer limit waits in the FIFO and is refused only when the FIFO is full", async () => {
+  const f = ownerFixture({ busy: true, running: true });
+  await ready(f.owner);
+  f.setSteerFull(true);
+  const deliver = (id) => f.fake.latest().deliver(inbound(id));
+  assert.deepEqual(await deliver("waits"), { disposition: "queued_for_next_turn" });
+  assert.deepEqual(await f.owner.call("owner.drain", { session_id: "native-one", witness: "before_agent_start" }),
+    { session_id: "native-one", drained: 0 });
+  assert.deepEqual(f.appended(), []);
+  for (let index = 1; index < 256; index++) {
+    assert.equal((await deliver(`capacity-${index}`)).disposition, "queued_for_next_turn");
+  }
+  assert.deepEqual(await deliver("overflow"), { disposition: "rejected", reason: "Pi delivery queue is full" });
+  f.setSteerFull(false);
+  f.setRunning(false);
+  f.setBusy(false);
+  assert.deepEqual(await f.owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" }),
+    { session_id: "native-one", drained: 256 });
+  assert.equal(f.appended()[0].message_id, "waits");
+  await f.owner.close();
 });

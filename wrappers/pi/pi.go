@@ -703,8 +703,13 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	// changed identity, lacks accepted, or contradicts itself is uncertain, as
 	// for OMP's steerPrimary.
 	if answer.SessionID != id || answer.MessageID != request.MessageID || answer.Accepted == nil ||
-		*answer.Accepted && answer.Reason != "" || !*answer.Accepted && answer.Reason != "idle" {
+		*answer.Accepted && answer.Reason != "" || !*answer.Accepted && answer.Reason != "idle" && answer.Reason != "queue_full" {
 		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
+	}
+	if !*answer.Accepted && answer.Reason == "queue_full" {
+		// The Run's unread steers are at the owner FIFO's limits: refused with
+		// that FIFO's reason, as an interactive full queue is.
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "Pi delivery queue is full"}, nil
 	}
 	if !*answer.Accepted {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()

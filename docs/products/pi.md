@@ -11,6 +11,20 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## Steer limit (2026-11-09)
+
+Steers the extension handed to Pi that Pi has not ended yet (the admitted
+steered entries; each leaves at its `message_end`, when it is written to
+history, or at session end) are held to the owner FIFO's limits: 256 entries
+and 8 MiB of message ID plus body bytes, counted as the FIFO counts them. The
+count is taken only when a steer would be sent (a running, non-idle Pi); at
+the limit `native.steer` answers a private `queue_full` and sends nothing.
+Pi is busy then, so in a terminal the owner's append answers busy and the
+delivery waits in the FIFO (`queued_for_next_turn`), refused with
+`Pi delivery queue is full` only when the FIFO is full too. A lane refuses
+it with that reason. Entries are counted from the admitted map itself, so
+no counter is kept that a Run end could reset.
+
 ## Tool-list patterns in managed launches (2026-10-28)
 
 Pi matches `--tools` and `--exclude-tools` entries as exact names or as

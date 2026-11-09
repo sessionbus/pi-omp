@@ -1107,8 +1107,11 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 	for name, test := range map[string]struct {
 		answer    func(session, message string) (json.RawMessage, error)
 		uncertain bool
-		valid     string // "idle" or "injected": a well-formed answer still works
+		valid     string // "idle", "full" or "injected": a well-formed answer still works
 	}{
+		"valid full": {valid: "full", answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": false, "reason": "queue_full"})
+		}},
 		"valid idle": {valid: "idle", answer: func(session, message string) (json.RawMessage, error) {
 			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": false, "reason": "idle"})
 		}},
@@ -1182,6 +1185,11 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 			case test.valid == "idle":
 				if !errors.As(err, &protocolErr) || protocolErr.Code != protocol.NotRunning || receipt.Disposition != "" {
 					t.Fatalf("valid idle = %+v, %v", receipt, err)
+				}
+			case test.valid == "full":
+				// At the steer limit the delivery is refused with the FIFO's reason.
+				if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "Pi delivery queue is full" {
+					t.Fatalf("valid full = %+v, %v", receipt, err)
 				}
 			case err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
 				!test.uncertain && !strings.Contains(err.Error(), "Pi native steer was refused before it was sent"):

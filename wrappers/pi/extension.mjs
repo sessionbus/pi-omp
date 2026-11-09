@@ -24,6 +24,9 @@ const drainWitnesses = Object.freeze([
   "session_compact", "session_compact_failed", "session_tree", "quit",
 ]);
 const sessionEndReasons = Object.freeze(["quit", "reload", "new", "resume", "fork"]);
+// The owner FIFO's limits (peer.mjs), also held by steers Pi has not ended.
+const maxSteeredItems = 256;
+const maxSteeredBytes = 8 << 20;
 
 const toolDescription = `Call Sessionbus using this exact Pi session identity.
 Use list to discover peers and self_info, send to message peers, describe before
@@ -287,6 +290,12 @@ export function createPiExtension({
         // append path then writes it to history once Pi is idle, or refuses it.
         const owned = !quitting && (launch.topology === "interactive" ||
           (typeof params.run === "string" && params.run === record.runToken));
+        // Steers Pi has not ended yet are held to the owner FIFO's limits,
+        // counted only when this one would be sent; an entry leaves the count
+        // only when Pi ends it, or it is written to history or its session ends.
+        if (owned && record.running && !record.ctx.isIdle() && steersAtLimit(record, params)) {
+          return { session_id: record.session_id, message_id: params.message_id, accepted: false, reason: "queue_full" };
+        }
         const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };
         throwIfAborted(signal);
         if (result.accepted === false) {
@@ -428,6 +437,17 @@ export function createPiExtension({
   // is then written to history once, with no turn. One that already started
   // is left as it is. Pi is idle at every settle; if a native change made it
   // busy here, a plain send would steer, so nothing is cleared or written.
+  function steersAtLimit(record, params) {
+    let items = 1;
+    let bytes = Buffer.byteLength(params.message_id) + Buffer.byteLength(params.body);
+    for (const [messageID, admitted] of record.admittedMessages) {
+      if (!admitted.steered) continue;
+      items += 1;
+      bytes += Buffer.byteLength(messageID) + Buffer.byteLength(admitted.body);
+    }
+    return items > maxSteeredItems || bytes > maxSteeredBytes;
+  }
+
   function keepNeverStarted(record, ctx) {
     const candidates = [...record.admittedMessages].filter(([, admitted]) => admitted.steered && !admitted.started);
     if (candidates.length === 0 || !ctx.isIdle()) return;

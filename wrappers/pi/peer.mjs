@@ -42,7 +42,8 @@ function validateSteer(result, sessionID, messageID) {
     throw new Error("Pi native steer response changed identity");
   }
   if (result.accepted ? !exact(result, ["session_id", "message_id", "accepted"])
-                      : !exact(result, ["session_id", "message_id", "accepted", "reason"]) || result.reason !== "idle") {
+                      : !exact(result, ["session_id", "message_id", "accepted", "reason"]) ||
+                        result.reason !== "idle" && result.reason !== "queue_full") {
     throw new Error("Pi native steer answer is invalid");
   }
   return result;
@@ -424,6 +425,8 @@ export class PiInteractiveOwner {
         signal,
       });
       if (ended()) break;
+      // At the steer limit Pi is running, so the append below answers busy
+      // and the item waits for the next drain.
       if (validateSteer(steered, session, item.message_id).accepted !== true) {
         const answer = await this.#native({
           method: "native.append",
@@ -473,6 +476,8 @@ export class PiInteractiveOwner {
     if (token !== this.#peerToken || signal.aborted || this.#session !== sessionID) {
       return { disposition: "rejected", reason: "native owner closed" };
     }
+    // At the steer limit (queue_full) Pi is running, so the append below
+    // answers busy and the delivery waits here for Pi's next task.
     if (this.#queue.length) return this.#enqueue(request.message_id, body);
     const result = validateAppend(await this.#native({
       method: "native.append",

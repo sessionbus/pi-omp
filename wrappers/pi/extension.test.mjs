@@ -374,6 +374,54 @@ test("lane reports only its own rpc run, with the settle count and leaves", asyn
 // An interactive session has no Run: a peer message goes into Pi's steering
 // queue while a native run is active (before_agent_start to agent_settled),
 // and run must be null.
+// Steers Pi has not ended count against the owner FIFO's limits (256 items,
+// 8 MiB of id and body bytes), only when one would be sent: at the limit the
+// next is refused (queue_full) and not sent, and Pi's end of one frees a slot.
+// An idle session still answers idle, so the owner appends.
+test("native.steer holds unread steers to the FIFO limits", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message) => { sends.push(message.details.message_id); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const steer = (id, body = "peer") => owner.native("native.steer", { session_id: "native-1", message_id: id, body, run: runToken(1) });
+  const answer = (id, reason) => ({ session_id: "native-1", message_id: id, accepted: !reason, ...(reason ? { reason } : {}) });
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
+  native.setIdle(false);
+  for (let index = 0; index < 256; index += 1) assert.deepEqual(await steer(`s-${index}`), answer(`s-${index}`));
+  assert.deepEqual(await steer("over"), answer("over", "queue_full"));
+  assert.equal(sends.length, 256);
+  const message = { role: "custom", customType: "sessionbus.message", content: "peer", details: { message_id: "s-0" } };
+  await native.emit("message_start", { type: "message_start", message });
+  await native.emit("message_end", { type: "message_end", message });
+  assert.deepEqual(await steer("over"), answer("over"));
+  assert.deepEqual(await steer("next"), answer("next", "queue_full"));
+  native.setIdle(true);
+  assert.deepEqual(await steer("idle"), answer("idle", "idle"));
+  assert.equal(sends.length, 257);
+  assert.equal(native.shutdown(), 0);
+});
+
+// The byte limit counts each unread steer's id and body.
+test("native.steer holds unread steers to the FIFO byte limit", async () => {
+  const native = nativeFixture();
+  const sends = [];
+  native.pi.sendMessage = (message) => { sends.push(message.details.message_id); };
+  const owner = fakeConnection({ topology: "lane" });
+  createPiExtension({ launch: launch("lane"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  const body = "x".repeat((1 << 20) - 64);
+  const steer = (id) => owner.native("native.steer", { session_id: "native-1", message_id: id, body, run: runToken(1) });
+  await native.emit("input", { type: "input", source: "rpc", text: "first" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "first" });
+  native.setIdle(false);
+  for (let index = 0; index < 8; index += 1) assert.equal((await steer(`b-${index}`)).accepted, true);
+  assert.deepEqual(await steer("b-over"), { session_id: "native-1", message_id: "b-over", accepted: false, reason: "queue_full" });
+  assert.equal(sends.length, 8);
+});
+
 test("interactive native.steer steers into the running task and refuses an idle session", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const sends = [];

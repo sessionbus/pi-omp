@@ -47,7 +47,8 @@ refusal of the Peer's hello still ends Pi.
 In a managed interactive terminal, a peer message that arrives while Pi is
 running a task goes into Pi's own steering queue, which the task reads at its
 next boundary; its receipt is `injected`. An idle session starts a turn with
-it (`written`). While Pi is busy without a task, for example compacting, the
+it (`written`). Pi holds at most 256 such steered messages (8 MiB) that it has
+not read yet; further messages wait in the FIFO for its next task. While Pi is busy without a task, for example compacting, the
 message waits in the extension's FIFO (`queued_for_next_turn`) and goes into
 the next task, in order. Pressing Escape in Pi's terminal aborts the task and
 clears Pi's queues (Pi 1.2.0 `interactive-mode.js:3891-3908`,
@@ -107,8 +108,10 @@ steering queue, which the running task reads at its next boundary (after the
 current tool calls, before its next model request). Its receipt is
 `injected`: handed to the running task, not yet seen by the model. If that
 Run ends, for example interrupted, before Pi reads the message, Pi keeps it
-queued and the next Run reads it; it is not lost. Without an active Run the
-lane is not running and the daemon starts a later Run.
+queued and the next Run reads it; it is not lost. Pi holds at most 256 such
+messages (8 MiB) that it has not read yet; a further one is refused with
+`Pi delivery queue is full`. Without an active Run the lane is not running
+and the daemon starts a later Run.
 
 A lane's Run ends when Pi settles its run. Pi can then run work of its own,
 for example a run another extension starts; that work is not part of the
