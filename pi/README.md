@@ -73,7 +73,9 @@ while such a message or a peer message queued for Pi's next task waits, the
 extension aborts it, as Escape does, and waits up to 2 seconds for Pi to
 settle; if Pi has not settled by then, nothing is written and Pi quits. Peer messages still
 waiting for Pi's next task are written to history the same way, after those,
-in arrival order; no new task starts while Pi quits.
+in arrival order; no new task starts while Pi quits. A peer message that
+arrives while Pi quits is written to history if Pi is idle, and is otherwise
+refused.
 A peer delivery accepted while another extension's settled handler runs can
 be lost if an earlier deferred Pi action fails (a Pi defect, reported as
 [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955)).

@@ -252,13 +252,15 @@ export class PiInteractiveOwner {
   get done() { return this.#done.promise; }
 
   async call(method, params, { signal } = {}) {
+    // A closed owner holds no FIFO and admits nothing, so quit goes on and
+    // still writes Pi's unread steers to history.
+    if (method === "owner.quit") return this.#quit(params);
     if (this.#closed) throw new Error("Pi interactive owner is closed");
     switch (method) {
       case "owner.ready": return this.#ready(params, signal);
       case "session_end": return this.#sessionEnd(params);
       case "owner.drain": return this.#drain(params, signal);
       case "owner.before_tree": return this.#beforeTree(params);
-      case "owner.quit": return this.#quit(params);
       case "tool.call": return this.#toolCall(params, signal);
       default: throw new Error("Pi interactive owner method is unavailable");
     }
@@ -374,7 +376,9 @@ export class PiInteractiveOwner {
   // is refused from now on instead of queued and dropped at session end. The
   // reply says whether deliveries already wait; the quit drain writes them.
   #quit(params) {
-    if (!exact(params, ["session_id"]) || params.session_id !== this.#session) throw new Error("invalid Pi quit");
+    if (!exact(params, ["session_id"]) || !validText(params.session_id, 256)) throw new Error("invalid Pi quit");
+    if (this.#closed) return { session_id: params.session_id, pending: false };
+    if (params.session_id !== this.#session) throw new Error("invalid Pi quit");
     this.#quitClosed = true;
     return { session_id: params.session_id, pending: this.#queue.length !== 0 };
   }

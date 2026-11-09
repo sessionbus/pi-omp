@@ -1084,3 +1084,15 @@ test("a delivery at the steer limit waits in the FIFO and is refused only when t
   assert.equal(f.appended()[0].message_id, "waits");
   await f.owner.close();
 });
+
+// A closed owner (finished, or closed by its host) answers owner.quit with
+// nothing pending instead of failing, so the extension's quit still writes
+// Pi's unread steers to history, as before the quit query existed.
+test("owner.quit on a closed owner answers nothing pending", async () => {
+  const fixture = ownerFixture();
+  await ready(fixture.owner);
+  await fixture.owner.close();
+  assert.deepEqual(await fixture.owner.call("owner.quit", { session_id: "native-one" }), { session_id: "native-one", pending: false });
+  await assert.rejects(fixture.owner.call("owner.quit", { session_id: "" }), /invalid Pi quit/);
+  await assert.rejects(fixture.owner.call("owner.drain", { session_id: "native-one", witness: "quit" }), /owner is closed/);
+});
