@@ -280,7 +280,9 @@ export function createPiExtension({
         }
         throwIfAborted(signal);
         // A lane's Run token, Pi's run state and the send are one synchronous
-        // step, so a steer made for an earlier Run never enters a later one.
+        // step, so a steer that arrives after its Run ended is refused. A
+        // steer accepted during its Run that Pi has not read when the Run
+        // ends stays in Pi's queue and is read in the next Run: not lost.
         const owned = launch.topology === "interactive" ||
           (typeof params.run === "string" && params.run === record.runToken);
         const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };

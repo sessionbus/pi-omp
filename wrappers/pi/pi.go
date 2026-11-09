@@ -649,9 +649,10 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 // native prompt is admitted and not settled, the managed extension puts it in
 // Pi's steering queue, which the running task reads at its next boundary.
 // The steer carries the Run's token; the extension checks it, Pi's run state
-// and sends in one synchronous step, so a steer for this Run cannot enter a
-// later one. Otherwise the lane is not running and the daemon starts a later
-// Run.
+// and sends in one synchronous step, so a steer that arrives after this Run
+// ended is refused. An accepted steer that Pi has not read when this Run ends
+// stays in Pi's queue for the next Run. Otherwise the lane is not running and
+// the daemon starts a later Run.
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	body, err := host.RenderNativeMessage(request)
 	if err != nil {

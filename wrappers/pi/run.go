@@ -38,7 +38,9 @@ func (failure *piPromptFailure) Unwrap() error { return failure.err }
 
 // newPiRunToken names one owned native run. The managed extension holds it
 // from the run's preflight acknowledgement to its settle, and native.steer
-// must carry it, so a steer made for one Run never enters a later one.
+// must carry it, so a steer that arrives after its Run ended is refused. A
+// steer accepted during its Run that Pi has not read when the Run ends stays
+// in Pi's queue and is read in the next Run.
 func newPiRunToken() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

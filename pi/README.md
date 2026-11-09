@@ -101,8 +101,10 @@ does not create a native session or make a model request.
 A peer message that arrives while a lane's Run is active goes into Pi's own
 steering queue, which the running task reads at its next boundary (after the
 current tool calls, before its next model request). Its receipt is
-`injected`: handed to the running task, not yet seen by the model. Without
-an active Run the lane is not running and the daemon starts a later Run.
+`injected`: handed to the running task, not yet seen by the model. If that
+Run ends, for example interrupted, before Pi reads the message, Pi keeps it
+queued and the next Run reads it; it is not lost. Without an active Run the
+lane is not running and the daemon starts a later Run.
 
 A lane's Run ends when Pi settles its run. Pi can then run work of its own,
 for example a run another extension starts; that work is not part of the
