@@ -396,3 +396,41 @@ func TestOMPRunWithAPromptOverTheFrameOnceEncodedEndsOnlyTheRun(t *testing.T) {
 	fixture.completeOwnedRun(t, 1, "next prompt", "next answer")
 	fixture.requireLane(t)
 }
+
+// A dialog that OMP's own work opens after our prompt failed before its run
+// belongs to no Run. It is cancelled as OMP's own work, the failed Run ends
+// with its prompt failure, and the lane stays. Before this change the failed
+// Run adopted the dialog, so the end of that Run cut its cancellation off.
+func TestOMPDialogAfterAPromptFailedBeforeItsRunIsOMPOwnWork(t *testing.T) {
+	for name, fail := range map[string]func(fixture *ompRunFixture, t *testing.T, id string){
+		"late prompt refusal": func(fixture *ompRunFixture, t *testing.T, id string) {
+			fixture.failPrompt(t, id, "No API key found for deepseek.")
+		},
+		"ended before its run": func(fixture *ompRunFixture, t *testing.T, id string) {
+			fixture.endPromptBeforeRun(t, id, "aborted", "")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			id, started := fixture.prompt(t, "owned prompt", "")
+			fail(fixture, t, id)
+			start := <-started
+			if start.err != nil || start.turn == nil {
+				t.Fatalf("start = %#v, %v", start.turn, start.err)
+			}
+			fixture.peer.write(t, `{"type":"extension_ui_request","id":"late-dialog","method":"confirm","title":"own","message":"continue"}`)
+			_, err := start.turn.Wait(nativeRPCTestContext(t))
+			var failure *nativePromptFailure
+			if !errors.As(err, &failure) {
+				t.Fatalf("failed Run = %v", err)
+			}
+			cancel := fixture.peer.read(t)
+			if nativeRPCField(t, cancel, "type") != "extension_ui_response" || nativeRPCField(t, cancel, "id") != "late-dialog" || string(cancel["cancelled"]) != "true" {
+				t.Fatalf("late dialog cancellation = %#v", cancel)
+			}
+			fixture.requireLane(t)
+			fixture.completeOwnedRun(t, 1, "next prompt", "next answer")
+			fixture.requireLane(t)
+		})
+	}
+}

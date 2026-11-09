@@ -221,6 +221,8 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 				message = "OMP ended the prompt before its run (" + status + ")"
 			}
 			turn.promptFailure = &nativePromptFailure{err: errors.New(message)}
+			// No run of ours will open a dialog now; a later one is OMP's own.
+			turn.uiClosed = true
 		} else if !invoked {
 			if turn.starts != 0 || turn.preflight || turn.yielded || len(turn.assistants) != 0 {
 				err = errors.New("OMP no-agent result contradicts native Run evidence")
@@ -437,6 +439,8 @@ func (turn *ompNativeTurn) failBeforeRun(err error) bool {
 		return false
 	}
 	turn.promptFailure = &nativePromptFailure{err: err}
+	// No run of ours will open a dialog now; a later one is OMP's own.
+	turn.uiClosed = true
 	turn.signalLocked()
 	return true
 }
