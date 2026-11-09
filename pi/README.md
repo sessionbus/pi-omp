@@ -2,7 +2,8 @@
 
 This archive installs `pi-peer` and its fixed managed extension beside the
 binary. Release v0.5.13 was tested with native `@earendil-works/pi-coding-agent`
-1.3.0; 1.4.0 was checked against its source.
+1.3.0; 1.4.0 and 1.5.0 were checked against their source. Pi 1.5.0 has not
+been run with this release.
 Install that package with its `pi` executable available on the login `PATH`.
 
 For a source build:
