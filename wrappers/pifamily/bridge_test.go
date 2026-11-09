@@ -705,3 +705,49 @@ func waitBridgeAcceptedResponse(t *testing.T, bridge *Bridge) {
 		}
 	}
 }
+
+// Only a Call that returned before its request entered the writer is marked
+// not sent; the cause stays matchable. A remote refusal and a cancellation
+// after the write are not marked, since the other side may have the request.
+func TestBridgeCallMarksOnlyPreWriteFailuresAsNotSent(t *testing.T) {
+	started := make(chan struct{})
+	hostHandler := func(ctx context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		switch method {
+		case "hold":
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		case "refuse":
+			return nil, NewBridgeCallError("stale_owner", "refused")
+		}
+		return json.RawMessage(`null`), nil
+	}
+	limits := DefaultBridgeLimits
+	limits.MaxPendingCalls = 1
+	_, native := newBridgePair(t, hostHandler, nil, limits)
+
+	cancelled, cancel := context.WithCancel(bridgeTestContext(t))
+	cancel()
+	if err := native.Call(cancelled, "ok", map[string]any{}, nil); !errors.Is(err, ErrBridgeNotSent) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled at entry = %v", err)
+	}
+	if err := native.Call(bridgeTestContext(t), "", map[string]any{}, nil); !errors.Is(err, ErrBridgeNotSent) {
+		t.Fatalf("invalid method = %v", err)
+	}
+	var remote *BridgeCallError
+	if err := native.Call(bridgeTestContext(t), "refuse", map[string]any{}, nil); errors.Is(err, ErrBridgeNotSent) || !errors.As(err, &remote) || remote.Code != "stale_owner" {
+		t.Fatalf("remote refusal = %v", err)
+	}
+
+	holdCtx, release := context.WithCancel(bridgeTestContext(t))
+	held := make(chan error, 1)
+	go func() { held <- native.Call(holdCtx, "hold", map[string]any{}, nil) }()
+	<-started
+	if err := native.Call(bridgeTestContext(t), "second", map[string]any{}, nil); !errors.Is(err, ErrBridgeNotSent) || !errors.Is(err, ErrBridgeBusy) || err.Error() != ErrBridgeBusy.Error() {
+		t.Fatalf("busy before write = %v", err)
+	}
+	release()
+	if err := <-held; errors.Is(err, ErrBridgeNotSent) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled after write = %v", err)
+	}
+}

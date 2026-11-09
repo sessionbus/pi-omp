@@ -25,7 +25,17 @@ var (
 	ErrBridgeBusy     = errors.New("Pi-family bridge is busy")
 	ErrBridgeClosed   = errors.New("Pi-family bridge is closed")
 	ErrBridgeProtocol = errors.New("Pi-family bridge protocol violation")
+	// ErrBridgeNotSent marks a Call that returned before its request entered
+	// the writer, so the other side cannot have received it. Match it with
+	// errors.Is; the wrapped cause and its message are unchanged.
+	ErrBridgeNotSent = errors.New("Pi-family bridge request was not sent")
 )
+
+type bridgeNotSentError struct{ err error }
+
+func (e bridgeNotSentError) Error() string        { return e.err.Error() }
+func (e bridgeNotSentError) Unwrap() error        { return e.err }
+func (e bridgeNotSentError) Is(target error) bool { return target == ErrBridgeNotSent }
 
 type BridgeRole string
 
@@ -252,25 +262,26 @@ func (bridge *Bridge) Stats() BridgeStats {
 
 func (bridge *Bridge) Call(ctx context.Context, method string, params, result any) error {
 	if ctx == nil {
-		return errors.New("Pi-family bridge call requires context")
+		return bridgeNotSentError{errors.New("Pi-family bridge call requires context")}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return bridgeNotSentError{err}
 	}
 	if err := validateBridgeMethod(method); err != nil {
-		return err
+		return bridgeNotSentError{err}
 	}
 	paramsBody, err := json.Marshal(params)
 	if err != nil {
-		return fmt.Errorf("encode Pi-family bridge parameters: %w", err)
+		return bridgeNotSentError{fmt.Errorf("encode Pi-family bridge parameters: %w", err)}
 	}
 	if !json.Valid(paramsBody) {
-		return fmt.Errorf("%w: parameters are not JSON", ErrBridgeProtocol)
+		return bridgeNotSentError{fmt.Errorf("%w: parameters are not JSON", ErrBridgeProtocol)}
 	}
 
+	// admitCall fails only before it hands the frame to the writer.
 	id, pending, write, err := bridge.admitCall(method, paramsBody)
 	if err != nil {
-		return err
+		return bridgeNotSentError{err}
 	}
 	if err := waitBridgeWrite(ctx, write); err != nil {
 		if callResult, completed := bridge.abandonPending(id, pending); completed {

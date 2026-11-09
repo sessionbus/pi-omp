@@ -1175,14 +1175,40 @@ func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBi
 	}
 	var raw json.RawMessage
 	if err = bridge.Call(ctx, "native.steer", params, &raw); err != nil {
-		return false, fmt.Errorf("OMP native steer outcome is uncertain: %w", err)
+		if ompSteerRefusedBeforeSend(err) {
+			return false, fmt.Errorf("OMP native steer was refused before it was sent: %w", err)
+		}
+		return false, fmt.Errorf("%w: %w", errOMPSteerUncertain, err)
 	}
 	var result ownerSteerResult
 	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != binding.OwnerToken || result.SessionID != binding.SessionID ||
 		result.MessageID != messageID || result.Accepted == nil || (*result.Accepted && result.Reason != "") || (!*result.Accepted && result.Reason != "idle") {
-		return false, errors.New("OMP native steer outcome is uncertain: its answer is invalid")
+		return false, fmt.Errorf("%w: its answer is invalid", errOMPSteerUncertain)
 	}
 	return *result.Accepted, nil
+}
+
+// errOMPSteerUncertain marks a steer that may have reached OMP.
+var errOMPSteerUncertain = errors.New("OMP native steer outcome is uncertain")
+
+// ompSteerRefusedBeforeSend reports a steer that certainly never reached OMP:
+// the bridge refused it before writing, or the extension refused it before
+// its send (extension.mjs native.steer: method_not_found, stale_owner, and an
+// abort that it checks before sending), or the bridge had no handler
+// capacity. Any other failure may follow the send.
+func ompSteerRefusedBeforeSend(err error) bool {
+	if errors.Is(err, pifamily.ErrBridgeNotSent) {
+		return true
+	}
+	var remote *pifamily.BridgeCallError
+	if !errors.As(err, &remote) {
+		return false
+	}
+	switch remote.Code {
+	case "method_not_found", "stale_owner", "cancelled", "busy":
+		return true
+	}
+	return false
 }
 
 func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID string) (ownerDescribeResult, error) {

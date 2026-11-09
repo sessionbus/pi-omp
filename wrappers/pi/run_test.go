@@ -1075,3 +1075,76 @@ func TestPiPromptOverTheFrameOnceEncodedIsARunOnlyFailure(t *testing.T) {
 		t.Fatalf("oversized prompt left turn %v, lane failure %v", active, lost)
 	}
 }
+
+// A lane steer the extension refused before its send is a definite error, so
+// the sender gets rejected. Any failure that may follow the send, and an
+// invalid answer, is Internal (no_receipt), so the sender does not resend it.
+// Nothing is retried. Before this change every failure was a plain error.
+func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
+	for name, test := range map[string]struct {
+		answer    func(session, message string) (json.RawMessage, error)
+		uncertain bool
+	}{
+		"refused before the send": {answer: func(string, string) (json.RawMessage, error) {
+			return nil, pifamily.NewBridgeCallError("stale_session", "Pi native session identity does not match")
+		}},
+		"handler error": {uncertain: true, answer: func(string, string) (json.RawMessage, error) {
+			return nil, errors.New("native steer failed")
+		}},
+		"cancelled after the send": {uncertain: true, answer: func(string, string) (json.RawMessage, error) {
+			return nil, pifamily.NewBridgeCallError("cancelled", "Pi-family bridge call was cancelled")
+		}},
+		"changed identity": {uncertain: true, answer: func(session, _ string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": "another", "accepted": true})
+		}},
+		"invalid rejection": {uncertain: true, answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": false, "reason": "busy"})
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			left, right := net.Pipe()
+			run := &sessionkit.Run{}
+			wrapper := &Wrapper{opened: true, ctx: ctx, id: "native", run: run, active: &piNativeTurn{admitted: true, token: "run-token"}}
+			calls := 0
+			hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, nil, pifamily.BridgeLimits{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+				var steer struct {
+					SessionID string `json:"session_id"`
+					MessageID string `json:"message_id"`
+				}
+				if method != "native.steer" || json.Unmarshal(raw, &steer) != nil {
+					return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected method")
+				}
+				calls++
+				return test.answer(steer.SessionID, steer.MessageID)
+			}, pifamily.BridgeLimits{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = hostBridge.Close(); _ = nativeBridge.Close() }()
+			if err = hostBridge.Ready(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err = nativeBridge.Ready(ctx); err != nil {
+				t.Fatal(err)
+			}
+			wrapper.bridge = hostBridge
+			receipt, err := wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "steered", Body: "note",
+				From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"}}, run)
+			var protocolErr *sessionkit.ProtocolError
+			isInternal := errors.As(err, &protocolErr) && protocolErr.Code == protocol.Internal && string(protocolErr.Data) == `"uncertain_submission"`
+			if err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
+				!test.uncertain && !strings.Contains(err.Error(), "Pi native steer was refused before it was sent") {
+				t.Fatalf("failed steer = %+v, %v (want uncertain %v)", receipt, err, test.uncertain)
+			}
+			if calls != 1 {
+				t.Fatalf("native steer calls = %d, want 1 (no retry)", calls)
+			}
+		})
+	}
+}

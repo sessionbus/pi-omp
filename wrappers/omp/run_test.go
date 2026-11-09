@@ -1289,21 +1289,31 @@ func TestOMPLaneSteersOnlyItsAdmittedRunBeforeItsYield(t *testing.T) {
 // delivery fails with that reason, is not retried, and neither the Run nor
 // the lane ends. Unlike native.stage, no FIFO order was reserved.
 func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
-	for name, answer := range map[string]func(ownerSteerRequest) (json.RawMessage, error){
-		"bridge error": func(ownerSteerRequest) (json.RawMessage, error) {
+	for name, test := range map[string]struct {
+		answer    func(ownerSteerRequest) (json.RawMessage, error)
+		uncertain bool
+	}{
+		// The extension refuses a stale owner before its send: a definite
+		// refusal, reported as an error so the sender gets rejected.
+		"refused before the send": {answer: func(ownerSteerRequest) (json.RawMessage, error) {
 			return nil, pifamily.NewBridgeCallError("stale_owner", "native steer refused")
-		},
-		"invalid answer": func(request ownerSteerRequest) (json.RawMessage, error) {
+		}},
+		// A handler failure may follow the send.
+		"handler error": {uncertain: true, answer: func(ownerSteerRequest) (json.RawMessage, error) {
+			return nil, errors.New("native steer failed")
+		}},
+		"invalid answer": {uncertain: true, answer: func(request ownerSteerRequest) (json.RawMessage, error) {
 			accepted := false
 			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
 				MessageID: request.MessageID, Accepted: &accepted, Reason: "busy"})
-		},
-		"changed identity": func(request ownerSteerRequest) (json.RawMessage, error) {
+		}},
+		"changed identity": {uncertain: true, answer: func(request ownerSteerRequest) (json.RawMessage, error) {
 			accepted := true
 			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
 				MessageID: "another", Accepted: &accepted})
-		},
+		}},
 	} {
+		answer := test.answer
 		t.Run(name, func(t *testing.T) {
 			fixture := newOMPRunFixture(t)
 			ctx := nativeRPCTestContext(t)
@@ -1316,8 +1326,11 @@ func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
 			}
 			fixture.answerSteers(answer)
 			receipt, err := fixture.wrapper.Deliver(ctx, ompSteerDelivery("uncertain"), run)
-			if err == nil || !strings.Contains(err.Error(), "OMP native steer outcome is uncertain") || receipt.Disposition != "" {
-				t.Fatalf("failed steer = %+v, %v", receipt, err)
+			var protocolErr *kit.ProtocolError
+			isInternal := errors.As(err, &protocolErr) && protocolErr.Code == protocol.Internal && string(protocolErr.Data) == `"uncertain_submission"`
+			if err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
+				!test.uncertain && !strings.Contains(err.Error(), "OMP native steer was refused before it was sent") {
+				t.Fatalf("failed steer = %+v, %v (want uncertain %v)", receipt, err, test.uncertain)
 			}
 			if got := fixture.steers(); len(got) != 1 {
 				t.Fatalf("steers = %+v", got)

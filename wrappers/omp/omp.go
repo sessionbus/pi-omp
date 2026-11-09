@@ -15,8 +15,16 @@ import (
 	"unicode/utf8"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/sdk/go/protocol"
 	"github.com/sessionbus/peer-common/host"
 )
+
+// uncertainSubmission is a delivery that may have reached the native: the
+// Worker passes Internal through and the daemon answers no_receipt (the same
+// form claude-peer uses for an uncertain write).
+func uncertainSubmission() error {
+	return &sessionkit.ProtocolError{Code: protocol.Internal, Message: "internal", Data: json.RawMessage(`"uncertain_submission"`)}
+}
 
 var ompLaneRules = []host.ArgumentRule{
 	{Name: "--system-prompt", TakesValue: true},
@@ -458,6 +466,11 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
 	accepted, err := owner.registry.steerPrimary(ctx, binding, token, request.MessageID, body)
+	if errors.Is(err, errOMPSteerUncertain) {
+		// The steer may have reached OMP: no receipt, so the sender does not
+		// treat it as refused and resend it. Nothing is retried here.
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
+	}
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}

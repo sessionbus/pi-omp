@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/sdk/go/protocol"
 	"github.com/sessionbus/peer-common/host"
 	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
@@ -684,14 +685,19 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		Reason    string `json:"reason"`
 	}
 	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}, &answer); err != nil {
-		return sessionkit.DeliveryReceipt{}, err
+		if piSteerRefusedBeforeSend(err) {
+			return sessionkit.DeliveryReceipt{}, fmt.Errorf("Pi native steer was refused before it was sent: %w", err)
+		}
+		// The steer may have reached Pi: no receipt, so the sender does not
+		// treat it as refused and resend it. Nothing is retried here.
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
 	}
 	if answer.SessionID != id || answer.MessageID != request.MessageID {
-		return sessionkit.DeliveryReceipt{}, errors.New("Pi native steer answer changed identity")
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission() // answer changed identity
 	}
 	if !answer.Accepted {
 		if answer.Reason != "idle" {
-			return sessionkit.DeliveryReceipt{}, errors.New("Pi native steer rejection is invalid")
+			return sessionkit.DeliveryReceipt{}, uncertainSubmission() // rejection is invalid
 		}
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
@@ -779,4 +785,31 @@ func drainPiNativeRPC(ctx context.Context, rpc *nativeRPC) error {
 	case <-ctx.Done():
 		return errors.Join(context.Cause(ctx), rpc.Close())
 	}
+}
+
+// uncertainSubmission is a delivery that may have reached Pi: the Worker
+// passes Internal through and the daemon answers no_receipt (the same form
+// claude-peer uses for an uncertain write).
+func uncertainSubmission() error {
+	return &sessionkit.ProtocolError{Code: protocol.Internal, Message: "internal", Data: json.RawMessage(`"uncertain_submission"`)}
+}
+
+// piSteerRefusedBeforeSend reports a steer that certainly never reached Pi:
+// the bridge refused it before writing, the extension refused its session
+// before the send (extension.mjs native.steer: stale_session), or the bridge
+// had no method or handler capacity for it. Pi's extension checks an abort
+// after its send too, so a cancelled answer stays uncertain.
+func piSteerRefusedBeforeSend(err error) bool {
+	if errors.Is(err, pifamily.ErrBridgeNotSent) {
+		return true
+	}
+	var remote *pifamily.BridgeCallError
+	if !errors.As(err, &remote) {
+		return false
+	}
+	switch remote.Code {
+	case "stale_session", "method_not_found", "busy":
+		return true
+	}
+	return false
 }
