@@ -227,6 +227,22 @@ primary session only.
   `queued_for_next_turn`. A queue that is full is still rejected
   `queue_full`.
 
+## A delayed run end on a lane (2026-11-09)
+
+The managed extension clears a lane Run's steer token at OMP's `agent_end`
+for that run. OMP calls extension `agent_end` hooks without awaiting earlier
+hooks for the next event, and each hook may take up to 30 s, so with a slow
+earlier extension the previous Run's `agent_end` can reach ours after the
+next Run's preflight set its token, and clear it. Steers for the new Run are
+then refused as not running, and the daemon delivers them to a later Run:
+nothing is lost and no receipt is wrong. Clearing only while OMP is idle
+does not help: extension `agent_end` hooks run while OMP still counts the
+owning prompt as in flight, so OMP is never idle there
+(`agent-session.ts` 18.13.2 :3836-3850, :6795-6796). A Go-side "run ended"
+message would need a new bridge method and is not added. The Go owner
+already sends no steer for an ended Run (`omp.go` Deliver); a steer in flight
+when the Run ends is the existing late-steer case.
+
 ## Interactive Escape on OMP 18.11.0 (2026-10-19)
 
 Owner selection (2026-10-19): release with today's behaviour. DEF-20261015-05
