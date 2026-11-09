@@ -854,6 +854,13 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	}
 	handled := len(reply.data) != 0 && decodePiBridge(reply.data, []string{"disposition"}, &answer) == nil &&
 		answer.Disposition == "handled"
+	if handled {
+		// Closed as handled only if, under the same lock, neither our
+		// preflight nor a failure came first; otherwise the paths below.
+		if closed := p.handledBeforePreflight(turn, answer.Disposition); closed != nil {
+			return closed, nil
+		}
+	}
 	turn.mu.Lock()
 	preflight := turn.input && turn.preflight
 	if handled && preflight {
@@ -865,9 +872,6 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	turn.mu.Unlock()
 	if handled && preflight {
 		refusal = fmt.Errorf("Pi native prompt: %s", answer.Disposition)
-	}
-	if handled && !preflight {
-		return p.handledBeforePreflight(turn, answer.Disposition), nil
 	}
 	if !preflight {
 		turn.fail(errors.New("Pi native accepted a prompt without the managed Run preflight"))
@@ -927,18 +931,24 @@ func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure str
 	return &piPromptRefusal{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
 }
 
-// handledBeforePreflight ends only this Run: Pi answered "handled" before
-// any preflight of ours, so an extension consumed the prompt. The turn is
-// returned, so the handoff is consumed and nothing is replayed, and Wait
-// answers piPromptHandled. The refusal tombstone (own work, no active turn)
-// records a later preflight as Pi's own work while no next Run has recorded
-// its input; Pi's preflight carries no prompt identity beyond that.
+// handledBeforePreflight ends only this Run when Pi answered "handled" and
+// no preflight of ours or failure came first: an extension consumed the
+// prompt. The turn is returned, so the handoff is consumed and nothing is
+// replayed, and Wait answers piPromptHandled. The refusal tombstone (own
+// work, no active turn) records a later preflight as Pi's own work while no
+// next Run has recorded its input; Pi's preflight carries no prompt
+// identity beyond that.
 func (p *Wrapper) handledBeforePreflight(turn *piNativeTurn, disposition string) *piNativeTurn {
-	// Close the owned window under the turn lock before detaching: a
-	// preflight handler that already holds this turn mints no token for it,
-	// no UI is admitted, and an Interrupt sends no abort for the work that
-	// the extension now owns.
+	// Decide and close the owned window under one turn lock, before
+	// detaching: if our preflight or a failure came first, the turn stays on
+	// its path and nil is returned. Otherwise a preflight handler that
+	// already holds this turn mints no token for it, no UI is admitted, and
+	// an Interrupt sends no abort for the work that the extension now owns.
 	turn.mu.Lock()
+	if turn.input && turn.preflight || turn.failure != nil {
+		turn.mu.Unlock()
+		return nil
+	}
 	turn.handled = &piPromptHandled{err: fmt.Errorf("Pi native prompt: %s", disposition)}
 	turn.terminalOwned, turn.uiClosed = true, true
 	turn.signalLocked()

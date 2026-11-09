@@ -789,6 +789,76 @@ func TestPiHandledTurnIsClosedBeforeItDetaches(t *testing.T) {
 	}
 }
 
+// The handled commit decides under one turn lock: when our preflight or a
+// failure was recorded before it (between Pi's reply being read and the
+// commit), the turn is not closed as handled and stays on the existing
+// path, the forwarded branch or the failed turn. Before this change the
+// commit closed the turn as handled regardless.
+func TestPiHandledCommitYieldsToAPreflightOrFailure(t *testing.T) {
+	setup := func(t *testing.T) (*Wrapper, *piNativeTurn) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "handled prompt")
+		turn.input = true
+		wrapper.active = turn
+		return wrapper, turn
+	}
+	check := func(t *testing.T, wrapper *Wrapper, turn *piNativeTurn) {
+		t.Helper()
+		if closed := wrapper.handledBeforePreflight(turn, "handled"); closed != nil {
+			t.Fatal("the commit closed the turn as handled")
+		}
+		turn.mu.Lock()
+		handled, terminal := turn.handled, turn.terminalOwned
+		turn.mu.Unlock()
+		wrapper.mu.Lock()
+		active, own := wrapper.active, wrapper.ownWork
+		wrapper.mu.Unlock()
+		if handled != nil || terminal || active != turn || own {
+			t.Fatalf("turn after the commit = handled %v, terminal %v, active %v, own %v", handled, terminal, active == turn, own)
+		}
+	}
+	t.Run("preflight recorded first", func(t *testing.T) {
+		wrapper, turn := setup(t)
+		turn.preflight = true
+		check(t, wrapper, turn)
+	})
+	t.Run("failure recorded first", func(t *testing.T) {
+		wrapper, turn := setup(t)
+		failure := errors.New("owned failure")
+		turn.failure = failure
+		check(t, wrapper, turn)
+		if turn.failure != failure {
+			t.Fatalf("failure = %v", turn.failure)
+		}
+	})
+}
+
+// Racing the handled commit against our preflight, exactly one wins: the
+// turn is closed as handled and no Run token was minted, or the preflight
+// minted its token and the turn is not closed.
+func TestPiHandledCommitAndPreflightRaceHaveOneWinner(t *testing.T) {
+	for range 200 {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "handled prompt")
+		turn.input = true
+		wrapper.active = turn
+		tokens := make(chan string, 1)
+		go func() {
+			token, _ := turn.recordPreflight("forwarded", false, "", 0, false)
+			tokens <- token
+		}()
+		closed := wrapper.handledBeforePreflight(turn, "handled") != nil
+		token := <-tokens
+		if closed == (token != "") {
+			t.Fatalf("handled closed %v with Run token %q", closed, token)
+		}
+		cancel(errors.New("test done"))
+	}
+}
+
 // A forwarded refusal joins the cancellations of dialogs it owned before it
 // detaches, and closes UI admission there, as the terminal does. A failed
 // cancellation is not hidden in the refusal: the failed turn keeps the
