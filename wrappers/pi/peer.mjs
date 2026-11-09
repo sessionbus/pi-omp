@@ -232,6 +232,10 @@ export class PiInteractiveOwner {
   #queueBytes = 0;
   #treeBusy = false;
   #closed = false;
+  // The last drain of the current FIFO generation; drains of one FIFO run
+  // one at a time so one item gets one native submission.
+  #drainChain = Promise.resolve();
+  #drainQueue = null;
   #superseded = false;
   #done = deferred();
   #closing;
@@ -372,6 +376,24 @@ export class PiInteractiveOwner {
   async #drain(params, signal) {
     if (!exact(params, ["session_id", "witness"]) || params.session_id !== this.#session) throw new Error("invalid Pi drain witness");
     if (["session_before_tree_cancelled", "session_tree"].includes(params.witness)) this.#treeBusy = false;
+    // Witnesses can overlap: a scheduled drain's append can start a run whose
+    // before_agent_start drains again while the first is still in its loop.
+    // A later drain waits for the earlier one of the same FIFO. An earlier
+    // failure fails it too, with no native call, so a head that may have been
+    // submitted is never sent again. A new FIFO generation starts fresh.
+    const session = this.#session;
+    const queue = this.#queue;
+    const previous = this.#drainQueue === queue ? this.#drainChain : Promise.resolve();
+    const run = previous.then(() => this.#drainQueued(params, signal, session, queue));
+    this.#drainChain = run;
+    this.#drainQueue = queue;
+    return run;
+  }
+
+  async #drainQueued(params, signal, session, queue) {
+    // Waiting can outlast this session or its FIFO; the replacement is never
+    // drained by an earlier witness.
+    if (this.#closed || this.#queue !== queue || this.#session !== session) return { session_id: params.session_id, drained: 0 };
     let drained = 0;
     while (this.#queue.length) {
       if (signal?.aborted) throw signal.reason;

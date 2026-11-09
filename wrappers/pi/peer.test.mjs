@@ -879,3 +879,138 @@ test("close cancels and joins an admitted actual-kit Caller", { timeout: 5000 },
   await owner.close();
   await action;
 });
+
+// Drains whose witnesses overlap (a scheduled drain's append starts a run
+// whose before_agent_start drains again) hand each FIFO item to native once.
+// Before this change both drains submitted the same retained head.
+test("overlapping drains hand one retained item to native once", { timeout: 5000 }, async () => {
+  const fake = fakeKit(), gate = deferred();
+  let drainOpen = false, steers = 0;
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") {
+      if (!drainOpen) return idleSteer("native-one", params);
+      steers++;
+      await gate.promise;
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    if (method === "native.append") return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  assert.deepEqual(await fake.latest().deliver(inbound("held")), { disposition: "queued_for_next_turn" });
+  drainOpen = true;
+  const first = owner.call("owner.drain", { session_id: "native-one", witness: "session_compact" });
+  const second = owner.call("owner.drain", { session_id: "native-one", witness: "before_agent_start" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(steers, 1, "a second drain submitted while the first was in flight");
+  gate.resolve();
+  assert.deepEqual(await first, { session_id: "native-one", drained: 1 });
+  assert.deepEqual(await second, { session_id: "native-one", drained: 0 });
+  assert.equal(steers, 1);
+  await owner.close();
+});
+
+// Two waiters behind one drain: every item is submitted once, in order, and
+// every drain resolves.
+test("two drains waiting behind one submit each item once", { timeout: 5000 }, async () => {
+  const fake = fakeKit(), gate = deferred();
+  let drainOpen = false;
+  const submitted = [];
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") {
+      if (!drainOpen) return idleSteer("native-one", params);
+      submitted.push(params.message_id);
+      await gate.promise;
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    if (method === "native.append") return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  for (const id of ["one", "two"]) assert.deepEqual(await fake.latest().deliver(inbound(id)), { disposition: "queued_for_next_turn" });
+  drainOpen = true;
+  const drains = ["session_compact", "session_tree", "before_agent_start"].map((witness) =>
+    owner.call("owner.drain", { session_id: "native-one", witness }));
+  await new Promise((resolve) => setImmediate(resolve));
+  gate.resolve();
+  const results = await Promise.all(drains);
+  assert.deepEqual(submitted, ["one", "two"]);
+  assert.equal(results.reduce((sum, result) => sum + result.drained, 0), 2);
+  await owner.close();
+});
+
+// A drain that fails leaves its head uncertain: a drain waiting behind it
+// fails with the same error and makes no native call.
+test("a drain behind a failed drain fails without a native call", { timeout: 5000 }, async () => {
+  const fake = fakeKit(), gate = deferred();
+  let drainOpen = false, steers = 0;
+  const failure = new Error("native steer failed");
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") {
+      if (!drainOpen) return idleSteer("native-one", params);
+      steers++;
+      await gate.promise;
+      throw failure;
+    }
+    if (method === "native.append") return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  assert.deepEqual(await fake.latest().deliver(inbound("held")), { disposition: "queued_for_next_turn" });
+  drainOpen = true;
+  const first = owner.call("owner.drain", { session_id: "native-one", witness: "session_compact" });
+  const second = owner.call("owner.drain", { session_id: "native-one", witness: "before_agent_start" });
+  await new Promise((resolve) => setImmediate(resolve));
+  gate.resolve();
+  await assert.rejects(first, failure);
+  await assert.rejects(second, failure);
+  assert.equal(steers, 1, "the waiting drain retried the uncertain head");
+  await owner.close();
+});
+
+// A drain that waited while the session ended and a new FIFO began does not
+// drain that replacement; the new generation's own drain does.
+test("a drain that waited across a session end leaves the new FIFO alone", { timeout: 5000 }, async () => {
+  const fake = fakeKit(), gate = deferred(), entered = deferred();
+  let drainOpen = false;
+  const submitted = [];
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") {
+      if (!drainOpen) return idleSteer("native-one", params);
+      submitted.push(params.message_id);
+      if (params.message_id === "old") {
+        entered.resolve();
+        await gate.promise;
+      }
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    if (method === "native.append") return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+    throw new Error("unexpected native method");
+  };
+  const owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  assert.deepEqual(await fake.latest().deliver(inbound("old")), { disposition: "queued_for_next_turn" });
+  drainOpen = true;
+  const first = owner.call("owner.drain", { session_id: "native-one", witness: "session_compact" });
+  await entered.promise;
+  const waiter = owner.call("owner.drain", { session_id: "native-one", witness: "before_agent_start" });
+  await owner.call("session_end", { topology: "interactive", session_id: "native-one", reason: "reload" });
+  await ready(owner);
+  drainOpen = false;
+  assert.deepEqual(await fake.latest().deliver(inbound("new")), { disposition: "queued_for_next_turn" });
+  drainOpen = true;
+  gate.resolve();
+  assert.deepEqual(await first, { session_id: "native-one", drained: 0 });
+  assert.deepEqual(await waiter, { session_id: "native-one", drained: 0 });
+  assert.deepEqual(submitted, ["old"], "an earlier witness drained the replacement FIFO");
+  assert.deepEqual(await owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" }), { session_id: "native-one", drained: 1 });
+  assert.deepEqual(submitted, ["old", "new"]);
+  await owner.close();
+});
