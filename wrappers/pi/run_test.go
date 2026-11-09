@@ -594,6 +594,59 @@ func TestPiRefusedPromptAfterAWitnessedRunKeepsOwningIt(t *testing.T) {
 	}
 }
 
+// An input extension forwards our prompt, Pi refuses the original as busy,
+// and the forwarded prompt fails in its preparation after our preflight and
+// before its run starts. Pi reports that only as a runtime send_user_message
+// extension_error, before or after the busy reply. The Run ends unavailable
+// with both texts, nothing is replayed, and the next Run on the lane works.
+// Before this change the Run waited for a start that never came.
+func TestPiForwardedPromptFailingBeforeItsStartEndsOnlyTheRun(t *testing.T) {
+	for _, mode := range []string{"run-refuse-forward-fail-before", "run-refuse-forward-fail-after"} {
+		t.Run(mode, func(t *testing.T) {
+			lane := newPiSDKLane(t, mode)
+			responses := map[int64]protocol.Frame{}
+			lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+			if state, _, reason := lane.terminal(responses); state != "unavailable" ||
+				!strings.Contains(reason, "Agent is already processing") || !strings.Contains(reason, "forwarded prompt failed") {
+				t.Fatalf("Run whose forwarded prompt failed = %s, %q", state, reason)
+			}
+			lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "next prompt"})
+			if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+				t.Fatalf("Run after the failed forward = %s, %s, %q", state, outcome, reason)
+			}
+			for _, id := range []int64{2, 3} {
+				if frame, ok := responses[id]; !ok || frame.Error != nil {
+					t.Fatalf("execute %d response = %+v", id, frame)
+				}
+			}
+			lane.wrapper.mu.Lock()
+			failure := lane.wrapper.failure
+			lane.wrapper.mu.Unlock()
+			if failure != nil {
+				t.Fatalf("lane failed after a forwarded prompt's start failure: %v", failure)
+			}
+		})
+	}
+}
+
+// Only a forwarded prompt's runtime failure ends a witnessed Run: another
+// runtime extension_error in the same window is ignored, the forwarded run
+// starts, and the Run completes.
+func TestPiWitnessedRunIgnoresAnotherRuntimeExtensionError(t *testing.T) {
+	lane := newPiSDKLane(t, "run-refuse-witnessed-other-error")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("witnessed Run with another runtime error = %s, %s, %q", state, outcome, reason)
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after another runtime error: %v", failure)
+	}
+}
+
 func TestPiSDKInterruptCancelsHeldNativeAdmission(t *testing.T) {
 	t.Run("execute", func(t *testing.T) {
 		testPiSDKInterruptCancelsHeldNativeAdmission(t, false, false)

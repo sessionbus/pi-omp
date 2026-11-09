@@ -184,7 +184,7 @@ func runPiNativeHelper(mode string) error {
 	settled, turns := 0, 0
 	ownDialog := false
 	// ownMode keeps history across prompts and honours the append cursor.
-	ownMode := strings.HasPrefix(mode, "run-own-") || mode == "run-refuse" || mode == "run-refuse-witnessed"
+	ownMode := strings.HasPrefix(mode, "run-own-") || strings.HasPrefix(mode, "run-refuse")
 	// Pi's own run, which another extension started: its entries and its
 	// stdout frames, which the lag mode writes after the owned preflight.
 	ownEntries := func() {
@@ -284,11 +284,14 @@ func runPiNativeHelper(mode string) error {
 				return errors.New("helper received invalid native prompt")
 			}
 			turns++
+			forwardFail := strings.HasPrefix(mode, "run-refuse-forward-fail-") && turns == 1
 			steps := []string{"run.input", "run.preflight", "run.start"}
 			if mode == "handled" {
 				steps = nil
 			} else if mode == "run-hold" || mode == "run-refuse" && turns == 1 {
 				steps = steps[:1]
+			} else if forwardFail || mode == "run-refuse-witnessed-other-error" && turns == 1 {
+				steps = steps[:2]
 			}
 			if mode == "run-own-before" && turns == 2 {
 				// A send another extension deferred during the last settle runs
@@ -339,7 +342,32 @@ func runPiNativeHelper(mode string) error {
 				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 				break
 			}
-			if mode == "run-refuse-witnessed" && turns == 1 {
+			if forwardFail {
+				// An input extension forwarded our prompt with sendUserMessage;
+				// that run failed in its preparation after our preflight and
+				// before it started, and Pi refused our prompt as busy. Pi
+				// reports the failure only as a runtime extension_error
+				// (agent-session.js 1.4.0:2774-2780, rpc-mode.js:259-260), on
+				// the same stdout as the busy reply, in either order.
+				response["success"] = false
+				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
+				reply, _ := json.Marshal(response)
+				failure := `{"type":"extension_error","extensionPath":"<runtime>","event":"send_user_message","error":"forwarded prompt failed"}`
+				frames := []string{failure, string(reply)}
+				if mode == "run-refuse-forward-fail-after" {
+					frames = []string{string(reply), failure}
+				}
+				for _, line := range frames {
+					if _, err = fmt.Fprintln(writer, line); err != nil {
+						return err
+					}
+				}
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				continue
+			}
+			if (mode == "run-refuse-witnessed" || mode == "run-refuse-witnessed-other-error") && turns == 1 {
 				// An input extension forwarded our prompt with sendUserMessage
 				// and returned while that run, already witnessed from our
 				// input inside our preflight window, is active: Pi then
@@ -353,6 +381,23 @@ func runPiNativeHelper(mode string) error {
 			body, _ := json.Marshal(response)
 			if _, err = writer.Write(append(body, '\n')); err != nil {
 				return err
+			}
+			if mode == "run-refuse-witnessed-other-error" && turns == 1 {
+				// Another runtime failure, not a forwarded prompt's, inside the
+				// window before the forwarded run starts: it is not ours to act
+				// on. Then that run starts.
+				if _, err = fmt.Fprintln(writer, `{"type":"extension_error","extensionPath":"<runtime>","event":"send_message","error":"another send failed"}`); err != nil {
+					return err
+				}
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				var echo struct {
+					SessionID string `json:"session_id"`
+				}
+				if err = bridge.Call(context.Background(), "run.start", map[string]any{"session_id": id, "settling": false, "run": currentRunToken()}, &echo); err != nil || echo.SessionID != id {
+					return errors.Join(err, errors.New("helper Run start was not acknowledged"))
+				}
 			}
 			if mode == "handled" {
 				if err = writer.Flush(); err != nil {

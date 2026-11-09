@@ -11,6 +11,25 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## A lane prompt that an input extension forwards (2026-11-09)
+
+When an input extension forwards the lane's prompt with `sendUserMessage`,
+Pi starts that run from our input, refuses the original prompt as busy, and
+the managed extension has already witnessed our input and the run's
+preflight. The Run then follows the forwarded run. If that forwarded prompt
+fails in its preparation after the preflight and before the run starts (a
+throw in `_prepareRun` after `before_agent_start`; `agent-session.js`
+1.4.0:1424-1437, 1480-1494), Pi emits no `agent_start` and no
+`agent_settled`, only `extension_error` with `extensionPath: "<runtime>"`
+and `event: "send_user_message"` (:2774-2780, `rpc-mode.js:259-260`), before
+or after the busy reply. The wrapper arms the Run's window before it sends
+the prompt and takes exactly that frame only inside it (our input and
+preflight witnessed, the preflight's settle generation, no start yet); the
+Run is then unavailable with both answers, nothing is replayed, and the
+lane stays. Any other extension error is handled as before. Another
+extension's own failed `sendUserMessage` in that same window also ends the
+Run as unavailable; if the forwarded run then starts, it is Pi's own work.
+
 ## Steer limit (2026-11-09)
 
 Steers the extension handed to Pi that Pi has not ended yet (the admitted

@@ -120,5 +120,8 @@ A lane's Run ends when Pi settles its run. Pi can then run work of its own,
 for example a run another extension starts; that work is not part of the
 caller's Run, is not in its result and does not end the lane. A later Run
 waits for such work to settle. If Pi still refuses the Run's prompt, that
-Run is unavailable with Pi's answer and the lane stays open. Dialogs that
+Run is unavailable with Pi's answer and the lane stays open. When an input
+extension forwards the Run's prompt and Pi refuses the original as busy, the
+Run follows the forwarded run; if that forwarded prompt fails before its run
+starts, the Run is unavailable with both answers, and the lane stays open. Dialogs that
 Pi's own work raises in a lane are cancelled, as the lane's own are.

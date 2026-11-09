@@ -20,6 +20,10 @@ const maxPiTurnUIRequests = 256
 
 var errPiRunInterrupted = errors.New("Pi Run interrupted before native admission")
 
+// errPiForwardedStartFailed ends the wait of a Run that follows a forwarded
+// run which failed before it started.
+var errPiForwardedStartFailed = errors.New("Pi forwarded prompt failed before its run started")
+
 // piPromptRefusal is Pi's error answer to the lane's own prompt command. Pi
 // answers so only before it starts a run (rpc-mode.js:298-316), so nothing of
 // the prompt was saved: the Run fails with that answer and the lane stays open.
@@ -82,6 +86,12 @@ type piNativeTurn struct {
 	interruptStarted bool
 	interruptError   error
 	report           func(sessionkit.DeliveryReceipt, error) error
+	// The forwarded-failure window: armed before our prompt is sent; a
+	// forwarded prompt's start failure recorded in it; following once Pi
+	// refused our prompt for the forwarded run that our input started.
+	forwardArmed     bool
+	forwardFollowing bool
+	forwardFailure   string
 }
 
 func newPiNativeTurn(owner *Wrapper, run *sessionkit.Run, parent, cursor, prompt string) *piNativeTurn {
@@ -165,6 +175,20 @@ func (turn *piNativeTurn) ownsStdout(settled int) bool {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	return turn.preflight && turn.base == settled
+}
+
+// recordForwardFailure keeps the first forwarded prompt's start failure seen
+// inside this Run's own window: armed, our input and preflight witnessed, the
+// frame in the preflight's settle generation, and no start yet.
+func (turn *piNativeTurn) recordForwardFailure(settled int, text string) {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if !turn.forwardArmed || !turn.input || !turn.preflight || turn.base != settled ||
+		turn.started != 0 || turn.nativeStarts != 0 || turn.failure != nil || turn.admitted || turn.forwardFailure != "" {
+		return
+	}
+	turn.forwardFailure = text
+	turn.signalLocked()
 }
 
 func (turn *piNativeTurn) recordStart(settling bool) error {
@@ -277,6 +301,9 @@ func (turn *piNativeTurn) admission() (bool, <-chan struct{}, error) {
 	defer turn.mu.Unlock()
 	if turn.failure != nil {
 		return false, turn.changed, turn.failure
+	}
+	if turn.forwardFollowing && turn.forwardFailure != "" {
+		return false, turn.changed, errPiForwardedStartFailed
 	}
 	ready := turn.input && turn.preflight && turn.started > 0 && turn.nativeStarts > 0 &&
 		turn.user && turn.userText == turn.prompt
@@ -462,6 +489,18 @@ func (p *Wrapper) observeRunEvent(kind string, raw json.RawMessage) error {
 		event, err := decodePiExtensionError(raw)
 		if err != nil {
 			return err
+		}
+		if event.ExtensionPath == "<runtime>" && event.Event == "send_user_message" {
+			// A forwarded prompt that failed before its run started reports
+			// only this (agent-session.js 1.4.0:2774-2780). The active turn
+			// records it inside its own window; it is never an observer error.
+			p.mu.Lock()
+			turn, closing, settled := p.active, p.closing, p.nativeSettles
+			p.mu.Unlock()
+			if turn != nil && !closing {
+				turn.recordForwardFailure(settled, event.Error)
+			}
+			return nil
 		}
 		if event.ExtensionPath != p.extension {
 			return nil
@@ -721,6 +760,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		cursor = pre.Entries[len(pre.Entries)-1].ID
 	}
 	turn := newPiNativeTurn(p, run, pre.Leaf, cursor, prompt)
+	turn.forwardArmed = true
 	p.active = turn
 	p.mu.Unlock()
 	submitted, callErr := p.rpc.callWithAdmission(ctx, "prompt", map[string]any{"message": prompt}, nil)
@@ -728,15 +768,20 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	turn.submitted = submitted
 	turn.mu.Unlock()
 	var refused *nativeRPCError
+	var refusal error
 	if errors.As(callErr, &refused) {
 		turn.mu.Lock()
 		witnessed := turn.input && turn.preflight
+		// A forwarded start failure ends the wait below, whether it was
+		// recorded before this reply (the window is armed before the send)
+		// or arrives after it.
+		turn.forwardFollowing = witnessed
 		turn.mu.Unlock()
 		if witnessed {
 			// Pi refused the prompt as busy, but the run it is running began
 			// from our own submitted input inside this Run's preflight window
 			// (an input extension forwarded it): the Run follows that run.
-			callErr = nil
+			refusal, callErr = callErr, nil
 		} else {
 			// Pi may be running work of its own: a run it started at the same
 			// time is why it refuses a prompt with no streaming behaviour.
@@ -772,6 +817,12 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		return turn, nil
 	}
 	if err = turn.await(ctx, turn.admission); err != nil {
+		if errors.Is(err, errPiForwardedStartFailed) {
+			turn.mu.Lock()
+			forwardFailure := turn.forwardFailure
+			turn.mu.Unlock()
+			return nil, p.refuseForwarded(turn, refusal, forwardFailure)
+		}
 		turn.mu.Lock()
 		if turn.failure == nil {
 			turn.failLocked(err)
@@ -791,6 +842,17 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		run.Admitted()
 	}
 	return turn, nil
+}
+
+// refuseForwarded ends only this Run, as an unwitnessed refusal does: the
+// run that our input started through an input extension failed before it
+// started, so Pi ran nothing for this Run. Nothing is replayed.
+func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure string) error {
+	p.mu.Lock()
+	p.ownWork = true
+	p.mu.Unlock()
+	p.finishNativeTurn(turn)
+	return &piPromptRefusal{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
 }
 
 func (p *Wrapper) finishNativeTurn(turn *piNativeTurn) {
