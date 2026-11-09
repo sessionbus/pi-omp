@@ -16,7 +16,10 @@ per-process extension. Wrapper-owned `-g`/`--group` values select Sessionbus
 groups and `-n`/`--peer-name` supplies an initial name; the live native session
 ID, title, and working directory remain authoritative. Native maintenance,
 help, version, print/export commands, and non-terminal stdin or stdout run
-directly without managed ownership.
+directly without managed ownership. So do `zsh`, `bash` and `sh`, which OMP
+18.17.0 and later run as a native shell. On older OMP those words are an
+ordinary prompt, which then starts an unmanaged session; use
+`omp-peer launch bash` for a managed session with that prompt.
 
 In a managed interactive terminal, a peer message is handed to OMP as a steer
 when it arrives. If OMP is busy at that moment, the running task reads it at

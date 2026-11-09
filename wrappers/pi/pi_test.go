@@ -303,11 +303,18 @@ func runPiNativeHelper(mode string) error {
 			forwardFail := strings.HasPrefix(mode, "run-refuse-forward-fail-") && turns == 1
 			// Pi answers "handled" when an extension consumed the prompt
 			// (agent-session.js 1.4.0:1644, :1654); the reply carries it as
-			// data.disposition (rpc-mode.js:298-317). handled-missing omits it.
-			early := (mode == "handled-missing" || mode == "handled-early" || mode == "handled-late-preflight") && turns == 1
+			// data.disposition (rpc-mode.js:298-317). handled-missing omits it,
+			// handled-extra adds an unknown field, and handled-cased spells the
+			// key "Disposition".
+			early := (mode == "handled-missing" || mode == "handled-early" || mode == "handled-late-preflight" ||
+				mode == "handled-extra" || mode == "handled-cased") && turns == 1
 			after := (mode == "handled-after" || mode == "handled-after-fail") && turns == 1
 			if mode == "handled" || turns == 1 && (mode == "handled-early" || mode == "handled-late-preflight" || after) {
 				response["data"] = map[string]any{"disposition": "handled"}
+			} else if mode == "handled-extra" && turns == 1 {
+				response["data"] = map[string]any{"disposition": "handled", "x": map[string]any{}}
+			} else if mode == "handled-cased" && turns == 1 {
+				response["data"] = map[string]any{"Disposition": "handled"}
 			}
 			steps := []string{"run.input", "run.preflight", "run.start"}
 			if mode == "handled" || early {

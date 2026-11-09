@@ -878,16 +878,16 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	}
 	// Pi answers a prompt with its disposition (rpc-mode.js 1.4.0:298-317).
 	// Only an exact "handled" changes the path below; a missing, unknown or
-	// other disposition keeps it.
-	var answer struct {
-		Disposition string `json:"disposition"`
-	}
-	handled := len(reply.data) != 0 && decodePiBridge(reply.data, []string{"disposition"}, &answer) == nil &&
-		answer.Disposition == "handled"
+	// other disposition keeps it. The reply data is Pi's open object, so only
+	// the exact "disposition" key is read and added fields are ignored.
+	var object map[string]json.RawMessage
+	var disposition string
+	handled := len(reply.data) != 0 && json.Unmarshal(reply.data, &object) == nil &&
+		json.Unmarshal(object["disposition"], &disposition) == nil && disposition == "handled"
 	if handled {
 		// Closed as handled only if, under the same lock, neither our
 		// preflight nor a failure came first; otherwise the paths below.
-		if closed := p.handledBeforePreflight(turn, answer.Disposition); closed != nil {
+		if closed := p.handledBeforePreflight(turn, disposition); closed != nil {
 			return closed, nil
 		}
 	}
@@ -901,7 +901,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	}
 	turn.mu.Unlock()
 	if handled && preflight {
-		refusal = fmt.Errorf("Pi native prompt: %s", answer.Disposition)
+		refusal = fmt.Errorf("Pi native prompt: %s", disposition)
 	}
 	if !preflight {
 		turn.fail(errors.New("Pi native accepted a prompt without the managed Run preflight"))

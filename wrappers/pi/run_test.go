@@ -61,8 +61,16 @@ func TestPiRunUsesAppendCursorSeparatelyFromSelectedLeaf(t *testing.T) {
 	}
 }
 
+// handled-extra: Pi's reply data is an open object, so an added field leaves
+// the exact "handled" disposition in force.
 func TestPiHandledPromptConsumesSubmittedHandoff(t *testing.T) {
-	wrapper, cwd := newPiTestWrapper(t, "handled")
+	for _, mode := range []string{"handled", "handled-extra"} {
+		t.Run(mode, func(t *testing.T) { testPiHandledPromptConsumesSubmittedHandoff(t, mode) })
+	}
+}
+
+func testPiHandledPromptConsumesSubmittedHandoff(t *testing.T, mode string) {
+	wrapper, cwd := newPiTestWrapper(t, mode)
 	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +106,16 @@ func TestPiHandledPromptConsumesSubmittedHandoff(t *testing.T) {
 }
 
 // Without a disposition in Pi's reply a prompt with no managed preflight
-// keeps today's failure: only an exact "handled" changes it.
+// keeps today's failure: only an exact "handled" changes it. handled-cased
+// pins the exact key: "Disposition" is not the disposition.
 func TestPiPromptWithoutDispositionKeepsTheMissingPreflightFailure(t *testing.T) {
-	wrapper, cwd := newPiTestWrapper(t, "handled-missing")
+	for _, mode := range []string{"handled-missing", "handled-cased"} {
+		t.Run(mode, func(t *testing.T) { testPiPromptWithoutDispositionKeepsTheMissingPreflightFailure(t, mode) })
+	}
+}
+
+func testPiPromptWithoutDispositionKeepsTheMissingPreflightFailure(t *testing.T, mode string) {
+	wrapper, cwd := newPiTestWrapper(t, mode)
 	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
 		t.Fatal(err)
 	}

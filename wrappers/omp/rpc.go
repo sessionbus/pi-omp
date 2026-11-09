@@ -415,8 +415,10 @@ func (rpc *nativeRPC) consumePromptStart(completed nativeRPCResult) (bool, bool,
 	if len(bytes.TrimSpace(data)) == 0 {
 		return false, false, nil
 	}
+	// PromptAck is an open object in OMP's wire schema: only agentInvoked is
+	// read and validated, and added fields are ignored.
 	var object map[string]json.RawMessage
-	if json.Unmarshal(data, &object) != nil || len(object) != 1 {
+	if json.Unmarshal(data, &object) != nil {
 		return false, false, errors.New("invalid OMP native prompt response data")
 	}
 	raw, ok := object["agentInvoked"]
@@ -1032,10 +1034,10 @@ func (rpc *nativeRPC) acceptLogicalFrame(line []byte) error {
 	return nil
 }
 
+// acceptReady validates the transport fields the wrapper uses. OMP's wire
+// schema declares ready fields optional and additive (18.18.1 added
+// supportsBashExcludeFromContext), so other fields are ignored.
 func (rpc *nativeRPC) acceptReady(object map[string]json.RawMessage) error {
-	if len(object) != 5 {
-		return fmt.Errorf("%w: readiness fields are invalid", errNativeRPCProtocol)
-	}
 	var protocolVersion, maxFrame, maxReassembled int
 	var supported []int
 	if json.Unmarshal(object["protocolVersion"], &protocolVersion) != nil || protocolVersion != 1 ||
@@ -1058,10 +1060,9 @@ func (rpc *nativeRPC) acceptReady(object map[string]json.RawMessage) error {
 	return nil
 }
 
+// acceptChunk validates the chunk fields it reads; like OMP's own decoder it
+// ignores any other field of the open rpc_chunk frame.
 func (rpc *nativeRPC) acceptChunk(object map[string]json.RawMessage) ([]byte, error) {
-	if len(object) != 6 {
-		return nil, fmt.Errorf("%w: RPC chunk fields are invalid", errNativeRPCProtocol)
-	}
 	id, err := nativeRPCString(object, "chunkId", 128)
 	if err != nil {
 		return nil, err
@@ -1169,9 +1170,10 @@ func (rpc *nativeRPC) acceptResponse(object map[string]json.RawMessage, line []b
 	}
 	negotiatedResponse := false
 	if success && command == "negotiate_protocol" {
+		// The negotiation result is an open object: only protocolVersion is read.
 		var data map[string]json.RawMessage
 		var version int
-		if json.Unmarshal(completed.data, &data) != nil || len(data) != 1 ||
+		if json.Unmarshal(completed.data, &data) != nil ||
 			json.Unmarshal(data["protocolVersion"], &version) != nil || version != 2 {
 			return fmt.Errorf("%w: invalid protocol negotiation response", errNativeRPCProtocol)
 		}

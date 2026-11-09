@@ -117,7 +117,7 @@ func TestNativeRPCRejectsInvalidReadiness(t *testing.T) {
 		"wrong protocol": `{"type":"ready","protocolVersion":2,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`,
 		"wrong versions": `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[2,1],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`,
 		"wrong physical": `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1,"maxReassembledFrameBytes":67108864}`,
-		"extra field":    `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"extra":true}`,
+		"missing field":  `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}`,
 		"event first":    `{"type":"agent_start"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -311,6 +311,52 @@ func TestNativeRPCPromptKeepsCorrelationForLateNativeFailure(t *testing.T) {
 	waitNativeRPCStats(t, rpc, nativeRPCStats{})
 }
 
+// OMP's ready frame and negotiation result are open objects (18.18.1 added
+// supportsBashExcludeFromContext to ready): the fields the wrapper uses keep
+// their exact checks, and any other field is ignored.
+func TestNativeRPCIgnoresAdditiveReadinessAndNegotiationFields(t *testing.T) {
+	for name, test := range map[string]struct {
+		ready, negotiated string
+		valid             bool
+	}{
+		"OMP 18.18 ready": {
+			ready:      `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}`,
+			negotiated: `{"protocolVersion":2}`, valid: true,
+		},
+		"unknown ready field": {
+			ready:      `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"x":{}}`,
+			negotiated: `{"protocolVersion":2}`, valid: true,
+		},
+		"unknown negotiation field":  {ready: nativeRPCReadyFrame, negotiated: `{"protocolVersion":2,"x":1}`, valid: true},
+		"wrong negotiated version":   {ready: nativeRPCReadyFrame, negotiated: `{"protocolVersion":1,"x":1}`},
+		"missing negotiated version": {ready: nativeRPCReadyFrame, negotiated: `{"x":2}`},
+		"null negotiation":           {ready: nativeRPCReadyFrame, negotiated: `null`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rpc, peer := newUnreadyNativeRPCTest(t, nil, nativeRPCLimits{})
+			ready := make(chan error, 1)
+			go func() { ready <- rpc.Ready(nativeRPCTestContext(t)) }()
+			peer.write(t, test.ready)
+			request := peer.read(t)
+			if nativeRPCField(t, request, "id") != "omp:1" || nativeRPCField(t, request, "type") != "negotiate_protocol" {
+				t.Fatalf("negotiation command = %#v", request)
+			}
+			peer.write(t, `{"id":"omp:1","type":"response","command":"negotiate_protocol","success":true,"data":`+test.negotiated+`}`)
+			err := <-ready
+			if test.valid {
+				if err != nil {
+					t.Fatalf("readiness = %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errNativeRPCProtocol) {
+				t.Fatalf("readiness error = %v", err)
+			}
+			waitNativeRPCDone(t, rpc)
+		})
+	}
+}
+
 func TestNativeRPCPromptPreservesTypedImmediateAgentOutcome(t *testing.T) {
 	for name, test := range map[string]struct {
 		data    string
@@ -323,7 +369,9 @@ func TestNativeRPCPromptPreservesTypedImmediateAgentOutcome(t *testing.T) {
 		"missing field": {data: `{}`},
 		"null field":    {data: `{"agentInvoked":null}`},
 		"wrong type":    {data: `{"agentInvoked":"false"}`},
-		"extra field":   {data: `{"agentInvoked":true,"extra":1}`},
+		"extra field":   {data: `{"agentInvoked":true,"extra":1}`, invoked: true, known: true, valid: true},
+		"extra false":   {data: `{"agentInvoked":false,"x":{}}`, known: true, valid: true},
+		"extra only":    {data: `{"extra":true}`},
 		"null data":     {data: `null`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -490,6 +538,44 @@ func nativeRPCChunkFrame(logical []byte, index int) map[string]any {
 		"count": count, "byteLength": len(logical),
 		"data": base64.StdEncoding.EncodeToString(logical[start:end]),
 	}
+}
+
+// rpc_chunk is an open frame: like OMP's own decoder, the wrapper reads the
+// chunk fields it uses and ignores any other field.
+func TestNativeRPCReassemblesChunksWithAdditiveFields(t *testing.T) {
+	events := make(chan json.RawMessage, 1)
+	rpc, peer := newNativeRPCTest(t, func(raw json.RawMessage) error {
+		events <- append(json.RawMessage(nil), raw...)
+		return nil
+	}, nativeRPCLimits{})
+	want := strings.Repeat("λ", 600_000)
+	logical, err := json.Marshal(map[string]any{
+		"type": "message_end", "message": map[string]any{"role": "assistant", "content": want},
+	})
+	if err != nil || len(logical) <= nativeRPCPhysicalFrameBytes {
+		t.Fatalf("logical frame bytes = %d, error = %v", len(logical), err)
+	}
+	writeNativeRPCChunked(t, peer, logical, func(_ int, frame map[string]any) {
+		frame["x"] = map[string]any{}
+	})
+	var raw json.RawMessage
+	select {
+	case raw = <-events:
+	case <-rpc.Done():
+		t.Fatalf("chunk with an added field ended the reader: %v", rpc.Err())
+	case <-nativeRPCTestContext(t).Done():
+		t.Fatal("waiting for the reassembled event timed out")
+	}
+	var got struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err = json.Unmarshal(raw, &got); err != nil || got.Type != "message_end" || got.Message.Content != want {
+		t.Fatalf("chunked event bytes = %d, error = %v", len(got.Message.Content), err)
+	}
+	waitNativeRPCStats(t, rpc, nativeRPCStats{})
 }
 
 func TestNativeRPCReassemblesProtocolTwoResponse(t *testing.T) {

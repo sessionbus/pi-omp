@@ -144,8 +144,12 @@ with no runtime version check. Source: OMP 18.11.0 npm `src`
   as "owned preflight missing or rewritten", where it used to wait.
 - **Subcommands.** OMP drops recognised launch flags, including our
   `--extension` and `--mode`, in front of a hoisted subcommand other than
-  `launch` and `acp` (`cli-commands.ts:313`, `402-428`, `462`). The wrapper
-  therefore lists all 53 commands and 6 aliases and runs them directly.
+  `launch` and `acp` (`cli-commands.ts:313`, `402-428`, `462`; 18.18.5
+  `:330`, `408-483`). The wrapper therefore lists all 56 commands and 6
+  aliases of OMP 18.18.5 and runs them directly. 18.17.0 added `zsh`, `bash`
+  and `sh`, which OMP runs as its own shell (`cli.ts:472-473`); on older OMP
+  they are a prompt and start an unmanaged session, and `omp-peer launch
+  bash` keeps such a prompt managed.
 
 Not covered, listed:
 

@@ -13,8 +13,10 @@ import (
 	"github.com/sessionbus/peer-common/host"
 )
 
-// Native 3b3a6dc cli/flag-tables.ts. Keep one traversal for native value
-// ownership and wrapper identity projection so flag-shaped values remain data.
+// Native 3b3a6dc cli/flag-tables.ts, plus --spinner-interval, --max-fps and
+// --motion from 18.18.5 (flag-tables.ts:193-213). Keep one traversal for native
+// value ownership and wrapper identity projection so flag-shaped values remain
+// data.
 var ompStringValueFlags = map[string]bool{
 	"--cwd": true, "--config": true, "--add-dir": true, "--mode": true,
 	"--fork": true, "--provider": true, "--model": true, "--smol": true,
@@ -26,6 +28,7 @@ var ompStringValueFlags = map[string]bool{
 	"--thinking": true, "--export": true, "--hook": true,
 	"--extension": true, "-e": true, "--trusted-extension": true,
 	"--plugin-dir": true, "--skills": true, "--approval-mode": true,
+	"--spinner-interval": true, "--max-fps": true, "--motion": true,
 }
 
 var ompOptionalValueFlags = map[string]bool{"--resume": true, "-r": true, "--session": true}
@@ -41,10 +44,12 @@ var ompValuelessFlags = map[string]bool{
 	"--no-title": true, "--auto-approve": true, "--yolo": true,
 }
 
-// ompCommands is OMP 18.11.0's command registry with its aliases
-// (cli-commands.ts:27-310). The list must stay complete: for a hoisted
+// ompCommands is OMP 18.18.5's command registry with its aliases
+// (cli-commands.ts:27-319); 18.17.0 added zsh, bash and sh, which native runs
+// as its own shell. On older OMP those words are launch prompts, so there
+// they run as an unmanaged launch. The list must stay complete: for a hoisted
 // subcommand other than launch and acp, OMP drops recognised launch flags in
-// front of it (cli-commands.ts:313, 402-428, 462), including our --extension
+// front of it (cli-commands.ts:330, 408-483), including our --extension
 // and --mode. A managed launch of such an argv would run the subcommand
 // without our extension, so these run directly without managed ownership.
 var ompCommands = map[string]bool{
@@ -62,7 +67,7 @@ var ompCommands = map[string]bool{
 	"stats": true, "stream": true, "update": true, "usage": true,
 	"tiny-models": true, "token": true, "toks": true, "ttsr": true,
 	"worktree": true, "wt": true, "search": true, "q": true,
-	"web-search": true,
+	"web-search": true, "zsh": true, "bash": true, "sh": true,
 }
 
 var ompReservedWords = map[string]bool{
