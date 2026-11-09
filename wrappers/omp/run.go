@@ -805,10 +805,16 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 		// Read the turn before the window: a preflight applied before our
-		// prompt_result was recorded is then always seen below.
+		// prompt_result was recorded is then always seen below. The same read
+		// also sees an admission or failure recorded since admission() above,
+		// so the top of the loop handles it, never a "missing preflight".
 		turn.mu.Lock()
+		settled := turn.failure != nil || turn.promptFailure != nil || turn.noAgent || turn.preflight && turn.starts > 0
 		preflight, ended := turn.preflight, turn.promptResultSeen && turn.promptInvoked
 		turn.mu.Unlock()
+		if settled {
+			continue
+		}
 		runToken, foreign, preflightChanged, windowErr := window.observe()
 		if windowErr != nil {
 			turn.fail(windowErr)
