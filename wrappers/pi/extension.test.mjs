@@ -160,7 +160,7 @@ function fakeConnection({ topology, queue = [], preflightRuns } = {}) {
         }
     case "owner.before_tree":
       return { session_id: params.session_id, pending: queue.length !== 0 };
-        case "owner.pending":
+        case "owner.quit":
           return { session_id: params.session_id, pending: queue.length !== 0 };
         default:
           throw new Error(`unexpected host method ${method}`);
@@ -736,6 +736,28 @@ test("interactive busy quit with waiting deliveries settles and writes them to h
     assert.equal(native.aborted(), waiting ? 1 : 0, `aborts with waiting=${waiting}`);
     assert.deepEqual(history, waiting ? ["waiting"] : [], `history with waiting=${waiting}`);
   }
+});
+
+// A delivery that crosses a busy quit after the owner's quit reply is not
+// steered into a task that will not run on: the steer is refused, so the
+// owner's append path writes it to history once Pi is idle or refuses it.
+test("interactive delivery crossing a busy quit is not steered", async () => {
+  const native = nativeFixture("interactive-1", "tui");
+  const sends = [];
+  native.pi.sendMessage = (message, options) => { sends.push({ id: message.details.message_id, options }); };
+  const owner = fakeConnection({ topology: "interactive" });
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 50 })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  const quit = native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  const steered = await owner.native("native.steer", { session_id: "interactive-1", message_id: "crossing", body: "body crossing", run: null });
+  assert.deepEqual(steered, { session_id: "interactive-1", message_id: "crossing", accepted: false, reason: "idle" });
+  const appended = await owner.native("native.append", { session_id: "interactive-1", message_id: "crossing", body: "body crossing" });
+  assert.deepEqual(appended, { session_id: "interactive-1", message_id: "crossing", accepted: false, reason: "busy" });
+  await quit;
+  assert.deepEqual(sends, [], "a crossing delivery was steered or written while Pi stayed busy");
+  assert.equal(owner.calls.some((call) => call.method === "owner.quit"), true);
 });
 
 test("interactive aborted settle leaves one history copy and no queued copy of a never-started steer", async () => {

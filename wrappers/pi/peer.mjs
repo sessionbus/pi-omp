@@ -236,6 +236,7 @@ export class PiInteractiveOwner {
   // one at a time so one item gets one native submission.
   #drainChain = Promise.resolve();
   #drainQueue = null;
+  #quitClosed = false;
   #superseded = false;
   #done = deferred();
   #closing;
@@ -256,7 +257,7 @@ export class PiInteractiveOwner {
       case "session_end": return this.#sessionEnd(params);
       case "owner.drain": return this.#drain(params, signal);
       case "owner.before_tree": return this.#beforeTree(params);
-      case "owner.pending": return this.#pending(params);
+      case "owner.quit": return this.#quit(params);
       case "tool.call": return this.#toolCall(params, signal);
       default: throw new Error("Pi interactive owner method is unavailable");
     }
@@ -368,10 +369,12 @@ export class PiInteractiveOwner {
     return { session_id: params.session_id, call_id: params.call_id, result };
   }
 
-  // Whether deliveries wait for Pi's next task, with no side effect (unlike
-  // owner.before_tree, which also gates new deliveries).
-  #pending(params) {
-    if (!exact(params, ["session_id"]) || params.session_id !== this.#session) throw new Error("invalid Pi pending query");
+  // Pi quits: no next task will come, so a delivery that would wait for one
+  // is refused from now on instead of queued and dropped at session end. The
+  // reply says whether deliveries already wait; the quit drain writes them.
+  #quit(params) {
+    if (!exact(params, ["session_id"]) || params.session_id !== this.#session) throw new Error("invalid Pi quit");
+    this.#quitClosed = true;
     return { session_id: params.session_id, pending: this.#queue.length !== 0 };
   }
 
@@ -489,6 +492,7 @@ export class PiInteractiveOwner {
   }
 
   #enqueue(messageID, body) {
+    if (this.#quitClosed) return { disposition: "rejected", reason: "native owner closed" };
     const item = { message_id: messageID, body, bytes: Buffer.byteLength(messageID) + Buffer.byteLength(body) };
     if (this.#queue.length >= maxQueueItems || item.bytes > maxQueueBytes - this.#queueBytes) {
       return { disposition: "rejected", reason: "Pi delivery queue is full" };

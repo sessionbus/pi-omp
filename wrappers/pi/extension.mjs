@@ -283,8 +283,10 @@ export function createPiExtension({
         // step, so a steer that arrives after its Run ended is refused. A
         // steer accepted during its Run that Pi has not read when the Run
         // ends stays in Pi's queue and is read in the next Run: not lost.
-        const owned = launch.topology === "interactive" ||
-          (typeof params.run === "string" && params.run === record.runToken);
+        // While Pi quits no task reads a steer, so none is taken: the owner's
+        // append path then writes it to history once Pi is idle, or refuses it.
+        const owned = !quitting && (launch.topology === "interactive" ||
+          (typeof params.run === "string" && params.run === record.runToken));
         const result = owned ? steer(record.pi, record.ctx, params, record.running) : { accepted: false, reason: "idle" };
         throwIfAborted(signal);
         if (result.accepted === false) {
@@ -454,18 +456,13 @@ export function createPiExtension({
   // Pi does not abort a running task before session_shutdown on quit
   // (agent-session-runtime.js:296-303), and a history write during a task
   // would only steer again. With a steer that never started, or deliveries
-  // still waiting in the owner for Pi's next task, the task (or compaction)
-  // is aborted, as Escape does, and Pi is given quitWaitMs to settle; Pi
-  // awaits this handler with no bound of its own. Past the bound nothing is
-  // written and quit goes on.
-  async function settleForQuit(record, ctx) {
+  // still waiting in the owner for Pi's next task (owner.quit's pending), the
+  // task (or compaction) is aborted, as Escape does, and Pi is given
+  // quitWaitMs to settle; Pi awaits this handler with no bound of its own.
+  // Past the bound nothing is written and quit goes on.
+  async function settleForQuit(record, ctx, pending) {
     if (ctx.isIdle()) return;
-    if (![...record.admittedMessages.values()].some((admitted) => admitted.steered && !admitted.started)) {
-      const result = await hostCall(ctx, "owner.pending", { session_id: record.session_id });
-      exactKeys(result, ["session_id", "pending"], "owner.pending response");
-      if (result.session_id !== record.session_id || typeof result.pending !== "boolean") throw new Error("Pi owner.pending response is invalid");
-      if (!result.pending) return;
-    }
+    if (!pending && ![...record.admittedMessages.values()].some((admitted) => admitted.steered && !admitted.started)) return;
     ctx.abort();
     const deadline = Date.now() + quitWaitMs;
     while (!ctx.isIdle() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -693,7 +690,12 @@ export function createPiExtension({
         live(ctx, pi);
         if (event.reason === "quit" && launch.topology === "interactive") {
           quitting = true;
-          await settleForQuit(record, ctx);
+          // The owner stops queueing deliveries for a next task and says
+          // whether some already wait.
+          const quit = await hostCall(ctx, "owner.quit", { session_id: record.session_id });
+          exactKeys(quit, ["session_id", "pending"], "owner.quit response");
+          if (quit.session_id !== record.session_id || typeof quit.pending !== "boolean") throw new Error("Pi owner.quit response is invalid");
+          await settleForQuit(record, ctx, quit.pending);
           if (ctx.isIdle()) {
             keepUnreadAtQuit(record, ctx);
             // Then the owner's queued deliveries, in arrival order, before

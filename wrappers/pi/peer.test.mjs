@@ -1040,3 +1040,19 @@ test("a delivery past the native bound once rendered is refused before it is que
     await fixture.owner.close();
   }
 });
+
+// At quit no next task comes: after owner.quit a delivery that would wait in
+// the FIFO is refused, never queued and dropped at session end, while items
+// already waiting are still drained by the quit drain.
+test("after owner.quit a delivery that would wait is refused and waiting items still drain", async () => {
+  const fixture = ownerFixture({ busy: true });
+  await ready(fixture.owner);
+  const deliver = (request) => fixture.fake.latest().deliver(request);
+  assert.deepEqual(await deliver(inbound("before")), { disposition: "queued_for_next_turn" });
+  assert.deepEqual(await fixture.owner.call("owner.quit", { session_id: "native-one" }), { session_id: "native-one", pending: true });
+  assert.deepEqual(await deliver(inbound("crossing")), { disposition: "rejected", reason: "native owner closed" });
+  fixture.setBusy(false);
+  assert.deepEqual(await fixture.owner.call("owner.drain", { session_id: "native-one", witness: "quit" }), { session_id: "native-one", drained: 1 });
+  assert.deepEqual(fixture.appended().map((params) => params.message_id), ["before"]);
+  await fixture.owner.close();
+});
