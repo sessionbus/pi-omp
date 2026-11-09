@@ -274,3 +274,21 @@ func TestInteractivePlanRejectsInvalidWrapperValue(t *testing.T) {
 		}
 	}
 }
+
+// A --tools or --exclude-tools pattern past Go's pattern size limit is
+// refused like the other arguments; before this change it panicked before
+// Pi started. 1,677,720 "*" is the first all-star entry Go 1.24 and 1.26
+// refuse to compile, a length one argument can reach only where a single
+// argument may exceed 1.6 MB (Linux with 64 KiB pages).
+func TestInteractivePlanRefusesAToolPatternPastGoPatternLimit(t *testing.T) {
+	entry := strings.Repeat("*", 1677720)
+	for _, args := range [][]string{
+		{"--tools", entry},
+		{"--exclude-tools", entry},
+	} {
+		if _, native, err := InteractivePlan(args, nil); err == nil || native ||
+			!strings.Contains(err.Error(), "argument is too large for the managed Pi tool check") {
+			t.Fatalf("%s with an oversized pattern = native %v, %v", args[0], native, err)
+		}
+	}
+}

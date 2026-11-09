@@ -120,7 +120,11 @@ func validateManagedToolArguments(arguments []string) error {
 		// unchanged; only a list that leaves sessionbus out is refused.
 		switch modifiers := toolModifierCount(allowed); modifiers {
 		case 0:
-			if !nativeToolListMatches(allowed, "sessionbus") {
+			matched, err := nativeToolListMatches(allowed, "sessionbus")
+			if err != nil {
+				return err
+			}
+			if !matched {
 				return errors.New("argument disables managed Pi Sessionbus tool: --tools must include sessionbus")
 			}
 		case len(allowed):
@@ -134,8 +138,14 @@ func validateManagedToolArguments(arguments []string) error {
 			}
 		}
 	}
-	if excludedSet && nativeToolListMatches(excluded, "sessionbus") {
-		return errors.New("argument disables managed Pi Sessionbus tool: --exclude-tools contains sessionbus")
+	if excludedSet {
+		matched, err := nativeToolListMatches(excluded, "sessionbus")
+		if err != nil {
+			return err
+		}
+		if matched {
+			return errors.New("argument disables managed Pi Sessionbus tool: --exclude-tools contains sessionbus")
+		}
 	}
 	if noTools && !allowedSet {
 		return errors.New("argument disables managed Pi Sessionbus tool: --no-tools")
@@ -174,11 +184,11 @@ func toolModifiersKeep(entries []string, name string, selected bool) bool {
 // or a pattern whose "*" matches any characters over the whole name (Pi 1.4.0
 // mcp-servers.js toolPatternRegExp, createToolNameMatcher; sdk.js:158-160,
 // agent-session.js:193-197).
-func nativeToolListMatches(entries []string, name string) bool {
+func nativeToolListMatches(entries []string, name string) (bool, error) {
 	for _, entry := range entries {
 		if !strings.Contains(entry, "*") {
 			if entry == name {
-				return true
+				return true, nil
 			}
 			continue
 		}
@@ -186,11 +196,18 @@ func nativeToolListMatches(entries []string, name string) bool {
 		for index, part := range parts {
 			parts[index] = regexp.QuoteMeta(part)
 		}
-		if regexp.MustCompile("^" + strings.Join(parts, ".*") + "$").MatchString(name) {
-			return true
+		// Go limits a compiled pattern's size; only an entry of well over a
+		// million "*" reaches it, where one argument may be that long. Such an
+		// entry is refused like the other arguments, not a crash.
+		pattern, err := regexp.Compile("^" + strings.Join(parts, ".*") + "$")
+		if err != nil {
+			return false, errors.New("argument is too large for the managed Pi tool check: a --tools or --exclude-tools pattern exceeds Go's pattern size limit")
+		}
+		if pattern.MatchString(name) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func nativeToolList(value string) []string {
