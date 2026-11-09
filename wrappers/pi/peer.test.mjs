@@ -1014,3 +1014,29 @@ test("a drain that waited across a session end leaves the new FIFO alone", { tim
   assert.deepEqual(submitted, ["old", "new"]);
   await owner.close();
 });
+
+// A schema-valid delivery that fits the wire but grows past Pi's native bound
+// once rendered is refused at once, with the native check's own text, and is
+// never queued. Before this change it errored with an empty FIFO and, with a
+// non-empty one, was queued for a drain that then shut Pi down.
+test("a delivery past the native bound once rendered is refused before it is queued", async () => {
+  const sender = "s".repeat(128) + "@h";
+  const oversized = {
+    message_id: "message-abcdefghijkl", body: "\u{1F600}".repeat(262030),
+    from: { session_id: sender, product: "pi", groups: ["g", "session:" + sender] },
+  };
+  assert.ok(Buffer.byteLength(renderPiDelivery(oversized)) > 1 << 20);
+  for (const queued of [false, true]) {
+    const fixture = ownerFixture({ busy: true });
+    await ready(fixture.owner);
+    const deliver = (request) => fixture.fake.latest().deliver(request);
+    if (queued) assert.deepEqual(await deliver(inbound("held")), { disposition: "queued_for_next_turn" });
+    assert.deepEqual(await deliver(oversized), { disposition: "rejected", reason: "invalid Pi native delivery" });
+    assert.equal(fixture.appended().length, 0);
+    fixture.setBusy(false);
+    const drained = await fixture.owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" });
+    assert.equal(drained.drained, queued ? 1 : 0, "the oversized delivery entered the FIFO");
+    assert.deepEqual(fixture.appended().map((params) => params.message_id), queued ? ["held"] : []);
+    await fixture.owner.close();
+  }
+});

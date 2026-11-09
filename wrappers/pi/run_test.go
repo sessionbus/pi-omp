@@ -1170,3 +1170,40 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 		})
 	}
 }
+
+// A lane delivery that grows past the extension's 1 MiB native bound once
+// rendered is refused with that check's text before any native call. Before
+// this change it was sent and failed in the extension.
+func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	left, right := net.Pipe()
+	run := &sessionkit.Run{}
+	wrapper := &Wrapper{opened: true, ctx: ctx, id: "native", run: run, active: &piNativeTurn{admitted: true, token: "run-token"}}
+	calls := 0
+	hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, nil, pifamily.BridgeLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		calls++
+		return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected call")
+	}, pifamily.BridgeLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hostBridge.Close(); _ = nativeBridge.Close() }()
+	if err = hostBridge.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = nativeBridge.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wrapper.bridge = hostBridge
+	sender := strings.Repeat("s", 128) + "@h"
+	receipt, err := wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "message-abcdefghijkl", Body: strings.Repeat("\U0001F600", 262030),
+		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
+	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "invalid Pi native delivery" || calls != 0 {
+		t.Fatalf("oversized lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+	}
+}
