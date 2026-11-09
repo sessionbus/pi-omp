@@ -1084,7 +1084,14 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 	for name, test := range map[string]struct {
 		answer    func(session, message string) (json.RawMessage, error)
 		uncertain bool
+		valid     string // "idle" or "injected": a well-formed answer still works
 	}{
+		"valid idle": {valid: "idle", answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": false, "reason": "idle"})
+		}},
+		"valid success": {valid: "injected", answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": true})
+		}},
 		"refused before the send": {answer: func(string, string) (json.RawMessage, error) {
 			return nil, pifamily.NewBridgeCallError("stale_session", "Pi native session identity does not match")
 		}},
@@ -1099,6 +1106,12 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 		}},
 		"invalid rejection": {uncertain: true, answer: func(session, message string) (json.RawMessage, error) {
 			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": false, "reason": "busy"})
+		}},
+		"missing accepted": {uncertain: true, answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "reason": "idle"})
+		}},
+		"accepted with a reason": {uncertain: true, answer: func(session, message string) (json.RawMessage, error) {
+			return json.Marshal(map[string]any{"session_id": session, "message_id": message, "accepted": true, "reason": "busy"})
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1138,8 +1151,17 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 				From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture"}}, run)
 			var protocolErr *sessionkit.ProtocolError
 			isInternal := errors.As(err, &protocolErr) && protocolErr.Code == protocol.Internal && string(protocolErr.Data) == `"uncertain_submission"`
-			if err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
-				!test.uncertain && !strings.Contains(err.Error(), "Pi native steer was refused before it was sent") {
+			switch {
+			case test.valid == "injected":
+				if err != nil || receipt.Disposition != "injected" {
+					t.Fatalf("valid success = %+v, %v", receipt, err)
+				}
+			case test.valid == "idle":
+				if !errors.As(err, &protocolErr) || protocolErr.Code != protocol.NotRunning || receipt.Disposition != "" {
+					t.Fatalf("valid idle = %+v, %v", receipt, err)
+				}
+			case err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
+				!test.uncertain && !strings.Contains(err.Error(), "Pi native steer was refused before it was sent"):
 				t.Fatalf("failed steer = %+v, %v (want uncertain %v)", receipt, err, test.uncertain)
 			}
 			if calls != 1 {

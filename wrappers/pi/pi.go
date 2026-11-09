@@ -681,7 +681,7 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	var answer struct {
 		SessionID string `json:"session_id"`
 		MessageID string `json:"message_id"`
-		Accepted  bool   `json:"accepted"`
+		Accepted  *bool  `json:"accepted"`
 		Reason    string `json:"reason"`
 	}
 	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}, &answer); err != nil {
@@ -692,13 +692,14 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		// treat it as refused and resend it. Nothing is retried here.
 		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
 	}
-	if answer.SessionID != id || answer.MessageID != request.MessageID {
-		return sessionkit.DeliveryReceipt{}, uncertainSubmission() // answer changed identity
+	// The answer comes after the steer may have been sent, so an answer that
+	// changed identity, lacks accepted, or contradicts itself is uncertain, as
+	// for OMP's steerPrimary.
+	if answer.SessionID != id || answer.MessageID != request.MessageID || answer.Accepted == nil ||
+		*answer.Accepted && answer.Reason != "" || !*answer.Accepted && answer.Reason != "idle" {
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
 	}
-	if !answer.Accepted {
-		if answer.Reason != "idle" {
-			return sessionkit.DeliveryReceipt{}, uncertainSubmission() // rejection is invalid
-		}
+	if !*answer.Accepted {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
