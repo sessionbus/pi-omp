@@ -440,7 +440,7 @@ func (p *Wrapper) lose(err error) {
 // continuation, outside this Run's result. Otherwise the lane is not running
 // and the daemon starts a later Run.
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	body, err := host.RenderNativeMessage(request)
+	body, err := ompRenderPeerMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}

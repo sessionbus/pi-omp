@@ -63,7 +63,7 @@ jobs:
       - name: Install Pi test kit
         run: npm ci --prefix pi --ignore-scripts
       - name: Pi-family native bridges
-        run: node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/pi/peer.test.mjs wrappers/omp/extension.test.mjs
+        run: node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/pi/peer.test.mjs wrappers/omp/extension.test.mjs wrappers/omp/magic_keywords.test.mjs
       - name: OMP native modules on Bun
         run: bun test wrappers/pifamily/extension/bridge.test.mjs wrappers/omp/extension.test.mjs
       - name: Pi and OMP archives

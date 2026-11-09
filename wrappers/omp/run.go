@@ -1035,7 +1035,7 @@ func runInput(seed sessionkit.RunInput) (string, error) {
 	if seed.Text != nil {
 		return *seed.Text, nil
 	}
-	rendered, err := host.RenderNativeMessage(*seed.Delivery)
+	rendered, err := ompRenderPeerMessage(*seed.Delivery)
 	if err != nil {
 		return "", err
 	}

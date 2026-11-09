@@ -20,7 +20,6 @@ import (
 
 	kit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
-	"github.com/sessionbus/peer-common/host"
 	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
@@ -1056,7 +1055,7 @@ func (registry *OwnerRegistry) releasePublicDelivery(state *ownerRegistryState, 
 }
 
 func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistryState, request kit.DeliveryRequest) (kit.DeliveryReceipt, error) {
-	body, err := host.RenderNativeMessage(request)
+	body, err := ompRenderPeerMessage(request)
 	if err != nil {
 		return kit.DeliveryReceipt{}, err
 	}

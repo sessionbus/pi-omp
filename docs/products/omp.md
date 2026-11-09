@@ -6,6 +6,80 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## Peer text and OMP magic keywords (2026-11-09)
+
+OMP treats a few standalone lowercase prose words in a user-attributed prompt
+or queued message as magic keywords. In 18.18.5 these are `ultrathink`,
+`chillax`, `orchestrate`, `workflowz` and `jevify`
+(`modes/magic-keywords.ts:91-142`). They add a hidden notice, and `ultrathink`
+and `chillax` also raise or lower thinking effort, `chillax` mid-turn too
+(`session/agent-session.ts:8797, 9205-9252, 9568`;
+`session/model-controls.ts:676, 735-750`). The matcher in `@oh-my-pi/pi-tui`
+skips code and every XML/HTML element together with its content
+(`prompt/magic-keywords.ts:22-38, 91-93`; `prompt/markdown-prose.ts`).
+
+Peer text reaches OMP inside one balanced `<cross-session-message>` element on
+every path: lane seed, lane steer and interactive staging. So a peer cannot
+trigger a keyword. A body could unbalance the element in two ways: an opening
+tag of the same name, in any letter case, nests, and an unclosed code fence
+masks our closing tag first. The wrapper therefore escapes such opening tags as
+`<\cross-session-message`, the way peer-common escapes closings. If the body
+leaves a fence open by OMP's line rules, the wrapper also closes it with the
+same marker before the envelope closes. The caller's own Run input is never
+changed. `magic_keywords.test.mjs` runs OMP's matcher code, vendored
+byte-exact, on the rendered envelopes.
+
+## OMP 18.18.5 source delta (2026-11-09)
+
+The 18.13.2 to 18.18.5 delta found two breaks, both fixed in this release:
+
+- **Lane readiness.** The RPC `ready` frame gained
+  `supportsBashExcludeFromContext` in 18.18.1. The wrapper now validates only
+  the native fields it uses and ignores additional ones there and in the other
+  open native frames.
+- **Shell commands.** 18.17.0 registers `zsh`, `bash` and `sh`. See Lane Run
+  boundary, Subcommands.
+
+The other changes need no code. They are recorded here:
+
+- **Unresolvable `@path`.** A mention OMP cannot resolve is now plain text, not
+  a failure before the run (`utils/file-mentions.ts:65-73`).
+- **Idle wake.** An idle user-attributed `sendMessage(..., {triggerTurn:true})`
+  now runs `before_agent_start` first (`session/agent-session.ts:10604-10675`).
+  Interactive owners do not rotate on it. How a lane treats a preflight caused
+  by another extension's such message is not established.
+- **Abort before the provider call.** Such an abort requeues a steer OMP had
+  already taken (agent-core `agent-loop.ts:1268-1286`). It is then delivered in
+  the next turn with one more preflight, the delayed-delivery class above.
+- **Model mentions.** `^provider/id:level` mentions now resolve
+  (`session/model-mentions.ts:91-150`). A peer seed that OMP rewrites this way fails as
+  a foreign preflight, which widens that existing limit.
+- **Event order.** OMP now delivers events to each extension in emission order
+  (`extensibility/extensions/runner.ts:2021-2130`). The held `message_end` path
+  remains for the timeout and nested-emit exceptions.
+- **Restricted folders.** `tools.restrictedFolders` turns even a yolo allow into
+  a per-call prompt, matched by the session cwd for tools without paths
+  (`tools/approval.ts:376-389, 524-564`).
+- **Task children in worker threads.** These are new in 18.18.5 (`src/thread/`).
+  Their effect on managed Task children is not established.
+
+## Native update checklist (2026-11-09)
+
+At every OMP update, before installing it for acceptance runs:
+
+1. Re-verify the command registry and launch string flags.
+   `TestOMPCommandsMatchNativeRegistry` holds the list.
+2. Re-check the RPC frames the lane reads for new required fields. Additive
+   fields need no change.
+3. Re-vendor `prompt/markdown-prose.ts` and `prompt/magic-keywords.ts` from the
+   new `@oh-my-pi/pi-tui` into `wrappers/omp/testdata/pi-tui-<version>/`.
+   Update `UPSTREAM.json` with the file hashes and keyword list, re-verify the
+   fence and tag rules the wrapper mirrors (`peer_envelope.go`), regenerate the
+   golden with `OMP_UPDATE_KEYWORD_GOLDEN=1`, and rerun
+   `magic_keywords.test.mjs`.
+4. Re-read the source anchors cited in this file for the paths the wrapper
+   uses.
+
 ## A lane prompt over the native frame once encoded (2026-10-28)
 
 The lane checks a prompt's raw length against the 1 MiB native input frame,
