@@ -1340,3 +1340,38 @@ func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
 		})
 	}
 }
+
+// When OMP's own dialog cannot be cancelled because the native write queue is
+// full, the lane ends with that error instead of staying connected while the
+// dialog blocks OMP's own work and every later Run. Before this change the
+// error was discarded and the lane stayed, unusable.
+func TestOMPOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	fixture.rpc.mu.Lock()
+	saved := fixture.rpc.pendingWrites
+	fixture.rpc.pendingWrites = fixture.rpc.limits.maxPendingWrites
+	fixture.rpc.mu.Unlock()
+	defer func() {
+		fixture.rpc.mu.Lock()
+		fixture.rpc.pendingWrites = saved
+		fixture.rpc.mu.Unlock()
+	}()
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue"}`)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		fixture.wrapper.mu.Lock()
+		failure := fixture.wrapper.failure
+		fixture.wrapper.mu.Unlock()
+		if failure != nil {
+			if !errors.Is(failure, errNativeRPCBusy) {
+				t.Fatalf("lane failure = %v", failure)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an own-work dialog that could not be cancelled left the lane connected")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

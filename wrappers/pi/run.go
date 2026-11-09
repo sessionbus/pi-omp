@@ -585,7 +585,14 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 	if turn != nil && (!own || turn.ownsStdout(settled)) {
 		return turn.cancelUI(event.ID)
 	}
-	go func() { _ = rpc.CancelUI(ctx, event.ID) }()
+	// If that cancellation fails while the lane is live, the dialog would
+	// block Pi's own work and every later Run, so the lane ends with the error
+	// through the usual loss path; nothing is retried.
+	go func() {
+		if err := rpc.CancelUI(ctx, event.ID); err != nil && ctx.Err() == nil {
+			p.lose(fmt.Errorf("Pi own-work dialog could not be cancelled: %w", err))
+		}
+	}()
 	return nil
 }
 

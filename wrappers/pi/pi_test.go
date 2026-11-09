@@ -956,3 +956,52 @@ func TestPiNameAndStateValidation(t *testing.T) {
 		t.Fatal("bounded stderr unavailable")
 	}
 }
+
+// When Pi's own dialog cannot be cancelled because the native write queue is
+// full, the lane ends with that error instead of staying connected while the
+// dialog blocks Pi's own work and every later Run. Before this change the
+// error was discarded and the lane stayed, unusable.
+func TestPiOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
+	wrapper, cwd := newPiTestWrapper(t, "startup-widget")
+	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{
+		Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+	// Pi's own work is running and the native write queue is full.
+	wrapper.mu.Lock()
+	wrapper.ownWork = true
+	rpc := wrapper.rpc
+	wrapper.mu.Unlock()
+	rpc.mu.Lock()
+	saved := rpc.pendingWrites
+	rpc.pendingWrites = rpc.limits.maxPendingWrites
+	rpc.mu.Unlock()
+	defer func() {
+		rpc.mu.Lock()
+		rpc.pendingWrites = saved
+		rpc.mu.Unlock()
+	}()
+	if err := wrapper.observeNative(json.RawMessage(
+		`{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue?"}`,
+	)); err != nil {
+		t.Fatalf("own-work dialog = %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		wrapper.mu.Lock()
+		failure := wrapper.failure
+		wrapper.mu.Unlock()
+		if failure != nil {
+			if !errors.Is(failure, errNativeRPCBusy) {
+				t.Fatalf("lane failure = %v", failure)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an own-work dialog that could not be cancelled left the lane connected")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

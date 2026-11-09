@@ -708,9 +708,15 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 		}
 	}
 	// A dialog of OMP's own work is cancelled the same way, with no Run to
-	// join, as for Pi.
+	// join, as for Pi. If that cancellation fails while the lane is live, the
+	// dialog would block OMP's work and every later Run, so the lane ends with
+	// the error through the usual loss path; nothing is retried.
 	rpc := owner.rpc
-	go func() { _ = rpc.CancelUI(ctx, event.ID) }()
+	go func() {
+		if err := rpc.CancelUI(ctx, event.ID); err != nil && ctx.Err() == nil {
+			p.lose(fmt.Errorf("OMP own-work dialog could not be cancelled: %w", err))
+		}
+	}()
 	return nil
 }
 
