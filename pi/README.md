@@ -67,9 +67,10 @@ steered peer message unread: when Pi restored its queue to the editor
 message for a later task because the task could not continue. Before writing,
 the extension clears Pi's queues as Escape does, so text you had queued
 returns to the editor. Quitting Pi also writes such a message to history
-before the session ends. If a task is still running then, the extension
-aborts it, as Escape does, and waits up to 2 seconds for Pi to settle; if Pi
-has not settled by then, nothing is written and Pi quits. Peer messages still
+before the session ends. If a task (or a compaction) is still running then
+while such a message or a peer message queued for Pi's next task waits, the
+extension aborts it, as Escape does, and waits up to 2 seconds for Pi to
+settle; if Pi has not settled by then, nothing is written and Pi quits. Peer messages still
 waiting for Pi's next task are written to history the same way, after those,
 in arrival order; no new task starts while Pi quits.
 A peer delivery accepted while another extension's settled handler runs can

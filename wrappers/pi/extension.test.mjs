@@ -160,6 +160,8 @@ function fakeConnection({ topology, queue = [], preflightRuns } = {}) {
         }
     case "owner.before_tree":
       return { session_id: params.session_id, pending: queue.length !== 0 };
+        case "owner.pending":
+          return { session_id: params.session_id, pending: queue.length !== 0 };
         default:
           throw new Error(`unexpected host method ${method}`);
       }
@@ -709,6 +711,30 @@ test("interactive quit keeps never-started steers when Pi is or becomes idle", a
     assert.deepEqual(sends.slice(steered), expected, atQuit);
     assert.equal(native.aborted(), atQuit === "idle" ? 0 : 1, atQuit);
     if (atQuit === "stays busy") assert.ok(Date.now() - started < 1000, "quit goes on at the bound");
+  }
+});
+
+// Quitting while Pi is busy (running or compacting) with deliveries still
+// waiting in the owner aborts as Escape does, lets Pi settle, and writes them
+// to history in order; with nothing waiting there is no abort. Before this
+// change only a never-started steer triggered the abort, so waiting
+// deliveries were dropped at a busy quit.
+test("interactive busy quit with waiting deliveries settles and writes them to history", async () => {
+  for (const waiting of [true, false]) {
+    const native = nativeFixture("interactive-1", "tui");
+    const history = [];
+    native.pi.sendMessage = (message, options) => {
+      if (options === undefined) history.push(message.details.message_id);
+    };
+    const queue = waiting ? [{ session_id: "interactive-1", message_id: "waiting", body: "body waiting" }] : [];
+    const owner = fakeConnection({ topology: "interactive", queue });
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect, quitWaitMs: 500 })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    native.setIdle(false);
+    native.onAbort(() => setTimeout(() => native.setIdle(true), 20));
+    await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+    assert.equal(native.aborted(), waiting ? 1 : 0, `aborts with waiting=${waiting}`);
+    assert.deepEqual(history, waiting ? ["waiting"] : [], `history with waiting=${waiting}`);
   }
 });
 

@@ -51,8 +51,11 @@ as it is: attempted, consumption unknown.
 
 Quitting while a task runs: Pi does not abort the task before
 `session_shutdown` and awaits that handler with no bound of its own. With a
-never-started steer, the extension aborts the task as Escape does, waits up
-to 2 seconds (`quitWaitMs`) for Pi to become idle, then writes the steer once.
+never-started steer, or (since 2026-11-09) with deliveries still waiting in
+the owner for Pi's next task, the extension aborts the task, or a
+compaction, as Escape does, waits up to 2 seconds (`quitWaitMs`) for Pi to
+become idle, then writes the steer once. The owner's `owner.pending` answers
+whether deliveries wait, with no side effect.
 A settle in that window keeps it the same way. Every drain, scheduled or at a
 settle, is gated while Pi quits, and a delivery crossing the quit is written
 to history once Pi is idle instead of starting a turn. Once Pi is idle, the

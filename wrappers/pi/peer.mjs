@@ -256,6 +256,7 @@ export class PiInteractiveOwner {
       case "session_end": return this.#sessionEnd(params);
       case "owner.drain": return this.#drain(params, signal);
       case "owner.before_tree": return this.#beforeTree(params);
+      case "owner.pending": return this.#pending(params);
       case "tool.call": return this.#toolCall(params, signal);
       default: throw new Error("Pi interactive owner method is unavailable");
     }
@@ -365,6 +366,13 @@ export class PiInteractiveOwner {
       throw staleToolCall("Pi tool call crossed a native owner generation");
     }
     return { session_id: params.session_id, call_id: params.call_id, result };
+  }
+
+  // Whether deliveries wait for Pi's next task, with no side effect (unlike
+  // owner.before_tree, which also gates new deliveries).
+  #pending(params) {
+    if (!exact(params, ["session_id"]) || params.session_id !== this.#session) throw new Error("invalid Pi pending query");
+    return { session_id: params.session_id, pending: this.#queue.length !== 0 };
   }
 
   #beforeTree(params) {
