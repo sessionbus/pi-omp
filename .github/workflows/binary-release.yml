@@ -42,7 +42,7 @@ jobs:
           SESSIONBUS_PEERS_REVISION: ${{ github.sha }}
         run: |
           go test ./...
-          node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/omp/extension.test.mjs
+          node --test wrappers/pifamily/extension/bridge.test.mjs wrappers/pi/native.test.mjs wrappers/pi/extension.test.mjs wrappers/pi/peer.test.mjs wrappers/omp/extension.test.mjs
           for product in pi omp; do
             GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" scripts/package-product "$product" dist
           done
