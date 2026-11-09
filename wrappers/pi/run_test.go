@@ -565,6 +565,29 @@ func TestPiRefusedPromptEndsOnlyItsRun(t *testing.T) {
 	}
 }
 
+// When an input extension forwards our prompt and Pi then refuses the
+// original as busy, the run Pi is running was witnessed from our own input
+// inside our preflight window: the Run follows it and completes, and the
+// lane stays. Before this change the Run ended unavailable while that work
+// ran with no owner.
+func TestPiRefusedPromptAfterAWitnessedRunKeepsOwningIt(t *testing.T) {
+	lane := newPiSDKLane(t, "run-refuse-witnessed")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("witnessed Run after a refusal = %s, %s, %q", state, outcome, reason)
+	}
+	if frame, ok := responses[2]; !ok || frame.Error != nil {
+		t.Fatalf("execute response = %+v", frame)
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after a refused, witnessed prompt: %v", failure)
+	}
+}
+
 func TestPiSDKInterruptCancelsHeldNativeAdmission(t *testing.T) {
 	t.Run("execute", func(t *testing.T) {
 		testPiSDKInterruptCancelsHeldNativeAdmission(t, false, false)

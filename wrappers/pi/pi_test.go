@@ -280,7 +280,7 @@ func runPiNativeHelper(mode string) error {
 			}
 		case "prompt":
 			var prompt string
-			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" && !ownMode || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
+			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" && mode != "run-refuse-witnessed" && !ownMode || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
 				return errors.New("helper received invalid native prompt")
 			}
 			turns++
@@ -338,6 +338,14 @@ func runPiNativeHelper(mode string) error {
 				response["success"] = false
 				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 				break
+			}
+			if mode == "run-refuse-witnessed" && turns == 1 {
+				// An input extension forwarded our prompt with sendUserMessage
+				// and returned while that run, already witnessed from our
+				// input inside our preflight window, is active: Pi then
+				// refuses the original prompt as busy, and the run goes on.
+				response["success"] = false
+				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 			}
 			if mode == "run-hold" {
 				continue

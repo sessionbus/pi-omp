@@ -712,13 +712,23 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	turn.mu.Unlock()
 	var refused *nativeRPCError
 	if errors.As(callErr, &refused) {
-		// Pi may be running work of its own: a run it started at the same
-		// time is why it refuses a prompt with no streaming behaviour.
-		p.mu.Lock()
-		p.ownWork = true
-		p.mu.Unlock()
-		p.finishNativeTurn(turn)
-		return nil, &piPromptRefusal{err: callErr}
+		turn.mu.Lock()
+		witnessed := turn.input && turn.preflight
+		turn.mu.Unlock()
+		if witnessed {
+			// Pi refused the prompt as busy, but the run it is running began
+			// from our own submitted input inside this Run's preflight window
+			// (an input extension forwarded it): the Run follows that run.
+			callErr = nil
+		} else {
+			// Pi may be running work of its own: a run it started at the same
+			// time is why it refuses a prompt with no streaming behaviour.
+			p.mu.Lock()
+			p.ownWork = true
+			p.mu.Unlock()
+			p.finishNativeTurn(turn)
+			return nil, &piPromptRefusal{err: callErr}
+		}
 	}
 	if callErr != nil {
 		if submitted {
