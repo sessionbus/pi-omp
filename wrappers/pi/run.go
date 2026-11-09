@@ -24,6 +24,14 @@ var errPiRunInterrupted = errors.New("Pi Run interrupted before native admission
 // run which failed before it started.
 var errPiForwardedStartFailed = errors.New("Pi forwarded prompt failed before its run started")
 
+// piPromptHandled is Pi's "handled" answer to the lane's own prompt before
+// any preflight of ours: an extension consumed the prompt, so Pi ran nothing
+// for this Run. Only the Run ends; the handoff was consumed, not replayed.
+type piPromptHandled struct{ err error }
+
+func (handled *piPromptHandled) Error() string { return handled.err.Error() }
+func (handled *piPromptHandled) Unwrap() error { return handled.err }
+
 // piPromptRefusal is Pi's error answer to the lane's own prompt command. Pi
 // answers so only before it starts a run (rpc-mode.js:298-316), so nothing of
 // the prompt was saved: the Run fails with that answer and the lane stays open.
@@ -94,6 +102,8 @@ type piNativeTurn struct {
 	forwardFollowing bool
 	forwardFailed    bool
 	forwardFailure   string
+	// handled: Pi answered "handled" before our preflight (piPromptHandled).
+	handled error
 }
 
 func newPiNativeTurn(owner *Wrapper, run *sessionkit.Run, parent, cursor, prompt string) *piNativeTurn {
@@ -146,6 +156,11 @@ func (turn *piNativeTurn) recordPreflight(prompt string, settling bool, leaf str
 	if turn.failure != nil {
 		return "", turn.failure
 	}
+	if turn.handled != nil {
+		// Pi answered "handled" for this Run's prompt: a later preflight is
+		// the extension's run, Pi's own work.
+		return "", nil
+	}
 	if validPiText(prompt, 1<<20, true) && (!turn.input || turn.preflight || settling) && own {
 		return "", nil
 	}
@@ -191,6 +206,21 @@ func (turn *piNativeTurn) recordForwardFailure(settled int, text string) {
 	}
 	turn.forwardFailed, turn.forwardFailure = true, text
 	turn.signalLocked()
+}
+
+// uiJoined is ready once every owned dialog's cancellation has finished, and
+// closes UI admission at that boundary, as terminal does.
+func (turn *piNativeTurn) uiJoined() (bool, <-chan struct{}, error) {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if turn.failure != nil {
+		return false, turn.changed, turn.failure
+	}
+	if turn.pendingUI != 0 {
+		return false, turn.changed, nil
+	}
+	turn.uiClosed = true
+	return true, turn.changed, nil
 }
 
 func (turn *piNativeTurn) recordStart(settling bool) error {
@@ -415,8 +445,12 @@ func (turn *piNativeTurn) Wait(ctx context.Context) (result sessionkit.TurnResul
 	defer turn.owner.finishNativeTurn(turn)
 	defer turn.joinOwnedWork()
 	turn.mu.Lock()
-	admitted := turn.admitted
+	admitted, handled := turn.admitted, turn.handled
 	turn.mu.Unlock()
+	if handled != nil {
+		// Pi ran nothing for this Run; no UI is owned without our preflight.
+		return result, handled
+	}
 	if admitted && turn.report != nil {
 		if err = turn.report(sessionkit.DeliveryReceipt{Disposition: "injected"}, nil); err != nil {
 			turn.owner.lose(err)
@@ -765,7 +799,8 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 	turn.forwardArmed = true
 	p.active = turn
 	p.mu.Unlock()
-	submitted, callErr := p.rpc.callWithAdmission(ctx, "prompt", map[string]any{"message": prompt}, nil)
+	var reply optionalRPCData
+	submitted, callErr := p.rpc.callWithAdmission(ctx, "prompt", map[string]any{"message": prompt}, &reply)
 	turn.mu.Lock()
 	turn.submitted = submitted
 	turn.mu.Unlock()
@@ -811,9 +846,29 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		turn.fail(err)
 		return turn, nil
 	}
+	// Pi answers a prompt with its disposition (rpc-mode.js 1.4.0:298-317).
+	// Only an exact "handled" changes the path below; a missing, unknown or
+	// other disposition keeps it.
+	var answer struct {
+		Disposition string `json:"disposition"`
+	}
+	handled := len(reply.data) != 0 && decodePiBridge(reply.data, []string{"disposition"}, &answer) == nil &&
+		answer.Disposition == "handled"
 	turn.mu.Lock()
 	preflight := turn.input && turn.preflight
+	if handled && preflight {
+		// An extension consumed our prompt after our input and the run's
+		// preflight: the Run follows that forwarded run, as after a witnessed
+		// refusal.
+		turn.forwardFollowing = true
+	}
 	turn.mu.Unlock()
+	if handled && preflight {
+		refusal = fmt.Errorf("Pi native prompt: %s", answer.Disposition)
+	}
+	if handled && !preflight {
+		return p.handledBeforePreflight(turn, answer.Disposition), nil
+	}
 	if !preflight {
 		turn.fail(errors.New("Pi native accepted a prompt without the managed Run preflight"))
 		return turn, nil
@@ -823,7 +878,11 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			turn.mu.Lock()
 			forwardFailure := turn.forwardFailure
 			turn.mu.Unlock()
-			return nil, p.refuseForwarded(turn, refusal, forwardFailure)
+			if refusalErr := p.refuseForwarded(turn, refusal, forwardFailure); refusalErr != nil {
+				return nil, refusalErr
+			}
+			// An owned dialog's cancellation failed: the existing loss path.
+			return turn, nil
 		}
 		turn.mu.Lock()
 		if turn.failure == nil {
@@ -848,13 +907,47 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 
 // refuseForwarded ends only this Run, as an unwitnessed refusal does: the
 // run that our input started through an input extension failed before it
-// started, so Pi ran nothing for this Run. Nothing is replayed.
+// started, so Pi ran nothing for this Run. Nothing is replayed. A dialog in
+// that window was ours: its cancellation is joined first and UI admission
+// closed, as at the terminal. If a cancellation failed, it returns nil and
+// the failed turn takes the existing loss path.
 func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure string) error {
+	if err := turn.await(p.ctx, turn.uiJoined); err != nil {
+		turn.mu.Lock()
+		if turn.failure == nil {
+			turn.failLocked(err)
+		}
+		turn.mu.Unlock()
+		return nil
+	}
 	p.mu.Lock()
 	p.ownWork = true
 	p.mu.Unlock()
 	p.finishNativeTurn(turn)
 	return &piPromptRefusal{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
+}
+
+// handledBeforePreflight ends only this Run: Pi answered "handled" before
+// any preflight of ours, so an extension consumed the prompt. The turn is
+// returned, so the handoff is consumed and nothing is replayed, and Wait
+// answers piPromptHandled. The refusal tombstone (own work, no active turn)
+// records a later preflight as Pi's own work while no next Run has recorded
+// its input; Pi's preflight carries no prompt identity beyond that.
+func (p *Wrapper) handledBeforePreflight(turn *piNativeTurn, disposition string) *piNativeTurn {
+	// Close the owned window under the turn lock before detaching: a
+	// preflight handler that already holds this turn mints no token for it,
+	// no UI is admitted, and an Interrupt sends no abort for the work that
+	// the extension now owns.
+	turn.mu.Lock()
+	turn.handled = &piPromptHandled{err: fmt.Errorf("Pi native prompt: %s", disposition)}
+	turn.terminalOwned, turn.uiClosed = true, true
+	turn.signalLocked()
+	turn.mu.Unlock()
+	p.mu.Lock()
+	p.ownWork = true
+	p.mu.Unlock()
+	p.finishNativeTurn(turn)
+	return turn
 }
 
 func (p *Wrapper) finishNativeTurn(turn *piNativeTurn) {
@@ -930,6 +1023,19 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		}
 		return turn, startErr
 	})
+	var handled *piPromptHandled
+	if errors.As(err, &handled) {
+		// An extension consumed the prompt and Pi ran nothing for it: only
+		// this Run ends. A delivery seed was consumed too, so its receipt is
+		// uncertain and the sender does not resend it.
+		if seed.Delivery != nil {
+			if reportErr := run.ReportDelivery(sessionkit.DeliveryReceipt{}, err); reportErr != nil {
+				p.lose(reportErr)
+				return sessionkit.TurnResult{}, errors.Join(err, reportErr)
+			}
+		}
+		return sessionkit.TurnResult{}, err
+	}
 	var refusal *piPromptRefusal
 	var failure *piPromptFailure
 	if errors.As(err, &refusal) || errors.As(err, &failure) {

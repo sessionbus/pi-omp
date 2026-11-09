@@ -184,7 +184,8 @@ func runPiNativeHelper(mode string) error {
 	settled, turns := 0, 0
 	ownDialog := false
 	// ownMode keeps history across prompts and honours the append cursor.
-	ownMode := strings.HasPrefix(mode, "run-own-") || strings.HasPrefix(mode, "run-refuse")
+	ownMode := strings.HasPrefix(mode, "run-own-") || strings.HasPrefix(mode, "run-refuse") || strings.HasPrefix(mode, "handled-")
+	latePreflight := false
 	// Pi's own run, which another extension started: its entries and its
 	// stdout frames, which the lag mode writes after the owned preflight.
 	ownEntries := func() {
@@ -240,6 +241,21 @@ func runPiNativeHelper(mode string) error {
 			return errors.New("helper received invalid native RPC identity")
 		}
 		response := map[string]any{"id": requestID, "type": "response", "command": kind, "success": true}
+		if latePreflight {
+			// The extension that handled the earlier prompt forwards it late:
+			// its preflight comes after the wrapper ended that Run (the next
+			// command shows it did) and before the next Run's input, so it is
+			// Pi's own work, not a Run's.
+			latePreflight = false
+			var echo struct {
+				SessionID string  `json:"session_id"`
+				Run       *string `json:"run"`
+			}
+			params := map[string]any{"session_id": id, "settling": false, "prompt": "late forwarded", "leaf": leaf, "settled": settled}
+			if err = bridge.Call(context.Background(), "run.preflight", params, &echo); err != nil || echo.SessionID != id || echo.Run != nil {
+				return errors.Join(err, errors.New("helper late preflight after handled was not Pi's own work"))
+			}
+		}
 		switch kind {
 		case "get_state":
 			response["data"] = piNativeState{SessionID: id, SessionName: name, SessionFile: sessionFile}
@@ -285,9 +301,19 @@ func runPiNativeHelper(mode string) error {
 			}
 			turns++
 			forwardFail := strings.HasPrefix(mode, "run-refuse-forward-fail-") && turns == 1
+			// Pi answers "handled" when an extension consumed the prompt
+			// (agent-session.js 1.4.0:1644, :1654); the reply carries it as
+			// data.disposition (rpc-mode.js:298-317). handled-missing omits it.
+			early := (mode == "handled-missing" || mode == "handled-early" || mode == "handled-late-preflight") && turns == 1
+			after := (mode == "handled-after" || mode == "handled-after-fail") && turns == 1
+			if mode == "handled" || turns == 1 && (mode == "handled-early" || mode == "handled-late-preflight" || after) {
+				response["data"] = map[string]any{"disposition": "handled"}
+			}
 			steps := []string{"run.input", "run.preflight", "run.start"}
-			if mode == "handled" {
+			if mode == "handled" || early {
 				steps = nil
+			} else if mode == "handled-after-fail" && turns == 1 {
+				steps = steps[:2]
 			} else if mode == "run-hold" || mode == "run-refuse" && turns == 1 {
 				steps = steps[:1]
 			} else if forwardFail || mode == "run-refuse-witnessed-other-error" && turns == 1 {
@@ -404,7 +430,19 @@ func runPiNativeHelper(mode string) error {
 					return errors.Join(err, errors.New("helper Run start was not acknowledged"))
 				}
 			}
-			if mode == "handled" {
+			if mode == "handled" || early {
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				latePreflight = mode == "handled-late-preflight"
+				continue
+			}
+			if mode == "handled-after-fail" && turns == 1 {
+				// The forwarded run fails before it starts, after Pi answered
+				// "handled" for our prompt.
+				if _, err = fmt.Fprintln(writer, `{"type":"extension_error","extensionPath":"<runtime>","event":"send_user_message","error":"forwarded prompt failed"}`); err != nil {
+					return err
+				}
 				if err = writer.Flush(); err != nil {
 					return err
 				}

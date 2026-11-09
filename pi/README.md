@@ -123,5 +123,9 @@ waits for such work to settle. If Pi still refuses the Run's prompt, that
 Run is unavailable with Pi's answer and the lane stays open. When an input
 extension forwards the Run's prompt and Pi refuses the original as busy, the
 Run follows the forwarded run; if that forwarded prompt fails before its run
-starts, the Run is unavailable with both answers, and the lane stays open. Dialogs that
+starts, the Run is unavailable with both answers, and the lane stays open.
+When Pi answers that an extension handled the Run's prompt, the Run follows
+the extension's forwarded run if its preflight came first; otherwise only
+that Run is unavailable (`Pi native prompt: handled`), its input is not
+replayed, and the lane stays open. Dialogs that
 Pi's own work raises in a lane are cancelled, as the lane's own are.

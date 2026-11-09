@@ -76,7 +76,10 @@ func TestPiHandledPromptConsumesSubmittedHandoff(t *testing.T) {
 	_, err = wrapper.handoff.Run(context.Background(), &sessionkit.Run{}, "/handled", func(ctx context.Context, prompt string) (host.Turn, error) {
 		return wrapper.startNativeTurn(ctx, nil, prompt)
 	})
-	if err == nil || !strings.Contains(err.Error(), "without the managed Run preflight") {
+	// Pi answered "handled" before any preflight of ours: only the Run ends,
+	// and the consumed handoff is not replayed.
+	var handled *piPromptHandled
+	if !errors.As(err, &handled) || err.Error() != "Pi native prompt: handled" {
 		t.Fatalf("handled prompt terminal = %v", err)
 	}
 	if queued := wrapper.handoff.Claim(); len(queued) != 0 {
@@ -85,9 +88,27 @@ func TestPiHandledPromptConsumesSubmittedHandoff(t *testing.T) {
 	if wrapper.active != nil {
 		t.Fatal("handled prompt retained an active native interval")
 	}
-	if closeErr := wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}); closeErr == nil ||
-		!strings.Contains(closeErr.Error(), "without the managed Run preflight") {
-		t.Fatalf("handled prompt close = %v", closeErr)
+	wrapper.mu.Lock()
+	failure := wrapper.failure
+	wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("handled prompt failed the lane: %v", failure)
+	}
+}
+
+// Without a disposition in Pi's reply a prompt with no managed preflight
+// keeps today's failure: only an exact "handled" changes it.
+func TestPiPromptWithoutDispositionKeepsTheMissingPreflightFailure(t *testing.T) {
+	wrapper, cwd := newPiTestWrapper(t, "handled-missing")
+	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+	_, err := wrapper.handoff.Run(context.Background(), &sessionkit.Run{}, "/handled", func(ctx context.Context, prompt string) (host.Turn, error) {
+		return wrapper.startNativeTurn(ctx, nil, prompt)
+	})
+	if err == nil || !strings.Contains(err.Error(), "without the managed Run preflight") {
+		t.Fatalf("prompt without disposition terminal = %v", err)
 	}
 }
 
@@ -654,6 +675,185 @@ func TestPiWitnessedRunIgnoresAnotherRuntimeExtensionError(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("lane failed after another runtime error: %v", failure)
 	}
+}
+
+// Pi answers "handled" before any preflight of ours: an extension consumed
+// the prompt. Only that Run ends, the lane stays, the extension's later
+// preflight before the next Run's input is Pi's own work, and the next Run
+// completes. Before this change the Run failed as a missing preflight and
+// the lane ended.
+func TestPiHandledPromptBeforeOurPreflightEndsOnlyTheRun(t *testing.T) {
+	lane := newPiSDKLane(t, "handled-late-preflight")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "handled prompt"})
+	if state, _, reason := lane.terminal(responses); state != "unavailable" || reason != "Pi native prompt: handled" {
+		t.Fatalf("handled Run = %s, %q", state, reason)
+	}
+	lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "next prompt"})
+	if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+		t.Fatalf("Run after the handled one = %s, %s, %q", state, outcome, reason)
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after a handled prompt: %v", failure)
+	}
+}
+
+// A handled delivery seed was consumed by the extension: its receipt is the
+// uncertain one carrying Pi's answer, never not_submitted, so the sender
+// does not resend it.
+func TestPiHandledDeliverySeedIsNotResent(t *testing.T) {
+	lane := newPiSDKLane(t, "handled-early")
+	responses := map[int64]protocol.Frame{}
+	lane.request(2, "message.deliver", sessionkit.DeliveryRequest{
+		RunID: "g/1", MessageID: "handled-seed", Body: "handled delivery",
+		From: sessionkit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
+	})
+	if state, _, reason := lane.terminal(responses); state != "unavailable" || reason != "Pi native prompt: handled" {
+		t.Fatalf("handled delivery Run = %s, %q", state, reason)
+	}
+	var receipt sessionkit.DeliveryReceipt
+	if frame, ok := responses[2]; !ok || frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+		receipt.Disposition != "rejected" || receipt.Reason == "not_submitted" || !strings.Contains(receipt.Reason, "Pi native prompt: handled") {
+		t.Fatalf("handled delivery receipt = %+v, decoded %+v", frame, receipt)
+	}
+	lane.wrapper.mu.Lock()
+	failure := lane.wrapper.failure
+	lane.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("lane failed after a handled delivery: %v", failure)
+	}
+}
+
+// Pi answers "handled" after our input and the forwarded run's preflight:
+// the Run follows that run, as after a witnessed refusal. If it starts the
+// Run completes; if it fails before it starts only the Run ends.
+func TestPiHandledPromptAfterOurPreflightFollowsTheForwardedRun(t *testing.T) {
+	t.Run("starts", func(t *testing.T) {
+		lane := newPiSDKLane(t, "handled-after")
+		responses := map[int64]protocol.Frame{}
+		lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+		if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+			t.Fatalf("Run following the forwarded run = %s, %s, %q", state, outcome, reason)
+		}
+	})
+	t.Run("fails before it starts", func(t *testing.T) {
+		lane := newPiSDKLane(t, "handled-after-fail")
+		responses := map[int64]protocol.Frame{}
+		lane.request(2, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/1", Input: "forwarded prompt"})
+		want := "Pi native prompt: handled; the forwarded prompt failed before its run started: forwarded prompt failed"
+		if state, _, reason := lane.terminal(responses); state != "unavailable" || reason != want {
+			t.Fatalf("Run whose forwarded prompt failed = %s, %q", state, reason)
+		}
+		lane.request(3, "turn.execute", protocol.ExecuteRequest{SessionID: "pi-fresh@local", RunID: "g/2", Input: "next prompt"})
+		if state, outcome, reason := lane.terminal(responses); state != "done" || outcome != "completed" {
+			t.Fatalf("Run after the failed forward = %s, %s, %q", state, outcome, reason)
+		}
+		lane.wrapper.mu.Lock()
+		failure := lane.wrapper.failure
+		lane.wrapper.mu.Unlock()
+		if failure != nil {
+			t.Fatalf("lane failed after a forwarded failure: %v", failure)
+		}
+	})
+}
+
+// Once Pi answered "handled" before our preflight, the turn is closed under
+// its lock: a preflight handler that already holds it gets no Run token, no
+// UI is admitted, and an Interrupt sends no abort for the extension's work.
+func TestPiHandledTurnIsClosedBeforeItDetaches(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test done")) })
+	wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel}
+	turn := newPiNativeTurn(wrapper, nil, "", "", "handled prompt")
+	turn.input = true
+	wrapper.active = turn
+	wrapper.handledBeforePreflight(turn, "handled")
+	if token, err := turn.recordPreflight("late forwarded", false, "", 0, false); token != "" || err != nil {
+		t.Fatalf("preflight on the handled turn = %q, %v", token, err)
+	}
+	if err := turn.cancelUI("late-dialog"); err == nil {
+		t.Fatal("the handled turn admitted a dialog")
+	}
+	// wrapper.rpc is nil: an abort would panic.
+	if err := turn.Interrupt(context.Background()); err != nil {
+		t.Fatalf("interrupt of the handled turn = %v", err)
+	}
+	wrapper.mu.Lock()
+	own, active := wrapper.ownWork, wrapper.active
+	wrapper.mu.Unlock()
+	if !own || active != nil {
+		t.Fatalf("tombstone = own %v, active %v", own, active)
+	}
+}
+
+// A forwarded refusal joins the cancellations of dialogs it owned before it
+// detaches, and closes UI admission there, as the terminal does. A failed
+// cancellation is not hidden in the refusal: the failed turn keeps the
+// existing loss path. Before this change the refusal detached at once.
+func TestPiForwardedRefusalJoinsOwnedDialogCancellations(t *testing.T) {
+	setup := func(t *testing.T, pending int) (*Wrapper, *piNativeTurn) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "forwarded prompt")
+		turn.pendingUI = pending
+		wrapper.active = turn
+		return wrapper, turn
+	}
+	refused := errors.New("Pi native prompt: busy")
+	t.Run("nothing pending", func(t *testing.T) {
+		wrapper, turn := setup(t, 0)
+		var refusal *piPromptRefusal
+		if err := wrapper.refuseForwarded(turn, refused, "failed"); !errors.As(err, &refusal) {
+			t.Fatalf("refusal = %v", err)
+		}
+		turn.mu.Lock()
+		closed := turn.uiClosed
+		turn.mu.Unlock()
+		if !closed || wrapper.active != nil {
+			t.Fatalf("UI admission closed = %v, active = %v", closed, wrapper.active)
+		}
+	})
+	t.Run("pending cancellation finishes", func(t *testing.T) {
+		wrapper, turn := setup(t, 1)
+		done := make(chan error, 1)
+		go func() { done <- wrapper.refuseForwarded(turn, refused, "failed") }()
+		turn.mu.Lock()
+		turn.pendingUI--
+		turn.signalLocked()
+		turn.mu.Unlock()
+		var refusal *piPromptRefusal
+		if err := <-done; !errors.As(err, &refusal) {
+			t.Fatalf("refusal = %v", err)
+		}
+		turn.mu.Lock()
+		closed, pending := turn.uiClosed, turn.pendingUI
+		turn.mu.Unlock()
+		if !closed || pending != 0 {
+			t.Fatalf("UI admission closed = %v with %d pending", closed, pending)
+		}
+	})
+	t.Run("pending cancellation fails", func(t *testing.T) {
+		wrapper, turn := setup(t, 1)
+		done := make(chan error, 1)
+		go func() { done <- wrapper.refuseForwarded(turn, refused, "failed") }()
+		turn.mu.Lock()
+		turn.pendingUI--
+		turn.failLocked(errNativeRPCBusy)
+		turn.mu.Unlock()
+		if err := <-done; err != nil {
+			t.Fatalf("a failed cancellation was returned as %v", err)
+		}
+		turn.mu.Lock()
+		failure := turn.failure
+		turn.mu.Unlock()
+		if !errors.Is(failure, errNativeRPCBusy) {
+			t.Fatalf("turn failure = %v", failure)
+		}
+	})
 }
 
 func TestPiSDKInterruptCancelsHeldNativeAdmission(t *testing.T) {

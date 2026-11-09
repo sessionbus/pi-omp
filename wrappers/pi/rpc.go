@@ -738,6 +738,10 @@ func (rpc *nativeRPC) abandonPending(id string, pending *nativeRPCPending) (nati
 	return <-pending.result, true
 }
 
+// optionalRPCData receives a response's data as it is, absent included, for
+// a reply whose data the caller reads only when it has an exact known shape.
+type optionalRPCData struct{ data json.RawMessage }
+
 func (rpc *nativeRPC) consumeResult(completed nativeRPCResult, result any) error {
 	if completed.bytes != 0 {
 		rpc.mu.Lock()
@@ -746,6 +750,10 @@ func (rpc *nativeRPC) consumeResult(completed nativeRPCResult, result any) error
 	}
 	if completed.err != nil {
 		return completed.err
+	}
+	if optional, ok := result.(*optionalRPCData); ok {
+		optional.data = completed.data
+		return nil
 	}
 	if result == nil {
 		return nil

@@ -30,6 +30,22 @@ lane stays. Any other extension error is handled as before. Another
 extension's own failed `sendUserMessage` in that same window also ends the
 Run as unavailable; if the forwarded run then starts, it is Pi's own work.
 
+Pi's answer to the prompt carries a disposition, `handled`, `queued` or
+`started` (`rpc-mode.js` 1.4.0:298-317; `agent-session.js` :1644, :1654,
+:1675, :1693). An exact `handled` after our input and the forwarded run's
+preflight makes the Run follow that run, as after a busy refusal. An exact
+`handled` before any preflight of ours ends only that Run as unavailable
+(`Pi native prompt: handled`): the turn is consumed, so the input is not
+replayed; a delivery seed gets an uncertain receipt and is not resent; the
+lane stays. A missing, unknown, `started` or `queued` disposition keeps the
+missing-preflight failure. A later preflight of the extension's run is
+Pi's own work while no next Run has recorded its input. Limit: Pi's
+preflight carries no prompt identity, so if that late preflight arrives
+after the next Run recorded its input and before its own preflight, the
+next Run can take it. A dialog that an owned forwarded window raised is
+cancelled and joined before the Run ends; a failed cancellation ends the
+lane, as elsewhere.
+
 ## Steer limit (2026-11-09)
 
 Steers the extension handed to Pi that Pi has not ended yet (the admitted
