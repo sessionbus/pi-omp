@@ -1259,3 +1259,51 @@ test("lane report drain answers only after the queued preflight is answered", as
   held.release();
   assert.deepEqual(await drained, { owner_token: "token1-primary-1", session_id: "native-main", drained: true });
 });
+
+// Steers OMP has not taken count against the delivery limits, reserved before
+// the send. At the limit the next is refused (queue_full) and not sent; its
+// message_end frees one; the next Run's preflight frees the earlier Run's, so
+// nothing is held across Runs.
+test("lane steers are capped at the delivery limit and freed at message_end or the next Run", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture();
+  const extension = createOMPExtension({
+    launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens(), limits: { queuedDeliveries: 2 },
+  });
+  await start(extension, native, owner);
+  const token = owner.calls[0].params.owner_token;
+  const steer = (messageID, runToken) => owner.native("native.steer", {
+    owner_token: token, session_id: "native-main", message_id: messageID, body: `body ${messageID}`, run_token: runToken,
+  });
+  const result = (messageID, accepted, reason) => ({
+    owner_token: token, session_id: "native-main", message_id: messageID, accepted, ...(reason ? { reason } : {}),
+  });
+  const preflights = () => owner.calls.filter((call) => call.method === "run.preflight").map((call) => call.params.run_token);
+  const taken = (messageID) => native.emit("message_end", { type: "message_end", message: {
+    role: "custom", customType: deliveryMessageType, content: `body ${messageID}`, display: true, attribution: "user",
+    details: { owner_token: token, session_id: "native-main", message_ids: [messageID] },
+  } }, native.context());
+
+  native.setIdle(false);
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "owned prompt" }, native.context());
+  await owner.waitFor(() => preflights().length === 1);
+  const [first] = preflights();
+  assert.deepEqual(await steer("a", first), result("a", true));
+  assert.deepEqual(await steer("b", first), result("b", true));
+  assert.deepEqual(await steer("c", first), result("c", false, "queue_full"));
+  assert.deepEqual(native.steered().map((message) => message.details.message_ids[0]), ["a", "b"]);
+  await taken("a");
+  assert.deepEqual(await steer("c", first), result("c", true));
+  assert.deepEqual(await steer("d", first), result("d", false, "queue_full"));
+
+  // b and c are never taken; the run yields and a later Run preflights.
+  await native.emit("agent_end", { type: "agent_end", messages: [] }, native.context());
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "next prompt" }, native.context());
+  await owner.waitFor(() => preflights().length === 2);
+  const second = preflights()[1];
+  assert.deepEqual(await steer("e", second), result("e", true));
+  assert.deepEqual(await steer("f", second), result("f", true));
+  assert.deepEqual(await steer("g", second), result("g", false, "queue_full"));
+  assert.deepEqual(native.steered().map((message) => message.details.message_ids[0]), ["a", "b", "c", "e", "f"]);
+  assert.equal(owner.calls.some((call) => call.method === "session_end"), false);
+});

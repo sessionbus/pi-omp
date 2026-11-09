@@ -444,6 +444,19 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         if (state.runToken !== runToken || state.ctx.isIdle()) {
           return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "idle" };
         }
+        // A steer OMP has not taken yet counts against the existing delivery
+        // limits, reserved before the send. OMP reports no event for a steer
+        // it drops, so an entry is freed at its message_end or when the next
+        // Run's preflight replaces this Run's token (see releaseLaneSteers).
+        state.laneSteers ??= new Map();
+        if (state.laneSteers.has(id)) {
+          throw new BridgeCallError("duplicate_message", "OMP steered delivery identity is already owned");
+        }
+        const bytes = deliveryEntryBytes({ messageID: id, body });
+        if (state.laneSteers.size >= limit.queuedDeliveries || !reserve(bytes)) {
+          return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: false, reason: "queue_full" };
+        }
+        state.laneSteers.set(id, { bytes, runToken });
         state.pi.sendMessage(laneDeliveryMessage(state, id, body), { deliverAs: "steer" });
         return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: true };
       }
@@ -587,9 +600,20 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     }
   }
 
+  // Frees the steer reservations that retired() selects.
+  function releaseLaneSteers(state, retired) {
+    if (!state?.laneSteers) return;
+    for (const [id, entry] of state.laneSteers) {
+      if (!retired(id, entry)) continue;
+      state.laneSteers.delete(id);
+      release(entry.bytes);
+    }
+  }
+
   function removeState(state) {
     if (bindings.get(state.ownerToken) !== state) return;
     discardDeliveries(state);
+    releaseLaneSteers(state, () => true);
     bindings.delete(state.ownerToken);
     if (primary === state) primary = undefined;
     state.ended = true;
@@ -704,6 +728,9 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     const runToken = ownerToken(`${state.ownerToken}-run-${state.runSequence}`);
     // A lane steer must carry this token until the run yields.
     state.runToken = runToken;
+    // Steers of earlier Runs that OMP never took no longer count; a Run end
+    // is not used, since a delayed one can follow this preflight.
+    releaseLaneSteers(state, (_id, entry) => entry.runToken !== runToken);
     const sequence = nextReport(state);
     const params = {
       owner_token: state.ownerToken, session_id: state.sessionID, report_sequence: sequence,
@@ -1017,7 +1044,14 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     });
 
     pi.on("message_end", (event, ctx) => {
-      try { observeMessage(factory, ctx, event.message, "message_end"); } catch (error) { failState(factory.current, error); }
+      try {
+        observeMessage(factory, ctx, event.message, "message_end");
+        const state = factory.current;
+        const details = event.message?.customType === deliveryMessageType ? event.message.details : undefined;
+        if (launch.topology === "lane" && details?.owner_token === state?.ownerToken && details?.message_ids?.length === 1) {
+          releaseLaneSteers(state, (id) => id === details.message_ids[0]);
+        }
+      } catch (error) { failState(factory.current, error); }
     });
 
     pi.on("context", (event, ctx) => {

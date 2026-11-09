@@ -465,7 +465,7 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	if !running {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
-	accepted, err := owner.registry.steerPrimary(ctx, binding, token, request.MessageID, body)
+	accepted, reason, err := owner.registry.steerPrimary(ctx, binding, token, request.MessageID, body)
 	if errors.Is(err, errOMPSteerUncertain) {
 		// The steer may have reached OMP: no receipt, so the sender does not
 		// treat it as refused and resend it. Nothing is retried here.
@@ -473,6 +473,11 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	}
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
+	}
+	if !accepted && reason == "queue_full" {
+		// The Run's unread steers are at the existing delivery limits: refused
+		// with the stage path's reason, as an interactive full queue is.
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}, nil
 	}
 	if !accepted {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()

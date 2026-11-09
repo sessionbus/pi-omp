@@ -1264,6 +1264,17 @@ func TestOMPLaneSteersOnlyItsAdmittedRunBeforeItsYield(t *testing.T) {
 	if got := fixture.steers(); len(got) != 2 {
 		t.Fatalf("steers = %+v", got)
 	}
+	// At the delivery limits the extension answers queue_full: refused with
+	// that reason, not deferred as not running.
+	fixture.answerSteers(func(request ownerSteerRequest) (json.RawMessage, error) {
+		accepted := false
+		return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted, Reason: "queue_full"})
+	})
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("full"), run)
+	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
+		t.Fatalf("delivery at the steer limit = %+v, %v", receipt, err)
+	}
 
 	fixture.answerSteers(nil)
 	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
@@ -1271,7 +1282,7 @@ func TestOMPLaneSteersOnlyItsAdmittedRunBeforeItsYield(t *testing.T) {
 	waitOMPTurn(t, turn, "its yield", func(turn *ompNativeTurn) bool { return turn.yielded })
 	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("after-yield"), run)
 	requireOMPNotRunning(t, receipt, err, "delivery after our run yielded")
-	if got := fixture.steers(); len(got) != 2 {
+	if got := fixture.steers(); len(got) != 3 {
 		t.Fatalf("steer after the yield = %+v", got)
 	}
 	fixture.promptResult(t, id, "completed")

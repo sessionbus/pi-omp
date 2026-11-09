@@ -1154,15 +1154,18 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 // synchronous step; accepted means only that hand-off. Once the call has been
 // made its outcome is uncertain on any failure, so it is never retried, and as
 // for Pi the lane stays: unlike native.stage no FIFO order was reserved.
-func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBinding, runToken, messageID, body string) (bool, error) {
+// steerPrimary answers whether OMP took the steer and, when it did not, the
+// extension's reason: "idle" (no Run of this token runs) or "queue_full" (the
+// lane's unread steers are at the delivery limits).
+func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBinding, runToken, messageID, body string) (bool, string, error) {
 	if registry.topology != ownerTopologyLane || !validOwnerToken(runToken) || !validOwnerMessageID(messageID) ||
 		!validOwnerText(body, maxOwnerTextBytes) {
-		return false, errors.New("invalid OMP native steer")
+		return false, "", errors.New("invalid OMP native steer")
 	}
 	params := ownerSteerRequest{OwnerToken: binding.OwnerToken, SessionID: binding.SessionID, MessageID: messageID, Body: body, RunToken: runToken}
 	encoded, err := json.Marshal(params)
 	if err != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
-		return false, errors.New("OMP native steer exceeds the private bridge frame")
+		return false, "", errors.New("OMP native steer exceeds the private bridge frame")
 	}
 	registry.mu.Lock()
 	state := registry.bindings[binding.OwnerToken]
@@ -1171,21 +1174,22 @@ func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBi
 	bridge := registry.bridge
 	registry.mu.Unlock()
 	if !current || bridge == nil {
-		return false, errors.New("OMP native steer does not own the current primary session")
+		return false, "", errors.New("OMP native steer does not own the current primary session")
 	}
 	var raw json.RawMessage
 	if err = bridge.Call(ctx, "native.steer", params, &raw); err != nil {
 		if ompSteerRefusedBeforeSend(err) {
-			return false, fmt.Errorf("OMP native steer was refused before it was sent: %w", err)
+			return false, "", fmt.Errorf("OMP native steer was refused before it was sent: %w", err)
 		}
-		return false, fmt.Errorf("%w: %w", errOMPSteerUncertain, err)
+		return false, "", fmt.Errorf("%w: %w", errOMPSteerUncertain, err)
 	}
 	var result ownerSteerResult
 	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != binding.OwnerToken || result.SessionID != binding.SessionID ||
-		result.MessageID != messageID || result.Accepted == nil || (*result.Accepted && result.Reason != "") || (!*result.Accepted && result.Reason != "idle") {
-		return false, fmt.Errorf("%w: its answer is invalid", errOMPSteerUncertain)
+		result.MessageID != messageID || result.Accepted == nil || (*result.Accepted && result.Reason != "") ||
+		(!*result.Accepted && result.Reason != "idle" && result.Reason != "queue_full") {
+		return false, "", fmt.Errorf("%w: its answer is invalid", errOMPSteerUncertain)
 	}
-	return *result.Accepted, nil
+	return *result.Accepted, result.Reason, nil
 }
 
 // errOMPSteerUncertain marks a steer that may have reached OMP.

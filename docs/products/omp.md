@@ -243,6 +243,21 @@ message would need a new bridge method and is not added. The Go owner
 already sends no steer for an ended Run (`omp.go` Deliver); a steer in flight
 when the Run ends is the existing late-steer case.
 
+## Lane steer limit (2026-11-09)
+
+Steers handed to a lane Run that OMP has not taken yet are counted against the
+extension's existing delivery limits (256 entries; bytes from the same 32 MiB
+reservation as staged deliveries), reserved before `sendMessage`. At the limit
+`native.steer` answers `queue_full` and sends nothing; the Go owner answers
+that delivery `rejected` with `queue_full`, the stage path's reason. OMP
+18.13.2 gives extensions no event when it drops or carries a steer:
+`queue_update` (`agent-session.ts` :10365-10383) reaches session subscribers
+and the RPC wire only, and lists texts, not message IDs. So an entry is freed
+at its own `message_end`, or when the next Run's preflight replaces the token
+it was sent with; a Run end is not used, since a delayed one can follow the
+next preflight. A steer OMP carries unread into the next Run is no longer
+counted there, so OMP can briefly hold more unread steers than the limit.
+
 ## Interactive Escape on OMP 18.11.0 (2026-10-19)
 
 Owner selection (2026-10-19): release with today's behaviour. DEF-20261015-05
