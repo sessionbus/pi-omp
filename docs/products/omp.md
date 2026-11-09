@@ -227,9 +227,27 @@ primary session only.
   `queued_for_next_turn`. A queue that is full is still rejected
   `queue_full`.
 
-## A delayed run end on a lane (2026-11-09)
+## Delayed delivery on a lane (2026-11-09)
 
-The managed extension clears a lane Run's steer token at OMP's `agent_end`
+A lane steer carries the token of its Run's preflight, which the managed
+extension sets at each `before_agent_start`. Two native behaviours move the
+extension's token away from the Run's, and the later steers of that Run
+are then refused as not running and delivered to a later Run: nothing is
+lost and no receipt is wrong. Both are accepted limits; no marker exists to
+tell them apart from a new Run.
+
+OMP fires `before_agent_start` when it takes a queued user-authored batch
+into the running task, our peer message included (`queued-messages.ts`
+:61-72; `agent-session.ts` 18.13.2 :8525-8555, :8631; agent-core
+`agent.ts` :1004-1030). The event carries `reason: "prompt"` there, the same
+as a new prompt, so the extension starts a new token and the Run's later
+steers are refused. The Go owner records that preflight inside the open Run
+window as consumed, not foreign, so the Run itself goes on. The same hook is
+in 18.12.2 and 18.13.1. A check on the prompt text is not used: an explicit
+caller input can equal a steer's text, and keeping an old token for a new
+Run is what the token prevents.
+
+The managed extension also clears a lane Run's steer token at OMP's `agent_end`
 for that run. OMP calls extension `agent_end` hooks without awaiting earlier
 hooks for the next event, and each hook may take up to 30 s, so with a slow
 earlier extension the previous Run's `agent_end` can reach ours after the
