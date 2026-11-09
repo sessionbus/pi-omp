@@ -61,6 +61,16 @@ once, after the never-started steers, in arrival order. Still busy at the
 bound, nothing is written and those messages are lost as before; quit is
 delayed only in that state.
 
+## A delivery deferred during a settle (2026-11-09)
+
+A peer delivery accepted while another extension's settled handler runs can be lost if an earlier deferred Pi action fails (a Pi defect, reported as [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955); tested on Pi 1.4.0). Pi defers a turn-starting send made while any extension's
+`agent_settled` handler runs (`agent-session.js:686-693, 1866-1868`) and
+then runs the deferred actions in sequence with no per-action error
+handling (`:695-704`), so one throwing action drops every later one. The
+extension cannot rescue such a message safely: an earlier deferred action
+can start a run whose own settle happens before the later action runs, so a
+rescue there would duplicate it.
+
 ## A lane prompt refused before it reaches Pi (2026-10-28)
 
 A blank lane prompt, and one whose JSON encoding exceeds the 1 MiB native
