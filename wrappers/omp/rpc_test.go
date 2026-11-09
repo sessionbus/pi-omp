@@ -1243,17 +1243,25 @@ func TestNativeRPCRejectsPartialCRLFAndOversizedOutput(t *testing.T) {
 func TestNativeRPCRefusedPromptAbsorbsItsTrailingSuccessAndNoAgentResult(t *testing.T) {
 	refuse := func(t *testing.T, rpc *nativeRPC, peer *nativeRPCTestPeer) string {
 		t.Helper()
-		result := make(chan error, 1)
+		type started struct {
+			prompt    *nativePrompt
+			submitted bool
+			err       error
+		}
+		result := make(chan started, 1)
 		go func() {
 			prompt, submitted, err := rpc.StartPrompt(nativeRPCTestContext(t), "owned prompt")
-			if prompt != nil || !submitted {
-				err = errors.Join(err, errors.New("refused prompt returned an owned correlation"))
-			}
-			result <- err
+			result <- started{prompt, submitted, err}
 		}()
 		id := nativeRPCField(t, peer.read(t), "id")
 		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":false,"error":"Agent is busy"}`)
-		err := <-result
+		got := <-result
+		// The return values are checked on their own, so a matching busy
+		// error cannot hide an owned correlation or an unsubmitted prompt.
+		if got.prompt != nil || !got.submitted {
+			t.Errorf("refused prompt returned prompt=%v submitted=%v", got.prompt != nil, got.submitted)
+		}
+		err := got.err
 		var nativeErr *nativeRPCError
 		if !errors.As(err, &nativeErr) || nativeErr.Command != "prompt" || nativeErr.Message != "Agent is busy" {
 			t.Fatalf("refused prompt start = %#v", err)

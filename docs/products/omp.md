@@ -94,7 +94,7 @@ OMP's prompt path reads the files that each `@path` in the prompt names and
 adds their contents for the model (`agent-session.ts` `#promptWithMessage`,
 `utils/file-mentions.ts`). No prompt option or RPC field turns it off. An `@`
 starts a mention at the start of the text or after whitespace or one of
-`([{<"'`; the mention is a quoted path or the following run of characters
+`` ([{<"'` ``; the mention is a quoted path or the following run of characters
 that are neither whitespace nor `@`.
 
 An idle lane starts a Run for a peer message by sending the rendered message
@@ -267,6 +267,8 @@ steer taken at a turn boundary.
   the claimed, `message_start`, `message_end` and `context` reports in that
   order.
 - A changed copy, or more than one copy, still ends the session.
+  (Superseded 2026-10-27: such a copy now abandons only that delivery's
+  batch; see the 2026-10-27 decision above.)
 - Native Task children use the same check and are covered.
 
 ## Mandatory-wake source boundary (2026-09-21)
