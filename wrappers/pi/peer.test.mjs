@@ -1098,3 +1098,47 @@ test("owner.quit on a closed owner answers nothing pending", async () => {
   await assert.rejects(fixture.owner.call("owner.quit", { session_id: "" }), /invalid Pi quit/);
   await assert.rejects(fixture.owner.call("owner.drain", { session_id: "native-one", witness: "quit" }), /owner is closed/);
 });
+
+// An accepted append starts Pi's run without awaiting it (appendNative is a
+// fire-and-forget send); that run's before_agent_start drains again while the
+// outer drain still holds the FIFO. Both drains finish, and each item reaches
+// Pi once: the first by append, the next steered into the run it started.
+test("an accepted append's nested before_agent_start drain finishes after the outer drain", { timeout: 5000 }, async () => {
+  const fake = fakeKit();
+  let busy = true, running = false, outerDone = false, overlapped = false, owner, nested;
+  const sent = [];
+  const native = async ({ method, params }) => {
+    if (method === "native.describe") return { session_id: "native-one", name: "Native", cwd: "/work" };
+    if (method === "native.steer") {
+      if (!running) return idleSteer("native-one", params);
+      sent.push(["steer", params.message_id]);
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    if (method === "native.append") {
+      if (busy) return { session_id: "native-one", message_id: params.message_id, accepted: false, reason: "busy" };
+      sent.push(["append", params.message_id]);
+      running = true;
+      // Pi starts the run after the send returns, and the run's
+      // before_agent_start handler drains; the append does not await it.
+      nested = Promise.resolve().then(() => {
+        overlapped = !outerDone;
+        return owner.call("owner.drain", { session_id: "native-one", witness: "before_agent_start" });
+      });
+      return { session_id: "native-one", message_id: params.message_id, accepted: true };
+    }
+    throw new Error("unexpected native method");
+  };
+  owner = new PiInteractiveOwner(launch, native, fake.connectPeer);
+  await ready(owner);
+  assert.deepEqual(await fake.latest().deliver(inbound("first")), { disposition: "queued_for_next_turn" });
+  assert.deepEqual(await fake.latest().deliver(inbound("second")), { disposition: "queued_for_next_turn" });
+  busy = false;
+  const outer = owner.call("owner.drain", { session_id: "native-one", witness: "agent_settled" })
+    .finally(() => { outerDone = true; });
+  assert.deepEqual(await outer, { session_id: "native-one", drained: 2 });
+  assert.ok(nested, "the accepted append started no nested drain");
+  assert.equal(overlapped, true, "the nested drain did not start while the outer drain ran");
+  assert.deepEqual(await nested, { session_id: "native-one", drained: 0 });
+  assert.deepEqual(sent, [["append", "first"], ["steer", "second"]]);
+  await owner.close();
+});
