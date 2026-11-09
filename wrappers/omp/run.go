@@ -787,6 +787,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 	}
+	reportsDrained := false
 	for {
 		admitted, noAgent, changed, admissionErr := turn.admission()
 		if admissionErr != nil {
@@ -827,6 +828,17 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			continue
 		}
 		if ended {
+			// OMP's prompt_result comes over stdout, our run.preflight over the
+			// bridge, so the result can arrive first. Wait once for the
+			// extension's earlier reports, then read the window again.
+			if runToken == "" && !reportsDrained {
+				reportsDrained = true
+				if err := owner.registry.reportsDrained(ctx, binding.OwnerToken, binding.SessionID); err != nil {
+					turn.fail(fmt.Errorf("OMP owned preflight could not be confirmed: %w", err))
+					return turn, nil
+				}
+				continue
+			}
 			// Our agent-invoked prompt_result is OMP's report that all work of
 			// our prompt settled; before this change the Run waited until it
 			// was cancelled. Without our preflight by then, the prompt OMP ran

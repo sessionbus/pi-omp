@@ -447,6 +447,14 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         state.pi.sendMessage(laneDeliveryMessage(state, id, body), { deliverAs: "steer" });
         return { owner_token: state.ownerToken, session_id: state.sessionID, message_id: id, accepted: true };
       }
+      case "native.reports_drained": {
+        // Answers once every report queued before this call has been
+        // answered by the owner. The report queue is sequential, so an
+        // earlier run.preflight has then been recorded.
+        const state = nativeState(params, ["owner_token", "session_id"]);
+        while (state.factory.worker) await state.factory.worker;
+        return { owner_token: state.ownerToken, session_id: state.sessionID, drained: true };
+      }
       case "native.shutdown": {
         const state = nativeState(params, ["owner_token", "session_id"]);
         if (state.scope !== "primary") {

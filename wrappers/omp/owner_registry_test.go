@@ -39,6 +39,8 @@ type ownerNativeFixture struct {
 	// primary session, whose answer carries OMP's busy state at the call.
 	topology string
 	busy     bool
+	// reportsDrained runs before native.reports_drained is answered.
+	reportsDrained func()
 }
 
 type ownerHeldWriteConn struct {
@@ -53,6 +55,19 @@ func (conn *ownerHeldWriteConn) Write(body []byte) (int, error) {
 }
 
 func (fixture *ownerNativeFixture) handle(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+	if method == "native.reports_drained" {
+		var request ownerDescribeRequest
+		if decodeOwnerJSON(raw, &request) != nil {
+			return nil, pifamily.NewBridgeCallError("bad_request", "invalid native report drain")
+		}
+		fixture.mu.Lock()
+		hook := fixture.reportsDrained
+		fixture.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return json.Marshal(map[string]any{"owner_token": request.OwnerToken, "session_id": request.SessionID, "drained": true})
+	}
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	switch method {

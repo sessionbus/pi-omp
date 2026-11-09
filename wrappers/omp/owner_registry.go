@@ -1228,6 +1228,30 @@ func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID st
 	return result, nil
 }
 
+// reportsDrained returns once every report the extension queued before this
+// call has been answered: its report queue is sequential, so a run.preflight
+// sent before OMP's prompt_result reached us is then recorded.
+func (registry *OwnerRegistry) reportsDrained(ctx context.Context, token, sessionID string) error {
+	bridge := registry.currentBridge()
+	if bridge == nil {
+		return errors.New("OMP bridge is unavailable")
+	}
+	var raw json.RawMessage
+	if err := bridge.Call(ctx, "native.reports_drained", ownerDescribeRequest{OwnerToken: token, SessionID: sessionID}, &raw); err != nil {
+		return err
+	}
+	var result struct {
+		OwnerToken string `json:"owner_token"`
+		SessionID  string `json:"session_id"`
+		Drained    *bool  `json:"drained"`
+	}
+	if err := decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != token || result.SessionID != sessionID ||
+		result.Drained == nil || !*result.Drained {
+		return errors.New("OMP native report drain answer is invalid")
+	}
+	return nil
+}
+
 func (registry *OwnerRegistry) shutdownPrimary(ctx context.Context) error {
 	state, ok := registry.Primary()
 	if !ok || state.Scope != ownerScopePrimary {

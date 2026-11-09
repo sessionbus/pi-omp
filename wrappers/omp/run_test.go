@@ -1388,3 +1388,31 @@ func TestOMPOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// OMP's prompt_result travels stdout and our run.preflight travels the
+// bridge, so the result can arrive first. The owner waits once for the
+// extension's earlier reports, finds the preflight and completes the Run; the
+// lane stays. Before this change the Run failed as a missing preflight and
+// the lane ended.
+func TestOMPPromptResultBeforeOurQueuedPreflightCompletesTheRun(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.owner.mu.Lock()
+	fixture.owner.reportsDrained = func() { fixture.preflight(t, 1, "run-1", "owned prompt") }
+	fixture.owner.mu.Unlock()
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+	fixture.promptResult(t, id, "completed")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	result, err := start.turn.Wait(nativeRPCTestContext(t))
+	if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+		t.Fatalf("Run with a late preflight = %+v, %v", result, err)
+	}
+	fixture.requireLane(t)
+	fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+	fixture.requireLane(t)
+}

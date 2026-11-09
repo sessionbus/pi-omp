@@ -1240,3 +1240,22 @@ test("interactive held message_end and a reset at the run's end abandon the batc
     "second:claimed", "second:message_start", "second:message_end", "second:context",
   ]);
 });
+
+// native.reports_drained answers only after every report queued before it was
+// answered by the owner, so a run.preflight still in flight is recorded first.
+test("lane report drain answers only after the queued preflight is answered", async () => {
+  const owner = new FakeOwner();
+  const native = nativeFixture();
+  const extension = createOMPExtension({ launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens() });
+  await start(extension, native, owner);
+  const held = owner.hold("run.preflight");
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "expanded prompt" }, native.context());
+  await held.entered;
+  let answered = false;
+  const drained = owner.native("native.reports_drained", { owner_token: "token1-primary-1", session_id: "native-main" })
+    .then((result) => { answered = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(answered, false, "the drain answered while run.preflight was still in flight");
+  held.release();
+  assert.deepEqual(await drained, { owner_token: "token1-primary-1", session_id: "native-main", drained: true });
+});
