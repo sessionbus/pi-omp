@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1004,6 +1005,61 @@ func TestPiConsumedTurnMethodsTreatLateCallsAsPiOwnWork(t *testing.T) {
 	turn.mu.Unlock()
 	if failure != nil || nativeStarts != 0 || started != 0 || pending != 0 {
 		t.Fatalf("consumed turn = failure %v, starts %d/%d, pending UI %d", failure, nativeStarts, started, pending)
+	}
+}
+
+// A failure of our managed extension that reaches a consumed turn, after its
+// observer sampled the turn before the consume, still fails it and is
+// returned, so the observer ends the lane; only Pi's run frames on a
+// consumed turn are Pi's own work. In d215808 the consumed skip dropped it.
+func TestPiConsumedTurnKeepsAManagedExtensionFailure(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test done")) })
+	wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel, id: "native", extension: "/managed/extension.mjs"}
+	turn := newPiNativeTurn(wrapper, nil, "", "", "consumed prompt")
+	turn.handled = &piPromptHandled{err: errors.New("Pi native prompt: handled")}
+	err := turn.recordEvent("extension_error", json.RawMessage(
+		`{"type":"extension_error","extensionPath":"/managed/extension.mjs","event":"message_start","error":"getter threw"}`))
+	if err == nil || !strings.Contains(err.Error(), "Pi managed extension failed during message_start") {
+		t.Fatalf("managed failure on a consumed turn = %v", err)
+	}
+	turn.mu.Lock()
+	failure := turn.failure
+	turn.mu.Unlock()
+	if failure == nil {
+		t.Fatal("the consumed turn did not keep the managed failure")
+	}
+}
+
+// A forwarded refusal closes UI admission and consumes the turn in one
+// locked step: no observer ever sees UI admission closed on a turn that is
+// not yet consumed. In d215808 the two were set under separate locks, and a
+// dialog in that state failed the turn (the observer then stops the RPC
+// reader).
+func TestPiForwardedConsumeClosesUIAndConsumesTogether(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancel(errors.New("test done")) })
+	refused := errors.New("Pi native prompt: busy")
+	for iteration := range 2000 {
+		wrapper := &Wrapper{opened: true, ctx: ctx, cancel: cancel, id: "native"}
+		turn := newPiNativeTurn(wrapper, nil, "", "", "forwarded prompt")
+		turn.input, turn.preflight = true, true
+		wrapper.active = turn
+		done := make(chan struct{})
+		go func() { wrapper.refuseForwarded(turn, refused, "failed"); close(done) }()
+		for {
+			turn.mu.Lock()
+			closed, consumed := turn.uiClosed, turn.handled != nil
+			turn.mu.Unlock()
+			if closed && !consumed {
+				t.Fatalf("iteration %d: UI admission closed on a turn not yet consumed", iteration)
+			}
+			if consumed {
+				break
+			}
+			runtime.Gosched()
+		}
+		<-done
 	}
 }
 

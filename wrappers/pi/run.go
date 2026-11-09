@@ -219,21 +219,6 @@ func (turn *piNativeTurn) consumed() bool {
 	return turn.handled != nil
 }
 
-// uiJoined is ready once every owned dialog's cancellation has finished, and
-// closes UI admission at that boundary, as terminal does.
-func (turn *piNativeTurn) uiJoined() (bool, <-chan struct{}, error) {
-	turn.mu.Lock()
-	defer turn.mu.Unlock()
-	if turn.failure != nil {
-		return false, turn.changed, turn.failure
-	}
-	if turn.pendingUI != 0 {
-		return false, turn.changed, nil
-	}
-	turn.uiClosed = true
-	return true, turn.changed, nil
-}
-
 func (turn *piNativeTurn) recordStart(settling bool) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
@@ -279,9 +264,10 @@ func (turn *piNativeTurn) recordSettling(leaf string) error {
 func (turn *piNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
-	if turn.handled != nil {
-		// A frame that reached a consumed turn, after its observer sampled
-		// the turn before the consume, is Pi's own work.
+	if turn.handled != nil && kind != "extension_error" {
+		// A run frame that reached a consumed turn, after its observer
+		// sampled the turn before the consume, is Pi's own work. A failure of
+		// our managed extension is not: it still fails the turn below.
 		return nil
 	}
 	if turn.failure != nil {
@@ -960,7 +946,26 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 // as at the terminal. If a cancellation failed, the turn keeps its failure
 // and takes the existing loss path; otherwise Wait answers piPromptHandled.
 func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure string) {
-	if err := turn.await(p.ctx, turn.uiJoined); err != nil {
+	// Join the owned dialogs and consume in one locked decision, so UI
+	// admission is never closed on a turn that is not yet consumed.
+	consumed := &piPromptHandled{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
+	committed := false
+	err := turn.await(p.ctx, func() (bool, <-chan struct{}, error) {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		if turn.failure != nil {
+			return true, turn.changed, nil
+		}
+		if turn.pendingUI != 0 {
+			return false, turn.changed, nil
+		}
+		turn.handled = consumed
+		turn.terminalOwned, turn.uiClosed = true, true
+		turn.signalLocked()
+		committed = true
+		return true, turn.changed, nil
+	})
+	if err != nil {
 		turn.mu.Lock()
 		if turn.failure == nil {
 			turn.failLocked(err)
@@ -968,11 +973,10 @@ func (p *Wrapper) refuseForwarded(turn *piNativeTurn, refusal error, failure str
 		turn.mu.Unlock()
 		return
 	}
-	turn.mu.Lock()
-	turn.handled = &piPromptHandled{err: fmt.Errorf("%w; the forwarded prompt failed before its run started: %s", refusal, failure)}
-	turn.terminalOwned = true
-	turn.signalLocked()
-	turn.mu.Unlock()
+	if !committed {
+		// A cancellation failed: the turn keeps its failure (the loss path).
+		return
+	}
 	p.mu.Lock()
 	p.ownWork = true
 	p.mu.Unlock()
