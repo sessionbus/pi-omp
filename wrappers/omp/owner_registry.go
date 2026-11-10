@@ -973,6 +973,18 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 			responseErr = errors.New("invalid OMP delivery parameters")
 		} else {
 			retained := ownerPublicDeliveryRetainedBytes(*delivery)
+			if retained >= 0 && registry.retainedBytes > maxOwnerRetainedBytes-retained {
+				// A delivery the retained-byte budget cannot hold is refused
+				// alone, before reserveStateLocked would fail the owner.
+				registry.mu.Unlock()
+				if err := attempt.conn.Result(request, kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}); err != nil {
+					_ = attempt.conn.Close()
+					if ctx.Err() == nil {
+						registry.fail(err)
+					}
+				}
+				return
+			}
 			if err := registry.reserveStateLocked(state, retained); err != nil {
 				registry.mu.Unlock()
 				responseErr = err

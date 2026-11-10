@@ -1043,9 +1043,9 @@ func TestOwnerRegistryRenderFailureIsADeliveryRefusal(t *testing.T) {
 	}
 }
 
-// A full staged queue or retained-byte budget and a delivery id that is still
-// tracked refuse only that delivery: the owner keeps serving and nothing is
-// replayed to OMP.
+// A full staged queue or retained-byte budget, at public intake or at stage
+// admission, and a delivery id that is still tracked refuse only that
+// delivery: the owner keeps serving and nothing is replayed to OMP.
 func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testing.T) {
 	listener := ownerBusListener(t)
 	directory := t.TempDir()
@@ -1104,6 +1104,11 @@ func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testin
 	registry.retainedBytes = maxOwnerRetainedBytes - intake - len("message-byte-cap") + 1
 	registry.mu.Unlock()
 	deliver("message-byte-cap", "rejected", "queue_full")
+	intake = ownerPublicDeliveryRetainedBytes(kit.DeliveryRequest{MessageID: "message-intake-cap", From: from, Body: "hello"})
+	registry.mu.Lock()
+	registry.retainedBytes = maxOwnerRetainedBytes - intake + 1
+	registry.mu.Unlock()
+	deliver("message-intake-cap", "rejected", "queue_full")
 	registry.mu.Lock()
 	registry.retainedBytes = retained
 	registry.mu.Unlock()
