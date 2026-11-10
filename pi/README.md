@@ -1,9 +1,12 @@
 # Sessionbus for Pi
 
 This archive installs `pi-peer` and its fixed managed extension beside the
-binary. Release v0.5.13 was tested with native `@earendil-works/pi-coding-agent`
-1.3.0; 1.4.0, 1.5.0 and 1.5.1 were checked against their source. Neither Pi
-1.5 release has been run with this release.
+binary. The final code of release v0.5.13 (commit `5794951`; later commits
+change only documentation) passed one interactive idle wake and one lane Run
+with native `@earendil-works/pi-coding-agent` 1.5.1 and Node 25.3.0 on Linux.
+Quit, session switch and busy steering were not run on that code. Earlier
+builds of this release had live checks with Pi 1.3.0 (the owner's matrix),
+1.4.0 and 1.5.0.
 Install that package with its `pi` executable available on the login `PATH`.
 
 For a source build:
