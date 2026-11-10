@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
@@ -1861,8 +1862,10 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 		}
 		return len(encoded)
 	}
-	// padded is a plain body whose rendered message is size bytes, or whose
-	// encoded steer is size bytes.
+	// padded is a body whose rendered message is size bytes, or whose encoded
+	// steer is size bytes. It is filled with 4-byte runes, which JSON keeps
+	// as they are, and 0-3 ASCII bytes, so that it stays within the public
+	// text bound.
 	padded := func(t *testing.T, size int, encoded bool) string {
 		base := 0
 		if encoded {
@@ -1874,7 +1877,8 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 			}
 			base = len(rendered)
 		}
-		return strings.Repeat("a", size-base)
+		fill := size - base
+		return strings.Repeat("\U0001F600", fill/4) + strings.Repeat("a", fill%4)
 	}
 	for _, test := range []struct {
 		name     string
@@ -1921,11 +1925,14 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 			}
 			wrapper.bridge = hostBridge
 			body := test.body(t)
+			if runes := utf8.RuneCountInString(body); runes > protocol.MaxTextRunes {
+				t.Fatalf("body has %d runes, past the public bound %d", runes, protocol.MaxTextRunes)
+			}
 			rendered, err := host.RenderNativeMessage(request("message-abcdefghijkl", body))
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("rendered %d bytes, encoded steer %d bytes", len(rendered), steerSize(t, body))
+			t.Logf("body %d runes, rendered %d bytes, encoded steer %d bytes", utf8.RuneCountInString(body), len(rendered), steerSize(t, body))
 			receipt, err := wrapper.Deliver(ctx, request("message-abcdefghijkl", body), run)
 			switch {
 			case test.injected:
