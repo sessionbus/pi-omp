@@ -1030,7 +1030,12 @@ func (registry *OwnerRegistry) deliveryLoop(state *ownerRegistryState, attempt *
 		case work := <-attempt.deliveries:
 			receipt, err := registry.deliver(work.ctx, state, work.value)
 			var responseErr error
-			if err != nil {
+			var refusal *ownerDeliveryRefusal
+			if errors.As(err, &refusal) {
+				// Nothing reached OMP: only this delivery is refused, with its
+				// reason, and the owner keeps serving.
+				responseErr = work.conn.Result(work.request, kit.DeliveryReceipt{Disposition: "rejected", Reason: refusal.reason})
+			} else if err != nil {
 				responseErr = work.conn.Error(work.request, -32603, "OMP native delivery failed; no replay")
 				if work.ctx.Err() == nil {
 					registry.fail(err)
@@ -1054,18 +1059,24 @@ func (registry *OwnerRegistry) releasePublicDelivery(state *ownerRegistryState, 
 	registry.releaseStateLocked(state, size)
 }
 
+// ownerDeliveryRefusal is a staged delivery refused before anything is sent
+// to OMP or recorded for it.
+type ownerDeliveryRefusal struct{ reason string }
+
+func (refusal *ownerDeliveryRefusal) Error() string { return refusal.reason }
+
 func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistryState, request kit.DeliveryRequest) (kit.DeliveryReceipt, error) {
 	body, err := ompRenderPeerMessage(request)
 	if err != nil {
-		return kit.DeliveryReceipt{}, err
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: err.Error()}
 	}
 	if !validOwnerMessageID(request.MessageID) || !validOwnerText(body, maxOwnerTextBytes) {
-		return kit.DeliveryReceipt{}, errors.New("invalid OMP native staged delivery")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "invalid OMP native staged delivery"}
 	}
 	params := ownerStageRequest{OwnerToken: state.OwnerToken, SessionID: state.SessionID, MessageID: request.MessageID, Body: body}
 	encoded, err := json.Marshal(params)
 	if err != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
-		return kit.DeliveryReceipt{}, errors.New("OMP native staged delivery exceeds the private bridge frame")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "OMP native staged delivery exceeds the private bridge frame"}
 	}
 	select {
 	case <-ctx.Done():
@@ -1092,9 +1103,16 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		registry.mu.Unlock()
 		return kit.DeliveryReceipt{}, errors.New("OMP staged delivery does not own the current binding")
 	}
-	if len(state.staged) >= maxOwnerTrackedItems || ownerMessageTracked(state, request.MessageID) {
+	if ownerMessageTracked(state, request.MessageID) {
+		// The same delivery is still tracked: refuse this copy, replay nothing.
 		registry.mu.Unlock()
-		return kit.DeliveryReceipt{}, errors.New("OMP staged delivery capacity or identity is invalid")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "OMP staged delivery capacity or identity is invalid"}
+	}
+	if len(state.staged) >= maxOwnerTrackedItems || registry.retainedBytes > maxOwnerRetainedBytes-len(request.MessageID) {
+		// A full staged queue or retained-byte budget refuses only this
+		// delivery, before reserveStateLocked would fail the owner.
+		registry.mu.Unlock()
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "queue_full"}
 	}
 	if err := registry.reserveStateLocked(state, len(request.MessageID)); err != nil {
 		registry.mu.Unlock()

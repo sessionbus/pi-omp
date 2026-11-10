@@ -968,6 +968,155 @@ func TestOwnerRegistryAdmitsHelloBeforeFollowingPublicRequest(t *testing.T) {
 	}
 }
 
+// A staged delivery refused before anything reaches OMP is rejected with its
+// reason, and the owner keeps serving: the next valid delivery is staged.
+// The first body is valid on the public wire, but its closed fence line takes
+// the native.stage frame past the private bridge bound (bot review
+// 4519552078); a message id the owner cannot track is the second refusal.
+func TestOwnerRegistryRejectsAnUnstageableDeliveryAndKeepsServing(t *testing.T) {
+	listener := ownerBusListener(t)
+	directory := t.TempDir()
+	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+		"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+	}}
+	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+		Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+		InitialName: "requested", Groups: []string{"interactive"},
+	}, fixture)
+	_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+		Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one", Name: "event",
+	})
+	from := kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}}
+	fence := strings.Repeat("`", 500)
+	wide := fence + "\n" + strings.Repeat("\U0001F600", 262144-len(fence)-1)
+	for index, test := range []struct {
+		request kit.DeliveryRequest
+		reason  string
+	}{
+		{kit.DeliveryRequest{MessageID: "message-wide", From: from, Body: wide}, "OMP native staged delivery exceeds the private bridge frame"},
+		{kit.DeliveryRequest{MessageID: strings.Repeat("m", 257), From: from, Body: "hello"}, "invalid OMP native staged delivery"},
+	} {
+		body, err := protocol.RequestBytes(int64(60+index), "message.deliver", test.request)
+		if err != nil {
+			t.Fatalf("delivery %d is not a valid public frame: %v", index, err)
+		}
+		ownerWrite(t, public, body)
+		frame := ownerFrame(t, scanner)
+		var receipt kit.DeliveryReceipt
+		if frame.Request || frame.ID != int64(60+index) || frame.Error != nil ||
+			protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+			receipt.Disposition != "rejected" || receipt.Reason != test.reason {
+			t.Fatalf("refused delivery %d = %+v, receipt %+v", index, frame, receipt)
+		}
+		if err = registry.Err(); err != nil {
+			t.Fatalf("refused delivery %d failed the owner: %v", index, err)
+		}
+	}
+	body, err := protocol.RequestBytes(62, "message.deliver", kit.DeliveryRequest{MessageID: "message-next", From: from, Body: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerWrite(t, public, body)
+	frame := ownerFrame(t, scanner)
+	var receipt kit.DeliveryReceipt
+	if frame.Request || frame.ID != 62 || frame.Error != nil ||
+		protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "written" {
+		t.Fatalf("next valid delivery = %+v, receipt %+v", frame, receipt)
+	}
+	fixture.mu.Lock()
+	stages := slices.Clone(fixture.stages)
+	fixture.mu.Unlock()
+	if len(stages) != 1 || stages[0].MessageID != "message-next" {
+		t.Fatalf("native stages = %+v", stages)
+	}
+}
+
+// An incomplete sender cannot pass the public schema, so the render refusal
+// is checked on deliver directly.
+func TestOwnerRegistryRenderFailureIsADeliveryRefusal(t *testing.T) {
+	registry := &OwnerRegistry{}
+	_, err := registry.deliver(context.Background(), &ownerRegistryState{}, kit.DeliveryRequest{MessageID: "message", Body: "hello"})
+	var refusal *ownerDeliveryRefusal
+	if !errors.As(err, &refusal) || refusal.reason == "" {
+		t.Fatalf("render failure = %v", err)
+	}
+}
+
+// A full staged queue or retained-byte budget and a delivery id that is still
+// tracked refuse only that delivery: the owner keeps serving and nothing is
+// replayed to OMP.
+func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testing.T) {
+	listener := ownerBusListener(t)
+	directory := t.TempDir()
+	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+		"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+	}}
+	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+		Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+		InitialName: "requested", Groups: []string{"interactive"},
+	}, fixture)
+	_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+		Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one", Name: "event",
+	})
+	from := kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}}
+	id := int64(80)
+	deliver := func(messageID, disposition, reason string) {
+		t.Helper()
+		id++
+		body, err := protocol.RequestBytes(id, "message.deliver", kit.DeliveryRequest{MessageID: messageID, From: from, Body: "hello"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownerWrite(t, public, body)
+		frame := ownerFrame(t, scanner)
+		var receipt kit.DeliveryReceipt
+		if frame.Request || frame.ID != id || frame.Error != nil ||
+			protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+			receipt.Disposition != disposition || receipt.Reason != reason {
+			t.Fatalf("%s = %+v, receipt %+v; want %s %q", messageID, frame, receipt, disposition, reason)
+		}
+		if err = registry.Err(); err != nil {
+			t.Fatalf("%s failed the owner: %v", messageID, err)
+		}
+	}
+	registry.mu.Lock()
+	state := registry.bindings["owner-one"]
+	registry.mu.Unlock()
+
+	deliver("message-first", "written", "")
+	deliver("message-first", "rejected", "OMP staged delivery capacity or identity is invalid")
+
+	registry.mu.Lock()
+	staged := state.staged
+	for len(state.staged) < maxOwnerTrackedItems {
+		state.staged = append(state.staged, &ownerStagedDelivery{messageID: fmt.Sprintf("filler-%d", len(state.staged))})
+	}
+	registry.mu.Unlock()
+	deliver("message-item-cap", "rejected", "queue_full")
+	// Public intake reserves the delivery's own bytes first (a full budget
+	// there is out of this scope); the message id's reservation then crosses.
+	intake := ownerPublicDeliveryRetainedBytes(kit.DeliveryRequest{MessageID: "message-byte-cap", From: from, Body: "hello"})
+	registry.mu.Lock()
+	state.staged = staged
+	retained := registry.retainedBytes
+	registry.retainedBytes = maxOwnerRetainedBytes - intake - len("message-byte-cap") + 1
+	registry.mu.Unlock()
+	deliver("message-byte-cap", "rejected", "queue_full")
+	registry.mu.Lock()
+	registry.retainedBytes = retained
+	registry.mu.Unlock()
+
+	deliver("message-next", "written", "")
+	fixture.mu.Lock()
+	stages := slices.Clone(fixture.stages)
+	fixture.mu.Unlock()
+	if len(stages) != 2 || stages[0].MessageID != "message-first" || stages[1].MessageID != "message-next" {
+		t.Fatalf("native stages = %+v", stages)
+	}
+}
+
 func TestOwnerRegistryStageCancellationBoundaries(t *testing.T) {
 	t.Run("before stage admission leaves no reservation", func(t *testing.T) {
 		listener := ownerBusListener(t)
