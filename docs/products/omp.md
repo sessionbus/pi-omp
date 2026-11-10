@@ -50,7 +50,7 @@ The other changes need no code. They are recorded here:
   by another extension's such message is not established.
 - **Abort before the provider call.** Such an abort requeues a steer OMP had
   already taken (agent-core `agent-loop.ts:1268-1286`). It is then delivered in
-  the next turn with one more preflight, the delayed-delivery class above.
+  the next turn with one more preflight, the delayed-delivery class below.
 - **Model mentions.** `^provider/id:level` mentions now resolve
   (`session/model-mentions.ts:91-150`). A peer seed that OMP rewrites this way fails as
   a foreign preflight, which widens that existing limit.
