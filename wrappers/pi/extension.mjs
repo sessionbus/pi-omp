@@ -373,6 +373,9 @@ export function createPiExtension({
       admittedMessages: new Map(), running: false, runToken: null,
     };
     settling = false;
+    // A session switch ends its predecessor as a quit does (session_shutdown);
+    // the successor delivers normally again.
+    quitting = false;
     const result = await hostCall(ctx, "owner.ready", {
       topology: launch.topology,
       session_id: current.session_id,
@@ -460,11 +463,12 @@ export function createPiExtension({
 
   // A settle without an abort can leave a steer in Pi's queue for a later
   // run (Pi 1.4.0 agent-session.js _runBeforeSettleBoundary, when the context
-  // cannot continue). Quitting while Pi is idle ends the session before that
-  // run, so each steer that never started is written to history once, with
-  // no turn, and a resumed session shows it. Pi awaits session_shutdown
-  // before it disposes the session (agent-session-runtime.js:296-303); no
-  // run follows, so no queued copy is delivered again.
+  // cannot continue). Quitting or switching sessions while Pi is idle ends the
+  // session before that run, so each steer that never started is written to
+  // history once, with no turn, and a resumed session shows it. Pi awaits
+  // session_shutdown before it disposes the session (Pi 1.5.1
+  // agent-session-runtime.js dispose and teardownCurrent); no run follows,
+  // so no queued copy is delivered again.
   function keepUnreadAtQuit(record, ctx) {
     for (const [messageID, admitted] of [...record.admittedMessages]) {
       if (!admitted.steered || admitted.started) continue;
@@ -473,13 +477,14 @@ export function createPiExtension({
     }
   }
 
-  // Pi does not abort a running task before session_shutdown on quit
-  // (agent-session-runtime.js:296-303), and a history write during a task
-  // would only steer again. With a steer that never started, or deliveries
-  // still waiting in the owner for Pi's next task (owner.quit's pending), the
-  // task (or compaction) is aborted, as Escape does, and Pi is given
-  // quitWaitMs to settle; Pi awaits this handler with no bound of its own.
-  // Past the bound nothing is written and quit goes on.
+  // Pi 1.5.0 does not abort a running task before session_shutdown on quit
+  // (agent-session-runtime.js:296-303); Pi 1.5.1 does, as both do before a
+  // session switch, and then Pi is already idle here. A history write during
+  // a task would only steer again. With a steer that never started, or
+  // deliveries still waiting in the owner for Pi's next task (owner.quit's
+  // pending), the task (or compaction) is aborted, as Escape does, and Pi is
+  // given quitWaitMs to settle; Pi awaits this handler with no bound of its
+  // own. Past the bound nothing is written and quit goes on.
   async function settleForQuit(record, ctx, pending) {
     if (ctx.isIdle()) return;
     if (!pending && ![...record.admittedMessages.values()].some((admitted) => admitted.steered && !admitted.started)) return;
@@ -646,6 +651,19 @@ export function createPiExtension({
         if (record) {
           try { keepNeverStarted(record, ctx); } catch (error) { stop(ctx, error); return; }
         }
+        // Pi 1.5.1 aborts before session_shutdown on quit, as it does before a
+        // session switch (agent-session-runtime.js dispose, teardownCurrent),
+        // and awaits a send this settle defers, a whole new task, before it
+        // gets there. So an aborted settle starts nothing itself: its drain
+        // runs on the next tick, after a quit or switch has closed the gate
+        // in session_shutdown, which Pi reaches in the same microtask chain;
+        // after Escape it picks up the next queued item then. Another
+        // extension's settled handler that awaits real I/O can let it run
+        // first, and then it starts that task (a recorded limit).
+        if (event.aborted) {
+          if (record) scheduleDrain(record, ctx, "agent_settled");
+          return;
+        }
         if (record) record.settledAppend = "open";
         return drain(ctx, "agent_settled").catch((error) => stop(ctx, error)).finally(() => {
           if (record) record.settledAppend = undefined;
@@ -683,7 +701,8 @@ export function createPiExtension({
 
     pi.on("session_tree", (_event, ctx) => {
       if (launch.topology !== "interactive") return;
-      // Pi clears its branch-summary busy state after this event returns.
+      // Pi 1.5.1 clears its branch-summary busy state before this event (Pi
+      // 1.5.0 after it returns); the drain is scheduled either way.
       const { record } = live(ctx);
       record.branchSummaryBusy = false;
       scheduleDrain(record, ctx, "session_tree");
@@ -698,8 +717,16 @@ export function createPiExtension({
 
     pi.on("session_compact_failed", (_event, ctx) => {
       if (launch.topology !== "interactive") return;
-      // Pi clears manual-compaction state before publishing this event.
-      return drain(ctx, "session_compact_failed").catch((error) => stop(ctx, error));
+      // Pi clears manual-compaction state before publishing this event. Pi
+      // 1.5.1's abort() before a quit or switch also fails a manual compaction,
+      // before session_shutdown; as at an aborted settle, the drain runs on the
+      // next tick, after session_shutdown has closed the gate.
+      try {
+        const { record } = live(ctx);
+        scheduleDrain(record, ctx, "session_compact_failed");
+      } catch (error) {
+        stop(ctx, error);
+      }
     });
 
     pi.on("session_shutdown", async (event, ctx) => {
@@ -708,7 +735,9 @@ export function createPiExtension({
       try {
         if (!sessionEndReasons.includes(event.reason)) throw new Error("Pi native shutdown reason is invalid");
         live(ctx, pi);
-        if (event.reason === "quit" && launch.topology === "interactive") {
+        // A session switch ends the session being left as quit does: what
+        // still waits for its next task is written to its history once.
+        if (["quit", "new", "resume", "fork"].includes(event.reason) && launch.topology === "interactive") {
           quitting = true;
           // The owner stops queueing deliveries for a next task and says
           // whether some already wait.

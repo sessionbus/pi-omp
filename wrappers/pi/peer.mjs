@@ -276,6 +276,9 @@ export class PiInteractiveOwner {
         !validText(native.name, 4096, true) || !validText(native.cwd, 32 << 10)) {
       throw new Error("Pi native description contradicted owner readiness");
     }
+    // owner.quit also ends a session being switched away from; its successor
+    // queues deliveries for a next task again.
+    this.#quitClosed = false;
     // After a takeover a later Pi session stays off Sessionbus too.
     if (this.#superseded) {
       this.#session = native.session_id;

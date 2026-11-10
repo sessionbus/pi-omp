@@ -2,8 +2,8 @@
 
 This archive installs `pi-peer` and its fixed managed extension beside the
 binary. Release v0.5.13 was tested with native `@earendil-works/pi-coding-agent`
-1.3.0; 1.4.0 and 1.5.0 were checked against their source. Pi 1.5.0 has not
-been run with this release.
+1.3.0; 1.4.0, 1.5.0 and 1.5.1 were checked against their source. Neither Pi
+1.5 release has been run with this release.
 Install that package with its `pi` executable available on the login `PATH`.
 
 For a source build:
@@ -68,15 +68,19 @@ steered peer message unread: when Pi restored its queue to the editor
 (Alt+Up) or a flush of its compaction queue failed, and when Pi keeps the
 message for a later task because the task could not continue. Before writing,
 the extension clears Pi's queues as Escape does, so text you had queued
-returns to the editor. Quitting Pi also writes such a message to history
-before the session ends. If a task (or a compaction) is still running then
+returns to the editor. Quitting Pi, or switching to another session (new,
+resume or fork), also writes such a message to the history of the session
+being left before it ends. If a task (or a compaction) is still running then
 while such a message or a peer message queued for Pi's next task waits, the
 extension aborts it, as Escape does, and waits up to 2 seconds for Pi to
 settle; if Pi has not settled by then, nothing is written and Pi quits. Peer messages still
-waiting for Pi's next task are written to history the same way, after those,
-in arrival order; no new task starts while Pi quits. A peer message that
-arrives while Pi quits is written to history if Pi is idle, and is otherwise
-refused.
+waiting for Pi's next task are written once to the history of the session
+being left, on quit or on a session switch, after those, in arrival order; no
+new task starts then. A peer message that arrives while Pi quits or switches
+is written to that history if Pi is idle and no message waits before it, and
+is otherwise refused. Pi 1.5.1 aborts a running task before it quits or
+switches; if another extension's handler for that settled task waits on real
+I/O, a waiting peer message can start one more task first (a recorded limit).
 A peer delivery accepted while another extension's settled handler runs can
 be lost if an earlier deferred Pi action fails (a Pi defect, reported as
 [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955)).

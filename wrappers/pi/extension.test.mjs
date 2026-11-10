@@ -808,6 +808,150 @@ test("interactive delivery crossing a busy quit is not steered", async () => {
   assert.equal(owner.calls.some((call) => call.method === "owner.quit"), true);
 });
 
+// Pi 1.5.1 aborts the task before session_shutdown on quit, as it does before a
+// session switch (agent-session-runtime.js dispose, teardownCurrent): the aborted
+// settle comes first, in the same microtask chain. Records every send and lets a
+// turn-starting append make Pi busy, as Pi does.
+function quitSwitchFixture() {
+  const native = nativeFixture("interactive-1", "tui");
+  const queue = [];
+  const owner = fakeConnection({ topology: "interactive", queue });
+  const sends = [];
+  native.pi.sendMessage = (message, options) => {
+    sends.push({ id: message.details.message_id, options });
+    if (options?.triggerTurn === true && options.deliverAs === undefined) native.setIdle(false);
+  };
+  return { native, queue, owner, sends };
+}
+const turnsOf = (sends) => sends.filter((send) => send.options?.triggerTurn === true && send.options.deliverAs === undefined).map((send) => send.id);
+const historyOf = (sends) => sends.filter((send) => send.options === undefined).map((send) => send.id);
+
+// The deliveries still waiting in the owner are written once to the history of
+// the session being left, with no new task. Before this change the aborted
+// settle's own drain started one, which Pi 1.5.1 awaits before it quits or
+// switches.
+test("interactive aborted settle before quit or switch writes waiting deliveries to history and starts no task", async () => {
+  for (const reason of ["quit", "new", "resume", "fork"]) {
+    const { native, queue, owner, sends } = quitSwitchFixture();
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+    native.setIdle(false);
+    queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued for the next task" });
+    // Pi's abort has ended the task: its settle, then session_shutdown.
+    native.setIdle(true);
+    await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+    await native.emit("session_shutdown", { type: "session_shutdown", reason });
+    await immediate();
+    await immediate();
+    assert.deepEqual(turnsOf(sends), [], `a task started at ${reason}`);
+    assert.deepEqual(historyOf(sends), ["waiting"], reason);
+    assert.equal(queue.length, 0, reason);
+  }
+});
+
+// A switch while Pi is idle ends the session being left as quit does: what
+// waits for its next task goes to its history once, in order, with no task.
+// Before this change the owner dropped those deliveries at session end.
+test("interactive idle switch writes waiting deliveries to the history of the session being left", async () => {
+  for (const reason of ["new", "resume", "fork"]) {
+    const { native, queue, owner, sends } = quitSwitchFixture();
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    queue.push(
+      { session_id: "interactive-1", message_id: "waiting-1", body: "first" },
+      { session_id: "interactive-1", message_id: "waiting-2", body: "second" },
+    );
+    await native.emit("session_shutdown", { type: "session_shutdown", reason });
+    assert.deepEqual(turnsOf(sends), [], reason);
+    assert.deepEqual(historyOf(sends), ["waiting-1", "waiting-2"], reason);
+    assert.equal(queue.length, 0, reason);
+    assert.equal(native.aborted(), 0, reason);
+  }
+});
+
+// Escape alone (an aborted settle with no quit or switch after it) still picks
+// up the next queued delivery, one tick after the settle instead of inside it.
+test("interactive aborted settle picks up the next queued delivery after the tick", async () => {
+  const { native, queue, owner, sends } = quitSwitchFixture();
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  await native.emit("before_agent_start", { type: "before_agent_start", prompt: "typed" });
+  native.setIdle(false);
+  queue.push(
+    { session_id: "interactive-1", message_id: "next", body: "picked up next" },
+    { session_id: "interactive-1", message_id: "later", body: "waits for that task" },
+  );
+  native.setIdle(true);
+  await native.emit("agent_settled", { type: "agent_settled", aborted: true });
+  assert.deepEqual(sends, [], "a send inside the aborted settle");
+  for (let index = 0; index < 10 && sends.length === 0; index++) await immediate();
+  await immediate();
+  assert.deepEqual(turnsOf(sends), ["next"]);
+  assert.deepEqual(historyOf(sends), []);
+  assert.deepEqual(queue.map((item) => item.message_id), ["later"]);
+});
+
+// Pi 1.5.1's abort() before a quit or switch also fails a manual compaction:
+// session_compact_failed comes before session_shutdown, in the same microtask
+// chain. Its drain starts no task then; the waiting delivery goes to history
+// once. Before this change that drain started one.
+test("interactive compaction failed by a quit or switch writes waiting deliveries to history and starts no task", async () => {
+  for (const reason of ["quit", "new"]) {
+    const { native, queue, owner, sends } = quitSwitchFixture();
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    native.setIdle(false);
+    queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued during compaction" });
+    native.setIdle(true);
+    await native.emit("session_compact_failed", { type: "session_compact_failed", reason: "manual" });
+    await native.emit("session_shutdown", { type: "session_shutdown", reason });
+    await immediate();
+    await immediate();
+    assert.deepEqual(turnsOf(sends), [], `a task started at ${reason}`);
+    assert.deepEqual(historyOf(sends), ["waiting"], reason);
+    assert.equal(queue.length, 0, reason);
+  }
+});
+
+// A compaction failure on its own still wakes Pi with the waiting delivery,
+// one tick after the event instead of inside it.
+test("interactive compaction failure picks up the waiting delivery after the tick", async () => {
+  const { native, queue, owner, sends } = quitSwitchFixture();
+  createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+  await native.emit("session_start", { type: "session_start", reason: "startup" });
+  queue.push({ session_id: "interactive-1", message_id: "waiting", body: "queued during compaction" });
+  await native.emit("session_compact_failed", { type: "session_compact_failed", reason: "manual" });
+  assert.deepEqual(sends, [], "a send inside session_compact_failed");
+  for (let index = 0; index < 10 && sends.length === 0; index++) await immediate();
+  await immediate();
+  assert.deepEqual(turnsOf(sends), ["waiting"]);
+  assert.equal(queue.length, 0);
+});
+
+// After a switch the successor's deliveries start a turn or are steered again:
+// the gate the switch closed for the session being left does not outlive it,
+// also when a resume keeps the same session ID.
+test("interactive successor after a switch delivers normally again", async () => {
+  for (const reason of ["new", "resume"]) {
+    const { native, owner, sends } = quitSwitchFixture();
+    createPiExtension({ launch: launch("interactive"), connect: owner.connect })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    await native.emit("session_shutdown", { type: "session_shutdown", reason });
+    const id = reason === "new" ? "interactive-2" : "interactive-1";
+    native.setID(id);
+    await native.emit("session_start", { type: "session_start", reason });
+    assert.deepEqual(await owner.native("native.append", { session_id: id, message_id: "next", body: "for the successor" }),
+      { session_id: id, message_id: "next", accepted: true }, reason);
+    await native.emit("before_agent_start", { type: "before_agent_start", prompt: "next" });
+    assert.deepEqual(await owner.native("native.steer", { session_id: id, message_id: "steered", body: "into its task", run: null }),
+      { session_id: id, message_id: "steered", accepted: true }, reason);
+    assert.deepEqual(turnsOf(sends), ["next"], reason);
+    assert.deepEqual(historyOf(sends), [], reason);
+    assert.deepEqual(sends.filter((send) => send.options?.deliverAs === "steer").map((send) => send.id), ["steered"], reason);
+  }
+});
+
 test("interactive aborted settle leaves one history copy and no queued copy of a never-started steer", async () => {
   const native = nativeFixture("interactive-1", "tui");
   const queue = [];
@@ -1005,6 +1149,7 @@ test("interactive wakes after manual compaction and brackets unobservable branch
 
   queue.push({ session_id: "interactive-compact", message_id: "compact-failed", body: "after failure" });
   await native.emit("session_compact_failed", { type: "session_compact_failed", reason: "manual", aborted: true });
+  await immediate();
   assert.equal(queue.length, 0);
   assert.equal(native.pending().details.message_id, "compact-failed");
   await native.completeMessage();

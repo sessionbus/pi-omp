@@ -106,8 +106,9 @@ while Pi is idle writes any such message too, since Pi awaits
 (`agent-session-runtime.js:296-303`). A steered message that started stays
 as it is: attempted, consumption unknown.
 
-Quitting while a task runs: Pi does not abort the task before
-`session_shutdown` and awaits that handler with no bound of its own. With a
+Quitting while a task runs: Pi 1.5.0 does not abort the task before
+`session_shutdown` (Pi 1.5.1 does; see "Quit and session switch on Pi 1.5.1"
+below) and awaits that handler with no bound of its own. With a
 never-started steer, or (since 2026-11-09) with deliveries still waiting in
 the owner for Pi's next task, the extension aborts the task, or a
 compaction, as Escape does, waits up to 2 seconds (`quitWaitMs`) for Pi to
@@ -124,6 +125,35 @@ quit drain writes the deliveries still queued for Pi's next task to history
 once, after the never-started steers, in arrival order. Still busy at the
 bound, nothing is written and those messages are lost as before; quit is
 delayed only in that state.
+
+## Quit and session switch on Pi 1.5.1 (2026-11-10)
+
+Pi 1.5.1 aborts the running task, and a manual compaction, before it emits
+`session_shutdown` on quit (`agent-session-runtime.js` `dispose`), as both Pi
+1.5.0 and 1.5.1 do before a session switch (`teardownCurrent`). Pi awaits the
+deferred sends of that aborted settle, a whole new task for a turn-starting
+send, before it gets to `session_shutdown`. Before this change the settle's
+own drain (and the `session_compact_failed` drain) therefore started one more
+task with the deliveries waiting in the owner, after the TUI had stopped.
+
+- An aborted settle, and a compaction failure, drain on the next tick
+  (`scheduleDrain`) instead of inline. At quit or a switch Pi reaches
+  `session_shutdown` in the same microtask chain, so the gate is closed first
+  and the drain writes nothing; after Escape, or a compaction failure alone,
+  it picks up the next queued delivery one tick later.
+- `session_shutdown` for `new`, `resume` and `fork` runs the quit history
+  drain: each delivery still waiting is written once to the history of the
+  session being left, with no turn. Before, a busy switch ran them in that
+  session and an idle switch dropped them at `session_end`. Both gates (the
+  extension's `quitting`, the owner's `#quitClosed`) are reset when the
+  successor session is ready, also for a same-ID resume.
+- Inline drains kept: `before_agent_start` (Pi's run is already active, so an
+  append is refused busy and starts nothing), a settle without an abort, and
+  the shutdown history drain itself.
+- Recorded limit, decided by Fable (2026-11-10, `cruvge20y750`) and not yet
+  seen by the owner: another extension's `agent_settled` handler that awaits
+  real I/O can let the deferred drain run before `session_shutdown`, and then
+  it starts that task.
 
 ## A delivery deferred during a settle (2026-11-09)
 

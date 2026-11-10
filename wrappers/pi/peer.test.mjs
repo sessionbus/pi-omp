@@ -296,6 +296,26 @@ test("direct owner preserves FIFO busy wake, capacity, and tree gate", async () 
   await f.owner.close();
 });
 
+// owner.quit also ends a session being switched away from (Pi 1.5.1): a
+// delivery that would wait is refused for that session, and its successor,
+// also a same-ID resume, queues deliveries for a next task again. Before this
+// change the gate stayed closed after a switch.
+test("a switch's quit gate does not outlive the session being left", async () => {
+  for (const reason of ["new", "resume", "fork"]) {
+    const f = ownerFixture({ busy: true });
+    await ready(f.owner);
+    assert.deepEqual(await f.fake.latest().deliver(inbound("waiting")), { disposition: "queued_for_next_turn" }, reason);
+    assert.deepEqual(await f.owner.call("owner.quit", { session_id: "native-one" }), { session_id: "native-one", pending: true }, reason);
+    assert.deepEqual(await f.fake.latest().deliver(inbound("crossing")), { disposition: "rejected", reason: "native owner closed" }, reason);
+    await f.owner.call("session_end", { topology: "interactive", session_id: "native-one", reason });
+    const successor = reason === "resume" ? "native-one" : "native-two";
+    f.setIdentity(successor, "");
+    await ready(f.owner, successor, "");
+    assert.deepEqual(await f.fake.latest().deliver(inbound("successor")), { disposition: "queued_for_next_turn" }, reason);
+    await f.owner.close();
+  }
+});
+
 // While Pi runs a task a delivery goes into Pi's steering queue and is
 // answered injected; an idle session still starts a turn with it.
 test("a delivery while Pi runs a task is steered into it and answered injected", async () => {
