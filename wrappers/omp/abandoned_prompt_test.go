@@ -744,3 +744,214 @@ func TestOMPInterruptBeforeANoAgentAnswerLeavesOneReceipt(t *testing.T) {
 		t.Fatalf("lane after the no-agent early stop: %v", failure)
 	}
 }
+
+// waitOMPPromptResultTaken waits until the reader has handed a prompt_result
+// to the active turn, or the turn failed.
+func waitOMPPromptResultTaken(t *testing.T, fixture *ompRunFixture) *ompNativeTurn {
+	t.Helper()
+	fixture.wrapper.mu.Lock()
+	turn := fixture.wrapper.active
+	fixture.wrapper.mu.Unlock()
+	if turn == nil {
+		t.Fatal("no active turn")
+	}
+	for {
+		turn.mu.Lock()
+		seen, failure := turn.promptResultSeen, turn.failure
+		turn.mu.Unlock()
+		if seen || failure != nil {
+			return turn
+		}
+		select {
+		case <-nativeRPCTestContext(t).Done():
+			t.Fatal("the prompt_result did not reach the turn")
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+// serveNextOMPRun runs the lane's next prompt to its end. Its prompt must be
+// the next command OMP reads, so nothing, such as an abort, was written first.
+func serveNextOMPRun(t *testing.T, fixture *ompRunFixture, sequence uint64) {
+	t.Helper()
+	nextID, started := fixture.prompt(t, "next prompt", `{"agentInvoked":true}`)
+	fixture.preflight(t, sequence, "run-next", "next prompt")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"served","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, nextID, "completed")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("next start = %#v, %v", start.turn, start.err)
+	}
+	result, err := start.turn.Wait(nativeRPCTestContext(t))
+	if err != nil || result.Outcome != "completed" || result.Result != "served" {
+		t.Fatalf("next result = %+v, %v", result, err)
+	}
+	if failure := ompLaneFailure(fixture); failure != nil {
+		t.Fatalf("lane after the next Run: %v", failure)
+	}
+}
+
+// The interrupt wins before admission; OMP's success for the prompt is
+// buffered and its prompt_result reaches the turn before StartPrompt's
+// continuation takes that success. The result is the stopped prompt's own
+// end: the Run still ends as the interrupt, without the result, nothing is
+// aborted and the next Run is served. Before this change the turn refused the
+// result and the lane ended.
+func TestOMPEarlyStopKeepsAResultReadBeforeItsStartResolves(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	ctx, cancel := context.WithCancelCause(nativeRPCTestContext(t))
+	defer cancel(errors.New("test done"))
+	turn := newOMPNativeTurn(fixture.wrapper, nil, "stopped prompt", fixture.binding)
+	fixture.wrapper.mu.Lock()
+	fixture.wrapper.active, fixture.wrapper.runCancel = turn, cancel
+	fixture.wrapper.mu.Unlock()
+	// StartPrompt up to its first answer; its continuation runs after the
+	// result, as startNativeTurn resolves a success.
+	id, pending, _, err := fixture.rpc.admitPrompt(ctx, map[string]any{"message": "stopped prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command := fixture.peer.read(t); nativeRPCField(t, command, "id") != id {
+		t.Fatalf("native command = %#v", command)
+	}
+	waitNativeRPCWritesSettled(t, fixture.rpc)
+	if err := fixture.wrapper.Interrupt(nativeRPCTestContext(t), nil); err != nil {
+		t.Fatal(err)
+	}
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":true,"data":{"agentInvoked":true}}`)
+	waitNativeRPCPromptState(t, fixture.rpc, pending, true, false)
+	fixture.promptResult(t, id, "completed")
+	waitOMPPromptResultTaken(t, fixture)
+	native, submitted, err := fixture.rpc.completePromptStart(id, pending, <-pending.result)
+	if err != nil || native == nil || !submitted {
+		t.Fatalf("start = %v, %v, %v", native, submitted, err)
+	}
+	turn.mu.Lock()
+	turn.submitted, turn.native = submitted, native
+	failure := turn.failure
+	turn.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("the stopped prompt's result failed the turn: %v; lane %v", failure, ompLaneFailure(fixture))
+	}
+	result, err := turn.Wait(ctx)
+	var early ompEarlyStop
+	if !errors.As(err, &early) || result != (sessionkit.TurnResult{}) {
+		t.Fatalf("Wait = %+v, %v", result, err)
+	}
+	if fixture.rpc.AbandonedLive() || ompLaneFailure(fixture) != nil {
+		t.Fatalf("abandoned %v, lane %v", fixture.rpc.AbandonedLive(), ompLaneFailure(fixture))
+	}
+	serveNextOMPRun(t, fixture, 1)
+}
+
+// A prompt_result the turn took while StartPrompt was unresolved is checked
+// where StartPrompt resolves, against the prompt OMP answered. The result is
+// read ahead of OMP's answer so that the reader's order is fixed; the turn and
+// the prompt then hold what the buffered answer above leaves them.
+func TestOMPEarlyStopChecksAnEarlyResultWhereItsStartResolves(t *testing.T) {
+	for name, own := range map[string]bool{"the stopped prompt's: kept": true, "another prompt's: the lane ends": false} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			runCtx, cancelRun, result, id := startOMPRacedRun(t, fixture, "stopped prompt")
+			resultID := id
+			if !own {
+				resultID = id + "-other"
+			}
+			turn := interruptBetween(t, fixture, cancelRun, result, func() {
+				fixture.promptResult(t, resultID, "completed")
+				taken := waitOMPPromptResultTaken(t, fixture)
+				taken.mu.Lock()
+				refused := taken.failure != nil
+				taken.mu.Unlock()
+				// A turn that refused the result has already ended the lane,
+				// and OMP's answer has nowhere to go.
+				if !refused {
+					fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":true,"data":{"agentInvoked":true}}`)
+				}
+			})
+			stopped, err := turn.Wait(runCtx)
+			var early ompEarlyStop
+			if !own {
+				if err == nil || errors.As(err, &early) || ompLaneFailure(fixture) == nil {
+					t.Fatalf("Wait = %+v, %v; lane %v", stopped, err, ompLaneFailure(fixture))
+				}
+				return
+			}
+			if !errors.As(err, &early) || stopped != (sessionkit.TurnResult{}) {
+				t.Fatalf("Wait = %+v, %v; lane %v", stopped, err, ompLaneFailure(fixture))
+			}
+			if fixture.rpc.AbandonedLive() || ompLaneFailure(fixture) != nil {
+				t.Fatalf("abandoned %v, lane %v", fixture.rpc.AbandonedLive(), ompLaneFailure(fixture))
+			}
+			serveNextOMPRun(t, fixture, 1)
+		})
+	}
+}
+
+// OMP answers a prompt before its prompt_result, so a prompt_result read
+// while StartPrompt was unresolved belongs to no prompt of ours when
+// StartPrompt answers none: the lane ends, as the reader ends it for an
+// invalid result. Before this change a refused Run kept the lane with that
+// result dropped, and an abandoned prompt waited for a result already taken,
+// refusing every later Run as busy.
+func TestOMPPromptResultWithoutAnAnsweredPromptEndsTheLane(t *testing.T) {
+	t.Run("refused", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		_, _, result, id := startOMPRacedRun(t, fixture, "refused prompt")
+		fixture.promptResult(t, id, "completed")
+		waitOMPPromptResultTaken(t, fixture)
+		fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":false,"error":"Agent is busy"}`)
+		start := <-result
+		var refusal *nativePromptRefusal
+		if start.turn != nil || !errors.As(start.err, &refusal) {
+			t.Fatalf("refused start = %#v, %v", start.turn, start.err)
+		}
+		select {
+		case <-fixture.rpc.Done():
+		case <-nativeRPCTestContext(t).Done():
+			t.Fatal("the lane stayed")
+		}
+		if err := fixture.rpc.Err(); !errors.Is(err, errOMPUnansweredPromptResult) {
+			t.Fatalf("lane end = %v", err)
+		}
+	})
+	t.Run("abandoned after an early stop", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		runCtx, cancelRun, result, id := startOMPRacedRun(t, fixture, "stopped prompt")
+		fixture.promptResult(t, id, "completed")
+		waitOMPPromptResultTaken(t, fixture)
+		fixture.wrapper.mu.Lock()
+		fixture.wrapper.runCancel = cancelRun
+		fixture.wrapper.mu.Unlock()
+		if err := fixture.wrapper.Interrupt(nativeRPCTestContext(t), nil); err != nil {
+			t.Fatal(err)
+		}
+		start := <-result
+		if start.err != nil || start.turn == nil {
+			t.Fatalf("stopped start = %#v, %v", start.turn, start.err)
+		}
+		var early ompEarlyStop
+		if _, err := start.turn.Wait(runCtx); !errors.Is(err, errOMPUnansweredPromptResult) || errors.As(err, &early) {
+			t.Fatalf("Wait = %v", err)
+		}
+		if ompLaneFailure(fixture) == nil {
+			t.Fatal("the lane stayed")
+		}
+	})
+	t.Run("another prompt's, after the start resolved without one", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		turn, id := earlyStopOMPRun(t, fixture, "stopped prompt")
+		fixture.promptResult(t, id+"-other", "completed")
+		select {
+		case <-fixture.rpc.Done():
+		case <-nativeRPCTestContext(t).Done():
+			t.Fatal("the lane stayed")
+		}
+		if _, err := turn.Wait(nativeRPCTestContext(t)); err == nil || ompLaneFailure(fixture) == nil {
+			t.Fatalf("Wait = %v; lane %v", err, ompLaneFailure(fixture))
+		}
+	})
+}

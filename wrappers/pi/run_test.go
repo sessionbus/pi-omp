@@ -1186,6 +1186,11 @@ func TestPiForwardedRefusalJoinsOwnedDialogCancellations(t *testing.T) {
 		wrapper, turn := setup(t, 1)
 		done := make(chan struct{})
 		go func() { wrapper.refuseForwarded(turn, refused, "failed"); close(done) }()
+		select {
+		case <-done:
+			t.Fatal("the refusal returned while a cancellation was pending")
+		case <-time.After(100 * time.Millisecond):
+		}
 		turn.mu.Lock()
 		turn.pendingUI--
 		turn.signalLocked()
@@ -1197,6 +1202,11 @@ func TestPiForwardedRefusalJoinsOwnedDialogCancellations(t *testing.T) {
 		wrapper, turn := setup(t, 1)
 		done := make(chan struct{})
 		go func() { wrapper.refuseForwarded(turn, refused, "failed"); close(done) }()
+		select {
+		case <-done:
+			t.Fatal("the refusal returned while a cancellation was pending")
+		case <-time.After(100 * time.Millisecond):
+		}
 		turn.mu.Lock()
 		turn.pendingUI--
 		turn.failLocked(errNativeRPCBusy)

@@ -253,7 +253,8 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 			return err
 		}
 		if turn.earlyStop {
-			// OMP's answer to the stopped prompt, read before it was abandoned.
+			// OMP's answer to the stopped prompt, read before it was abandoned
+			// or before StartPrompt resolved; there its ID is checked.
 			break
 		}
 		if invoked && turn.notDispatchedLocked(status) {
@@ -296,6 +297,24 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	return nil
 }
 
+// errOMPUnansweredPromptResult is a prompt_result read while StartPrompt was
+// unresolved when no prompt was answered: OMP answers a prompt before its
+// prompt_result, so it is none of ours.
+var errOMPUnansweredPromptResult = errors.New("OMP native prompt_result is invalid")
+
+// endOnUnansweredPromptResult ends the lane, as the reader ends it for an
+// invalid prompt_result, when a turn StartPrompt dropped without a prompt took
+// one. It runs once the turn takes no more events; an earlier transport
+// failure stays the lane's cause.
+func (turn *ompNativeTurn) endOnUnansweredPromptResult(rpc *nativeRPC) {
+	turn.mu.Lock()
+	seen := turn.promptResultSeen
+	turn.mu.Unlock()
+	if seen {
+		rpc.stop(errOMPUnansweredPromptResult, false)
+	}
+}
+
 // decodePromptResult returns the prompt_result's agentInvoked, its status and
 // OMP's error text, which is empty when OMP gives none.
 func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, string, string, error) {
@@ -306,7 +325,7 @@ func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, string
 		Error        json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &event) != nil || event.ID == nil || !validOwnerID(*event.ID) || turn.promptResultSeen ||
-		(turn.native != nil && *event.ID != turn.native.id) || (turn.earlyStop && turn.native == nil) {
+		(turn.native != nil && *event.ID != turn.native.id) || (turn.earlyStop && turn.submitted && turn.native == nil) {
 		return false, "", "", errors.New("OMP native prompt_result is invalid")
 	}
 	trimmed := bytes.TrimSpace(event.AgentInvoked)
@@ -877,6 +896,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		// Nothing of the prompt reached the agent. The turn and anything it
 		// recorded from OMP's own work are dropped; the lane stays.
 		p.finishNativeTurn(turn)
+		turn.endOnUnansweredPromptResult(owner.rpc)
 		return nil, refusal
 	}
 	turn.mu.Lock()
@@ -892,12 +912,16 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			turn.failLocked(callErr)
 		}
 	}
+	if native == nil && submitted && turn.promptResultSeen {
+		turn.failLocked(errOMPUnansweredPromptResult)
+	}
 	turn.mu.Unlock()
 	if callErr != nil {
 		if submitted {
 			return turn, nil
 		}
 		p.finishNativeTurn(turn)
+		turn.endOnUnansweredPromptResult(owner.rpc)
 		return nil, callErr
 	}
 	invoked, known := native.ImmediateAgentInvoked()
