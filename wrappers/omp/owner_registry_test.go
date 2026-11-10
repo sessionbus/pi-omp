@@ -1122,6 +1122,74 @@ func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testin
 	}
 }
 
+// A full public delivery queue refuses only the delivery that does not fit:
+// the owner and its connection keep serving.
+func TestOwnerRegistryRefusesAFullDeliveryQueuePerDelivery(t *testing.T) {
+	listener := ownerBusListener(t)
+	directory := t.TempDir()
+	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+		"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+	}}
+	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+		Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+		InitialName: "requested", Groups: []string{"interactive"},
+	}, fixture)
+	_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+		Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one", Name: "event",
+	})
+	from := kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}}
+	send := func(id int64) {
+		t.Helper()
+		body, err := protocol.RequestBytes(id, "message.deliver", kit.DeliveryRequest{MessageID: fmt.Sprintf("message-%d", id), From: from, Body: "hello"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownerWrite(t, public, body)
+	}
+	registry.mu.Lock()
+	state := registry.bindings["owner-one"]
+	registry.mu.Unlock()
+	// Hold the stage gate: the loop takes one delivery and waits in deliver,
+	// and the next maxOwnerWork fill the queue.
+	<-state.stageGate
+	for id := int64(1); id <= maxOwnerWork+1; id++ {
+		send(id)
+	}
+	overflow := int64(maxOwnerWork + 2)
+	send(overflow)
+	frame := ownerFrame(t, scanner)
+	var receipt kit.DeliveryReceipt
+	if frame.Request || frame.ID != overflow || frame.Error != nil ||
+		protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+		receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
+		t.Fatalf("overflow delivery = %+v, receipt %+v", frame, receipt)
+	}
+	if err := registry.Err(); err != nil {
+		t.Fatalf("a full queue failed the owner: %v", err)
+	}
+	state.stageGate <- struct{}{}
+	for range maxOwnerWork + 1 {
+		frame = ownerFrame(t, scanner)
+		if frame.Request || frame.Error != nil {
+			t.Fatalf("queued delivery answer = %+v", frame)
+		}
+	}
+	registry.mu.Lock()
+	state.staged = nil
+	registry.mu.Unlock()
+	next := overflow + 1
+	send(next)
+	frame = ownerFrame(t, scanner)
+	if frame.Request || frame.ID != next || frame.Error != nil ||
+		protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "written" {
+		t.Fatalf("next valid delivery = %+v, receipt %+v", frame, receipt)
+	}
+	if err := registry.Err(); err != nil {
+		t.Fatalf("owner after the full queue: %v", err)
+	}
+}
+
 func TestOwnerRegistryStageCancellationBoundaries(t *testing.T) {
 	t.Run("before stage admission leaves no reservation", func(t *testing.T) {
 		listener := ownerBusListener(t)

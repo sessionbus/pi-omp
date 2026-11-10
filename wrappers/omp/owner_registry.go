@@ -996,9 +996,16 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 					registry.mu.Unlock()
 					return
 				default:
+					// A full delivery queue refuses only this delivery.
 					registry.releaseStateLocked(state, retained)
 					registry.mu.Unlock()
-					responseErr = errors.New("OMP public delivery capacity exhausted")
+					if err := attempt.conn.Result(request, kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}); err != nil {
+						_ = attempt.conn.Close()
+						if ctx.Err() == nil {
+							registry.fail(err)
+						}
+					}
+					return
 				}
 			}
 		}
