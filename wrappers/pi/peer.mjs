@@ -271,14 +271,18 @@ export class PiInteractiveOwner {
         !validText(params.session_id, 256) || !validText(params.name, 4096, true)) {
       throw new Error("invalid Pi interactive owner readiness");
     }
+    // session_end clears #session, also before a same-ID resume; a rehello of
+    // the current generation (session_info_changed) finds it set.
+    const successor = this.#session === undefined;
     const native = await this.#native({ method: "native.describe", params: { session_id: params.session_id }, signal });
     if (!exact(native, ["session_id", "name", "cwd"]) || native.session_id !== params.session_id ||
         !validText(native.name, 4096, true) || !validText(native.cwd, 32 << 10)) {
       throw new Error("Pi native description contradicted owner readiness");
     }
     // owner.quit also ends a session being switched away from; its successor
-    // queues deliveries for a next task again.
-    this.#quitClosed = false;
+    // queues deliveries for a next task again. A rehello of the current
+    // generation, for example a rename while Pi quits, keeps the gate closed.
+    if (successor) this.#quitClosed = false;
     // After a takeover a later Pi session stays off Sessionbus too.
     if (this.#superseded) {
       this.#session = native.session_id;

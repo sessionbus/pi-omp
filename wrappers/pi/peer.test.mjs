@@ -316,6 +316,18 @@ test("a switch's quit gate does not outlive the session being left", async () =>
   }
 });
 
+// A rehello of the same generation (Pi's session_info_changed, for example a
+// rename while Pi quits) keeps the quit gate closed: a delivery that would wait
+// is still refused. Only a successor after session_end opens it again.
+test("a rehello during quit keeps the quit gate closed", async () => {
+  const f = ownerFixture({ busy: true });
+  await ready(f.owner);
+  assert.deepEqual(await f.owner.call("owner.quit", { session_id: "native-one" }), { session_id: "native-one", pending: false });
+  assert.deepEqual(await ready(f.owner, "native-one", "Renamed"), { session_id: "native-one" });
+  assert.deepEqual(await f.fake.latest().deliver(inbound("crossing")), { disposition: "rejected", reason: "native owner closed" });
+  await f.owner.close();
+});
+
 // While Pi runs a task a delivery goes into Pi's steering queue and is
 // answered injected; an idle session still starts a turn with it.
 test("a delivery while Pi runs a task is steered into it and answered injected", async () => {
