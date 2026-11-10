@@ -76,9 +76,30 @@ func validEntryID(id string) bool {
 	return id != "" && len(id) <= 256 && !strings.ContainsAny(id, "\x00\r\n\t ")
 }
 
+// ownedHistory keeps the owned run's entries: those after start, the leaf at
+// its preflight, up to and including end, the leaf at its settle. Entries of
+// work Pi ran before or after the run are not part of its result. A start
+// that precedes the delta keeps it from its first entry.
+func ownedHistory(delta nativeHistory, start, end string) (nativeHistory, error) {
+	entries := delta.Entries
+	for index, entry := range entries {
+		if entry.ID == start {
+			entries = entries[index+1:]
+			break
+		}
+	}
+	for index, entry := range entries {
+		if entry.ID == end {
+			return nativeHistory{Entries: entries[:index+1], Leaf: end}, nil
+		}
+	}
+	return nativeHistory{}, errors.New("Pi history has no entry where the owned run settled")
+}
+
 // historyResult is called only after the controller has joined the owned
 // native terminal. delta is get_entries(since: pre-submit append cursor),
-// while parent is the pre-submit selected leaf; those IDs need not be equal.
+// cut to the owned run, while parent is the leaf at its preflight; those IDs
+// need not be equal.
 // A branch switch during the Run is unavailable, not another branch's answer.
 func historyResult(parent string, delta nativeHistory, prompt string) (sessionkit.TurnResult, error) {
 	var result sessionkit.TurnResult

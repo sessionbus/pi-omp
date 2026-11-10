@@ -6,6 +6,399 @@
 > commit recorded by the split archive manifest. Host evidence paths are
 > immutable external artifacts, not repository paths.
 
+## Peer text and OMP magic keywords (2026-11-09)
+
+OMP treats a few standalone lowercase prose words in a user-attributed prompt
+or queued message as magic keywords. In 18.18.5 these are `ultrathink`,
+`chillax`, `orchestrate`, `workflowz` and `jevify`
+(`modes/magic-keywords.ts:91-142`). They add a hidden notice, and `ultrathink`
+and `chillax` also raise or lower thinking effort, `chillax` mid-turn too
+(`session/agent-session.ts:8797, 9205-9252, 9568`;
+`session/model-controls.ts:676, 735-750`). The matcher in `@oh-my-pi/pi-tui`
+skips code and every XML/HTML element together with its content
+(`prompt/magic-keywords.ts:22-38, 91-93`; `prompt/markdown-prose.ts`).
+
+Peer text reaches OMP inside one balanced `<cross-session-message>` element on
+every path: lane seed, lane steer and interactive staging. So a peer cannot
+trigger a keyword. A body could unbalance the element in two ways: an opening
+tag of the same name, in any letter case, nests, and an unclosed code fence
+masks our closing tag first. The wrapper therefore escapes such opening tags as
+`<\cross-session-message`, the way peer-common escapes closings. If the body
+leaves a fence open by OMP's line rules, the wrapper also closes it with the
+same marker before the envelope closes. The caller's own Run input is never
+changed. `magic_keywords.test.mjs` runs OMP's matcher code, vendored
+byte-exact, on the rendered envelopes.
+
+## OMP 18.18.5 source delta (2026-11-09)
+
+The 18.13.2 to 18.18.5 delta found two breaks, both fixed in this release:
+
+- **Lane readiness.** The RPC `ready` frame gained
+  `supportsBashExcludeFromContext` in 18.18.1. The wrapper now validates only
+  the native fields it uses and ignores additional ones there and in the other
+  open native frames.
+- **Shell commands.** 18.17.0 registers `zsh`, `bash` and `sh`. See Lane Run
+  boundary, Subcommands.
+
+The other changes need no code. They are recorded here:
+
+- **Unresolvable `@path`.** A mention OMP cannot resolve is now plain text, not
+  a failure before the run (`utils/file-mentions.ts:65-73`).
+- **Idle wake.** An idle user-attributed `sendMessage(..., {triggerTurn:true})`
+  now runs `before_agent_start` first (`session/agent-session.ts:10604-10675`).
+  Interactive owners do not rotate on it. How a lane treats a preflight caused
+  by another extension's such message is not established.
+- **Abort before the provider call.** Such an abort requeues a steer OMP had
+  already taken (agent-core `agent-loop.ts:1268-1286`). It is then delivered in
+  the next turn with one more preflight, the delayed-delivery class below.
+- **Model mentions.** `^provider/id:level` mentions now resolve
+  (`session/model-mentions.ts:91-150`). A peer seed that OMP rewrites this way fails as
+  a foreign preflight, which widens that existing limit.
+- **Event order.** OMP now delivers events to each extension in emission order
+  (`extensibility/extensions/runner.ts:2021-2130`). The held `message_end` path
+  remains for the timeout and nested-emit exceptions.
+- **Restricted folders.** `tools.restrictedFolders` turns even a yolo allow into
+  a per-call prompt, matched by the session cwd for tools without paths
+  (`tools/approval.ts:376-389, 524-564`).
+- **Task children in worker threads.** These are new in 18.18.5 (`src/thread/`).
+  Their effect on managed Task children is not established.
+
+## Native update checklist (2026-11-09)
+
+At every OMP update, before installing it for acceptance runs:
+
+1. Re-verify the command registry and launch string flags.
+   `TestOMPCommandsMatchNativeRegistry` holds the list.
+2. Re-check the RPC frames the lane reads for new required fields. Additive
+   fields need no change.
+3. Re-vendor `prompt/markdown-prose.ts` and `prompt/magic-keywords.ts` from the
+   new `@oh-my-pi/pi-tui` into `wrappers/omp/testdata/pi-tui-<version>/`.
+   Update `UPSTREAM.json` with the file hashes and keyword list, re-verify the
+   fence and tag rules the wrapper mirrors (`peer_envelope.go`), regenerate the
+   golden with `OMP_UPDATE_KEYWORD_GOLDEN=1`, and rerun
+   `magic_keywords.test.mjs`.
+4. Re-read the source anchors cited in this file for the paths the wrapper
+   uses.
+
+## A lane prompt over the native frame once encoded (2026-10-28)
+
+The lane checks a prompt's raw length against the 1 MiB native input frame,
+but its JSON encoding can be larger: Go escapes `<`, `>` and `&` as six bytes
+each, and a peer message that starts a Run adds its rendered envelope and a
+word joiner before each mention `@`. The encoder refused such a frame as a
+protocol violation before writing it, and the lane ended. Decision
+(2026-10-28): that refusal is now a Run-only failure with the reason, nothing
+is written or replayed, and the lane stays. A direct Run input cannot reach
+it through the bus, whose 1 MiB frame carries the same escaped input with more
+envelope; a peer message with many mention boundaries can.
+
+## Interactive delivery when OMP binds the extension late (2026-10-27)
+
+OMP 18.13.1 and later can bind a startup-safe extension, ours included, after
+the first frame of an interactive launch (`startup-deferral.ts`; `main.ts`
+18.13.2:2455-2464, 2683). `ExtensionRunner.addExtensions` appends it after
+every extension already bound and replays `session_start` to it
+(`runner.ts:1111-1142`). OMP hands each agent event to listeners without
+awaiting them, and the session dispatches every event on its own path
+(`agent-core agent.ts` 18.13.2:2233-2245; `agent-session.ts:3895-3900`).
+Within one event the runner awaits each extension's handlers in order
+(`runner.ts:1740-1750`). A late-bound extension therefore runs after OMP's own
+`message_start` handler (the warp event bridge, `warp-events.ts:182`), which
+has no `message_end` handler, and can see a message's `message_end` before its
+`message_start`. Bound at startup, ours runs first and sees them in order. A
+second fresh interactive launch on UMKA reproduced this once: OMP rendered
+"OMP native delivery message event is out of order" and the session ended.
+
+Decision (2026-10-27): a state OMP can legitimately be in must not end the
+user's session. A `message_end` that arrives before its `message_start` is
+held, and both are reported to the owner in their order. A held end whose
+start never comes is abandoned at that run's `agent_end`. Any other delivery
+event that no longer matches the claimed batch (a changed or repeated copy,
+an event out of order, a context that does not hold exactly one copy) and a
+new `reset_boundary` (`/clear`) while a batch is pending abandon only that
+batch. The owner bridge gains one phase, `abandoned`, which retires the batch
+like completion: the attempt's consumption is unknown, its `written` or
+`injected` receipt stands, it is never sent again, and the session, the
+peer's presence and later deliveries stay. This supersedes the reset-boundary
+retirement described under the mandatory-wake source boundary below. The
+context-before-message order of 2026-10-19 still holds on 18.13.x.
+
+## A lane prompt that OMP ends before its run (2026-10-27)
+
+OMP can also admit a lane prompt and end it before any run while still
+reporting it as invoked: on a usage-preflight denial `#promptWithMessage`
+returns `false`, its caller still returns `true`, and RPC writes
+`prompt_result` with `agentInvoked:true`, `status:"aborted"` and no
+`agent_start` (`agent-session.ts` 18.12.2:8203, 7829-7838;
+`rpc-prompt-results.ts:89-101`). 18.13.x adds its cost cap
+(`session.maxCost`, `--max-cost`) to the same report as `status:"error"`
+with code `cost_cap`. The lane treated this as agent work without a run and
+ended. Decision (2026-10-27): on exactly that report, with no run start,
+yield or assistant message, only the Run fails, with OMP's text when it gives
+one; the lane stays and nothing is replayed. The same report after a run
+start, or an agent-invoked `completed` report without a run, still ends the
+lane.
+
+## A lane prompt that fails before OMP's run (2026-10-27)
+
+OMP admits a prompt and answers `success`, and can then still fail it before
+it hands the message to the agent: no model, no API key, a failed `@path`
+read, pre-prompt compaction or a `before_agent_start` handler
+(`agent-session.ts` 18.12.2:8196-8301). RPC then writes a second,
+`success:false` response for the same id, followed by `prompt_result` with
+`agentInvoked:false` and `status:"error"` (`rpc-mode.ts:1621-1622`,
+`rpc-prompt-results.ts:109-111, 149-166, 292-296`). An error as the first
+response is OMP's refusal and was already handled.
+
+Decision (2026-10-27): a Run must end with its reason and the lane must
+stay. Such a failure, with no run start, yield or assistant message for our
+prompt, now ends only the Run: it is `unavailable` with OMP's text, a seed
+message is reported `rejected`/`not_submitted`, and the failed prompt's
+trailing `prompt_result` is absorbed once. Before, the failure ended the lane,
+and the Run's record went with it. A prompt our own validation refuses
+(empty, or over the native bound of 1 MiB less 1024 bytes) likewise ends only
+the Run. A late failure after OMP's run started, and transport or protocol
+faults, still end the lane. The Run terminal has no field for a failure
+reason, so a Run that OMP's provider error ends after its start stays `done`,
+outcome `failed`, native stop reason `error`, without OMP's text.
+
+## Peer messages that start a lane Run on OMP 18.12.2 (2026-10-27)
+
+OMP's prompt path reads the files that each `@path` in the prompt names and
+adds their contents for the model (`agent-session.ts` `#promptWithMessage`,
+`utils/file-mentions.ts`). No prompt option or RPC field turns it off. An `@`
+starts a mention at the start of the text or after whitespace or one of
+`` ([{<"'` ``; the mention is a quoted path or the following run of characters
+that are neither whitespace nor `@`.
+
+An idle lane starts a Run for a peer message by sending the rendered message
+as its RPC `prompt`, so OMP would read files that the peer names. Owner
+decision (2026-10-27): the lane inserts U+2060 WORD JOINER right before each
+`@` at a mention boundary in that message. U+2060 is neither whitespace nor
+one of those characters, so the `@` starts no mention: OMP extracts none there
+and resolves no path. The model sees the same visible text. A joiner right
+after the `@`, the first version, did not suffice: OMP still extracted the
+mention, and path resolution cancels the joiner-carrying first segment against
+a following `..`, so `@x/../notes.txt` still read `notes.txt`. Only that path
+changes. The owner's Run input is sent as given;
+a steered message (OMP's steering queue) and the interactive primary's
+deliveries (the steering queue or OMP's agent-initiated prompt) do not pass
+through `#promptWithMessage` and are unchanged.
+
+## Lane Run boundary on OMP 18.11.0 (2026-10-19)
+
+Owner decision (2026-10-15): an OMP lane Run ends at OMP's own done report for
+our prompt, and later work by OMP or other extensions is OMP's own and no
+longer ends the lane. The floor is OMP 18.11.0, stated here and in the README
+with no runtime version check. Source: OMP 18.11.0 npm `src`
+(`modes/rpc/rpc-prompt-results.ts`, `modes/rpc/rpc-mode.ts`,
+`session/agent-session.ts`, `cli-commands.ts`).
+
+- **End of a Run.** OMP writes one `prompt_result` with our request id after
+  all work of the prompt settled (`rpc-types.ts:229-246`). The Run takes its
+  result from the last assistant message before its run's first yielded
+  `agent_end` (`yielded ?? isTerminal !== false`, the rule OMP uses at
+  `rpc-prompt-results.ts:136`), and ends at our agent-invoked `prompt_result`.
+- **OMP's own work.** A run event before our run starts or after it yielded,
+  or with no Run open, is ignored. A dialog from that work is cancelled with no
+  Run to join, as for Pi.
+- **Refusal.** A prompt OMP refuses before admission (for example its native
+  busy rejection while its own work runs, `agent-session.ts:7356-7364`) gets an
+  error response, then a success response for the same id, then
+  `prompt_result` with `agentInvoked:false`. Our RPC reader absorbs exactly one of each for that
+  id. The Run fails with OMP's answer and is recorded unavailable, its
+  delivery is rejected `not_submitted`, and the lane stays, as for Pi. The slot
+  is cleared by the next admitted prompt, a new refusal or transport loss.
+- **Preflights.** OMP also preflights its own runs. Each Run opens a window
+  before it sends its prompt and closes it at turn end. Every preflight is
+  consumed when it arrives. In the window the first one with our prompt is
+  ours; one before it is recorded as foreign and fails an admitted Run; one
+  after it is ignored. Outside a window a preflight is only recorded. If our
+  agent-invoked `prompt_result` arrives without our preflight, the Run fails
+  as "owned preflight missing or rewritten", where it used to wait.
+- **Subcommands.** OMP drops recognised launch flags, including our
+  `--extension` and `--mode`, in front of a hoisted subcommand other than
+  `launch` and `acp` (`cli-commands.ts:313`, `402-428`, `462`; 18.18.5
+  `:330`, `408-483`). The wrapper therefore lists all 56 commands and 6
+  aliases of OMP 18.18.5 and runs them directly. 18.17.0 added `zsh`, `bash`
+  and `sh`, which OMP runs as its own shell (`cli.ts:472-473`); on older OMP
+  they are a prompt and start an unmanaged session, and `omp-peer launch
+  bash` keeps such a prompt managed.
+
+Not covered, listed:
+
+- Own work that starts after our Run opens and before OMP reads our prompt is
+  counted as ours. Our prompt is then refused as busy and that Run is dropped.
+  If the own work also ends before OMP reads our prompt, our prompt is admitted
+  and its foreign preflight fails the Run.
+- There is no wait for idle before a Run, unlike Pi. While OMP's own work
+  runs, each Run is refused.
+- The extension sends its preflight on a separate socket without waiting. If
+  it reaches the wrapper after our `prompt_result`, the Run fails as missing.
+- A session switch during our Run makes OMP report our prompt aborted without
+  our run's yielded `agent_end`; the Run fails.
+- An `agentInvoked:false` after agent work, or an error after the success
+  response, is not a refusal and still fails the Run.
+- OMP 18.1.17 never sends an agent-invoked `prompt_result`; a lane Run there
+  waits until it is cancelled.
+
+## Lane busy steering on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): OMP keeps its Go helper for this release, and
+lanes get busy steering. Source: OMP 18.11.0 npm `src`
+(`session/agent-session.ts`, `modes/runtime-init.ts`, `modes/rpc/rpc-mode.ts`)
+and `@oh-my-pi/pi-agent-core` 18.11.0 `src/agent-loop.ts`.
+
+- **When.** `Deliver` steers only while the Worker's Run is the lane's current
+  Run, its own preflight was taken, and its run started and has not yielded.
+  Otherwise the lane is not running, as before.
+- **How.** Go calls `native.steer` for the lane's primary session over the
+  private bridge, with the token of the Run's own preflight. The extension
+  keeps that token from its preflight until the run yields
+  (`!willContinue || awaitingAsyncWork`, OMP's own rule at
+  `agent-session.ts:5063-5067`) or a later preflight replaces it. In one
+  synchronous step it checks the token, checks `!ctx.isIdle()` and calls
+  `pi.sendMessage(message, {deliverAs:"steer"})`. Otherwise it answers idle
+  and makes no native call.
+- **Receipt.** `injected` claims only that hand-off. OMP's `sendMessage`
+  returns nothing, and OMP chooses between its steering queue and history only
+  after an await (`agent-session.ts:8814-8840`). No native confirmation is
+  claimed.
+- **No `triggerTurn`.** If OMP went idle during that await, the message is
+  appended to history without a turn (`agent-session.ts:8904-8911`) and the
+  next Run reads it. With `triggerTurn` it would start OMP's own run instead,
+  and a rejection there is written as an error response with no `id`
+  (`runtime-init.ts:103-105`, `rpc-mode.ts:1647-1649`), which the RPC reader
+  treats as a protocol failure.
+- **Failures.** A failed or invalid steer answer leaves the outcome
+  uncertain. The delivery fails with that reason and is never retried. That
+  failure by itself retires neither the Run nor the lane. Losing the bridge
+  or the owner still ends the lane, as before (`native_owner.go:264-271`).
+  Unlike interactive `native.stage`, no FIFO order is reserved.
+
+Residual, documented and not a defect: OMP's loop polls steering at each stop
+boundary and once more just before it yields (`agent-loop.ts:1752-1778`,
+`1788-1799`). A steer queued after that last poll makes OMP re-tag our
+yielded `agent_end` `isTerminal:false` (`agent-session.ts:1551-1583`), report
+our `prompt_result` there, and then run its queued-message drain as its own
+continuation. The message reaches the model and its answer is in the native
+history, but not in the Run's result. A steer queued before an interrupt is
+delivered the same way (`agent-loop.ts:1744-1751`). There is no earlier gate:
+OMP places the message after an await, so a gate would not close the gap and
+would refuse steers the run could still read.
+
+## Interactive receipts on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): fix the receipt wording. This replaces the
+`queued_for_next_turn` receipt of the section below for the interactive
+primary session only.
+
+- `native.stage` still hands each accepted message to OMP at once with
+  `sendMessage(...,{deliverAs:"steer",triggerTurn:true})`. Its answer now
+  also carries `busy`, read from `!ctx.isIdle()` before that send.
+- A busy OMP puts the message in its running task's steering queue, so the
+  receipt is `injected`. An idle OMP starts a turn with it, so the receipt is
+  `written`. OMP makes that choice only after an await
+  (`agent-session.ts:8814-8840`), so both receipts are decided at the call
+  and neither is a native confirmation.
+- A native Task child's answer carries no busy state, and its receipt stays
+  `queued_for_next_turn`. A queue that is full is still rejected
+  `queue_full`.
+
+## Delayed delivery on a lane (2026-11-09)
+
+A lane steer carries the token of its Run's preflight, which the managed
+extension sets at each `before_agent_start`. Two native behaviours move the
+extension's token away from the Run's, and the later steers of that Run
+are then refused as not running and delivered to a later Run: nothing is
+lost and no receipt is wrong. Both are accepted limits; no marker exists to
+tell them apart from a new Run.
+
+OMP fires `before_agent_start` when it takes a queued user-authored batch
+into the running task, our peer message included (`queued-messages.ts`
+:61-72; `agent-session.ts` 18.13.2 :8525-8555, :8631; agent-core
+`agent.ts` :1004-1030). The event carries `reason: "prompt"` there, the same
+as a new prompt, so the extension starts a new token and the Run's later
+steers are refused. The Go owner records that preflight inside the open Run
+window as consumed, not foreign, so the Run itself goes on. The same hook is
+in 18.12.2 and 18.13.1. A check on the prompt text is not used: an explicit
+caller input can equal a steer's text, and keeping an old token for a new
+Run is what the token prevents.
+
+The managed extension also clears a lane Run's steer token at OMP's `agent_end`
+for that run. OMP calls extension `agent_end` hooks without awaiting earlier
+hooks for the next event, and each hook may take up to 30 s, so with a slow
+earlier extension the previous Run's `agent_end` can reach ours after the
+next Run's preflight set its token, and clear it. Steers for the new Run are
+then refused as not running, and the daemon delivers them to a later Run:
+nothing is lost and no receipt is wrong. Clearing only while OMP is idle
+does not help: extension `agent_end` hooks run while OMP still counts the
+owning prompt as in flight, so OMP is never idle there
+(`agent-session.ts` 18.13.2 :3836-3850, :6795-6796). A Go-side "run ended"
+message would need a new bridge method and is not added. The Go owner
+already sends no steer for an ended Run (`omp.go` Deliver); a steer in flight
+when the Run ends is the existing late-steer case.
+
+## Lane steer limit (2026-11-09)
+
+Steers handed to a lane Run that OMP has not taken yet are counted against the
+extension's existing delivery limits (256 entries) and 8 MiB of their own,
+reserved before `sendMessage` from the same 32 MiB retained bytes as staged
+deliveries and bindings; the 8 MiB share keeps them from starving bindings. At the limit
+`native.steer` answers `queue_full` and sends nothing; the Go owner answers
+that delivery `rejected` with `queue_full`, the stage path's reason. OMP
+18.13.2 gives extensions no event when it drops or carries a steer:
+`queue_update` (`agent-session.ts` :10365-10383) reaches session subscribers
+and the RPC wire only, and lists texts, not message IDs. So an entry is freed
+at its own `message_end`, or when the next Run's preflight replaces the token
+it was sent with; a Run end is not used, since a delayed one can follow the
+next preflight. A steer OMP carries unread into the next Run is no longer
+counted there, so OMP can briefly hold more unread steers than the limit.
+
+## Interactive Escape on OMP 18.11.0 (2026-10-19)
+
+Owner selection (2026-10-19): release with today's behaviour. DEF-20261015-05
+moves into the OMP rework item as an open defect. It is not fixed and does not
+block this release, and no code handles it. Source: OMP 18.11.0 npm `src`
+(`modes/controllers/input-controller.ts`, `session/queued-messages.ts`,
+`session/agent-session.ts`, `modes/controllers/extension-ui-controller.ts`).
+
+- **Escape while the working animation shows.** OMP takes the queued
+  user-authored messages back into the editor, then aborts
+  (`input-controller.ts:564-569, 1960-1982`). Our interactive delivery is a
+  custom message with `attribution:"user"` and `display:true`, which OMP
+  counts as user-queued (`queued-messages.ts:61-72`). A steered peer message
+  the task had not read yet therefore comes back into the user's editor as if
+  typed. It is neither sent nor written to history unless the user submits
+  it, and its receipt stays `injected`.
+- **Other stops.** An abort that does not clear the queue leaves our message
+  queued. Examples are Escape while no animation shows
+  (`input-controller.ts:581-582`) and an extension's `ctx.abort()`
+  (`extension-ui-controller.ts:245`). The abort's cleanup then drains the
+  queue into a new turn (`agent-session.ts:9794-9797`), so the message is
+  delivered in that next turn.
+
+## Interactive delivery and OMP's context order (2026-10-19)
+
+The first live idle delivery ended the session. Our extension saw the
+delivery in OMP's `context` event before the message's own `message_start`
+and `message_end`, and treated that as a protocol violation. It aborted the
+task ("Interrupted by user") and shut the session down. The order is OMP's
+by design, in 18.1.17 and 18.11.0 alike. The agent loop builds the
+provider context, and runs the `context` hook, before it emits the turn's
+input message events (`@oh-my-pi/pi-agent-core` `agent-loop.ts`
+18.11.0:1312-1328, 1360, 1412-1416). That covers both an idle prompt and a
+steer taken at a turn boundary.
+
+- One exact copy of a claimed delivery in such a context is now accepted.
+  The delivery completes at its `message_end`, and the wrapper still gets
+  the claimed, `message_start`, `message_end` and `context` reports in that
+  order.
+- A changed copy, or more than one copy, still ends the session.
+  (Superseded 2026-10-27: such a copy now abandons only that delivery's
+  batch; see the 2026-10-27 decision above.)
+- Native Task children use the same check and are covered.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 OMP 18.1.17 is bound to upstream

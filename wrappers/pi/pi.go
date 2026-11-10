@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/sdk/go/protocol"
 	"github.com/sessionbus/peer-common/host"
 	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
@@ -46,11 +47,18 @@ type Wrapper struct {
 	closeOnce    sync.Once
 	closeErr     error
 	workers      sync.WaitGroup
+
+	// Stdout run state: whether a Pi run is between agent_start and its
+	// agent_settled, how many have settled, and whether Pi can run work of
+	// its own (an owned run settled or Pi refused an owned prompt).
+	nativeRunning bool
+	nativeSettles int
+	nativeChanged chan struct{}
+	ownWork       bool
 }
 
 type piOwnerReady struct {
 	Topology  string `json:"topology"`
-	Directory string `json:"directory"`
 	SessionID string `json:"session_id"`
 	Name      string `json:"name"`
 }
@@ -171,11 +179,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (res
 	p.workers.Add(1)
 	go p.watchRPC(rpc)
 
-	connection, err := process.accept(startup)
-	if err != nil {
-		return result, fmt.Errorf("accept Pi managed extension: %w", err)
-	}
-	bridge, err := pifamily.NewBridge(connection, pifamily.BridgeHost, p.handleBridge, pifamily.BridgeLimits{})
+	bridge, err := pifamily.NewBridge(process.bridge, pifamily.BridgeHost, p.handleBridge, pifamily.BridgeLimits{})
 	if err != nil {
 		return result, err
 	}
@@ -275,7 +279,7 @@ func (p *Wrapper) handleBridge(ctx context.Context, method string, raw json.RawM
 	switch method {
 	case "owner.ready":
 		var request piOwnerReady
-		if err = decodePiBridge(raw, []string{"topology", "directory", "session_id", "name"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"topology", "session_id", "name"}, &request); err == nil {
 			err = p.recordOwner(request)
 			result = map[string]string{"session_id": request.SessionID}
 		}
@@ -333,34 +337,66 @@ func (p *Wrapper) handleBridge(ctx context.Context, method string, raw json.RawM
 			SessionID string          `json:"session_id"`
 			Prompt    string          `json:"prompt"`
 			Settling  json.RawMessage `json:"settling"`
+			Leaf      json.RawMessage `json:"leaf"`
+			Settled   json.RawMessage `json:"settled"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id", "prompt", "settling"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"session_id", "prompt", "settling", "leaf", "settled"}, &request); err == nil {
 			var settling bool
+			var leaf, token string
+			var settled int
 			settling, err = piBridgeBool(request.Settling)
 			if err == nil {
-				err = p.recordRunPreflight(request.SessionID, request.Prompt, settling)
+				leaf, err = entryReference(request.Leaf)
 			}
-			result = map[string]string{"session_id": request.SessionID}
+			if err == nil {
+				settled, err = piBridgeCount(request.Settled)
+			}
+			if err == nil {
+				token, err = p.recordRunPreflight(request.SessionID, request.Prompt, settling, leaf, settled)
+			}
+			// A null run is Pi's own work, not this lane's Run.
+			var run *string
+			if token != "" {
+				run = &token
+			}
+			result = struct {
+				SessionID string  `json:"session_id"`
+				Run       *string `json:"run"`
+			}{request.SessionID, run}
 		}
 	case "run.start":
 		var request struct {
 			SessionID string          `json:"session_id"`
+			Run       json.RawMessage `json:"run"`
 			Settling  json.RawMessage `json:"settling"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id", "settling"}, &request); err == nil {
+		if err = decodePiBridge(raw, []string{"session_id", "run", "settling"}, &request); err == nil {
 			var settling bool
-			settling, err = piBridgeBool(request.Settling)
+			var token string
+			token, err = piBridgeToken(request.Run)
 			if err == nil {
-				err = p.recordRunStart(request.SessionID, settling)
+				settling, err = piBridgeBool(request.Settling)
+			}
+			if err == nil {
+				err = p.recordRunStart(request.SessionID, token, settling)
 			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
 	case "run.settling":
 		var request struct {
-			SessionID string `json:"session_id"`
+			SessionID string          `json:"session_id"`
+			Run       json.RawMessage `json:"run"`
+			Leaf      json.RawMessage `json:"leaf"`
 		}
-		if err = decodePiBridge(raw, []string{"session_id"}, &request); err == nil {
-			err = p.recordRunSettling(request.SessionID)
+		if err = decodePiBridge(raw, []string{"session_id", "run", "leaf"}, &request); err == nil {
+			var leaf, token string
+			token, err = piBridgeToken(request.Run)
+			if err == nil {
+				leaf, err = entryReference(request.Leaf)
+			}
+			if err == nil {
+				err = p.recordRunSettling(request.SessionID, token, leaf)
+			}
 			result = map[string]string{"session_id": request.SessionID}
 		}
 	default:
@@ -385,6 +421,26 @@ func piBridgeBool(raw json.RawMessage) (bool, error) {
 	return false, errors.New("Pi bridge boolean is invalid")
 }
 
+// piBridgeToken reads a Run token in the shape newPiRunToken mints: 32
+// lowercase hex digits. JSON null decodes into a string without error, so a
+// malformed token is refused here, before any rule for Pi's own work sees it.
+func piBridgeToken(raw json.RawMessage) (string, error) {
+	var token string
+	if json.Unmarshal(raw, &token) != nil || len(token) != 32 || strings.Trim(token, "0123456789abcdef") != "" {
+		return "", errors.New("Pi bridge Run token is invalid")
+	}
+	return token, nil
+}
+
+// JSON null decodes into an int without error, so it is refused first.
+func piBridgeCount(raw json.RawMessage) (int, error) {
+	var count int
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &count) != nil || count < 0 {
+		return 0, errors.New("Pi bridge count is invalid")
+	}
+	return count, nil
+}
+
 func decodePiBridge(raw json.RawMessage, fields []string, target any) error {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(raw, &object) != nil || object == nil || len(object) != len(fields) {
@@ -404,7 +460,7 @@ func decodePiBridge(raw json.RawMessage, fields []string, target any) error {
 func (p *Wrapper) recordOwner(request piOwnerReady) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if request.Topology != "lane" || p.process == nil || request.Directory != p.process.directory ||
+	if request.Topology != "lane" || p.process == nil ||
 		!validPiText(request.SessionID, 256, false) || !validPiText(request.Name, 4096, true) ||
 		(p.owner.SessionID != "" && p.owner.SessionID != request.SessionID) {
 		return errors.New("Pi managed owner readiness is invalid")
@@ -589,20 +645,89 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	if _, err := host.RenderNativeMessage(request); err != nil {
+// piMessageTooLarge is the owner-approved reason for a lane delivery Pi cannot
+// take in one native input.
+const piMessageTooLarge = "message too large for Pi (over its 1 MiB input limit after formatting)"
+
+// Deliver steers a message into the lane's running task: while this Run's
+// native prompt is admitted and not settled, the managed extension puts it in
+// Pi's steering queue, which the running task reads at its next boundary.
+// The steer carries the Run's token; the extension checks it, Pi's run state
+// and sends in one synchronous step, so a steer that arrives after this Run
+// ended is refused. An accepted steer that Pi has not read when this Run ends
+// stays in Pi's queue for the next Run. Otherwise the lane is not running and
+// the daemon starts a later Run.
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
+	body, err := host.RenderNativeMessage(request)
+	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	// The managed extension refuses a body past 1 MiB (native.mjs
+	// validDelivery); one that grows past it once rendered is refused here,
+	// before any native call, with the owner-approved reason.
+	if len(body) > 1<<20 {
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: piMessageTooLarge}, nil
+	}
+	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	p.mu.Lock()
 	available := p.opened && !p.closing && p.failure == nil && p.ctx.Err() == nil
+	turn, bridge, id := p.active, p.bridge, p.id
+	current := run != nil && p.run == run && turn != nil && bridge != nil
 	p.mu.Unlock()
 	if !available {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "lane_unavailable"}, nil
 	}
-	return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	if !current {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	turn.mu.Lock()
+	running := turn.admitted && !turn.nativeSettled
+	token := turn.token
+	turn.mu.Unlock()
+	if !running || token == "" {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	// The bridge refuses a frame past its limit before sending it, and JSON
+	// escaping and the steer's fields can carry a body within the bound above
+	// past it. The encoded parameters are measured as OMP's steerPrimary
+	// measures them, with its reserve for the request envelope, and refused
+	// with the same reason before any native call.
+	params := map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}
+	if encoded, encodeErr := json.Marshal(params); encodeErr != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: piMessageTooLarge}, nil
+	}
+	var answer struct {
+		SessionID string `json:"session_id"`
+		MessageID string `json:"message_id"`
+		Accepted  *bool  `json:"accepted"`
+		Reason    string `json:"reason"`
+	}
+	if err = bridge.Call(ctx, "native.steer", params, &answer); err != nil {
+		if piSteerRefusedBeforeSend(err) {
+			return sessionkit.DeliveryReceipt{}, fmt.Errorf("Pi native steer was refused before it was sent: %w", err)
+		}
+		// The steer may have reached Pi: no receipt, so the sender does not
+		// treat it as refused and resend it. Nothing is retried here.
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
+	}
+	// The answer comes after the steer may have been sent, so an answer that
+	// changed identity, lacks accepted, or contradicts itself is uncertain, as
+	// for OMP's steerPrimary.
+	if answer.SessionID != id || answer.MessageID != request.MessageID || answer.Accepted == nil ||
+		*answer.Accepted && answer.Reason != "" || !*answer.Accepted && answer.Reason != "idle" && answer.Reason != "queue_full" {
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
+	}
+	if !*answer.Accepted && answer.Reason == "queue_full" {
+		// The Run's unread steers are at the owner FIFO's limits: refused with
+		// that FIFO's reason, as an interactive full queue is.
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "Pi delivery queue is full"}, nil
+	}
+	if !*answer.Accepted {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
 
 func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {
@@ -686,4 +811,31 @@ func drainPiNativeRPC(ctx context.Context, rpc *nativeRPC) error {
 	case <-ctx.Done():
 		return errors.Join(context.Cause(ctx), rpc.Close())
 	}
+}
+
+// uncertainSubmission is a delivery that may have reached Pi: the Worker
+// passes Internal through and the daemon answers no_receipt (the same form
+// claude-peer uses for an uncertain write).
+func uncertainSubmission() error {
+	return &sessionkit.ProtocolError{Code: protocol.Internal, Message: "internal", Data: json.RawMessage(`"uncertain_submission"`)}
+}
+
+// piSteerRefusedBeforeSend reports a steer that certainly never reached Pi:
+// the bridge refused it before writing, the extension refused its session
+// before the send (extension.mjs native.steer: stale_session), or the bridge
+// had no method or handler capacity for it. Pi's extension checks an abort
+// after its send too, so a cancelled answer stays uncertain.
+func piSteerRefusedBeforeSend(err error) bool {
+	if errors.Is(err, pifamily.ErrBridgeNotSent) {
+		return true
+	}
+	var remote *pifamily.BridgeCallError
+	if !errors.As(err, &remote) {
+		return false
+	}
+	switch remote.Code {
+	case "stale_session", "method_not_found", "busy":
+		return true
+	}
+	return false
 }

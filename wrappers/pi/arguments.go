@@ -69,6 +69,9 @@ func launchArguments(open sessionkit.OpenOptions, extension, resume string) ([]s
 	if err != nil {
 		return nil, err
 	}
+	// Pi loads explicit CLI --extension paths first, in CLI order, then
+	// discovered project and global extensions. The managed extension is the
+	// first and only CLI extension here: forwarded arguments cannot add one.
 	args := []string{"--extension", extension, "--mode", "rpc"}
 	if resume != "" {
 		args = append(args, "--session", resume)

@@ -10,6 +10,17 @@ function nativeIdentity(ctx) {
   return id;
 }
 
+// The session leaf: the last entry of the current branch, or null before the
+// first one. A lane has no branch navigation, so it is also the last saved.
+export function nativeLeaf(ctx) {
+  const leaf = ctx.sessionManager.getLeafId();
+  if (leaf === null) return null;
+  if (typeof leaf !== "string" || !leaf.length || Buffer.byteLength(leaf) > 256 || /[\s\0]/u.test(leaf)) {
+    throw new Error("Pi native session leaf is invalid");
+  }
+  return leaf;
+}
+
 export function describeNative(pi, ctx) {
   const session_id = nativeIdentity(ctx);
   const name = pi.getSessionName() ?? "";
@@ -24,7 +35,7 @@ export function describeNative(pi, ctx) {
 // distinguishes a definite pre-submission refusal from native ownership. The
 // custom message is persisted later, after its asynchronous message_end event;
 // an old session leaf is not an admission signal.
-export function appendNative(pi, ctx, delivery) {
+function validDelivery(ctx, delivery) {
   if (!delivery || delivery.session_id !== nativeIdentity(ctx)) {
     throw new Error("Pi delivery belongs to a different native session");
   }
@@ -33,15 +44,50 @@ export function appendNative(pi, ctx, delivery) {
       typeof delivery.body !== "string" || Buffer.byteLength(delivery.body) > (1 << 20)) {
     throw new Error("invalid Pi native delivery");
   }
-  if (!ctx.isIdle()) return { accepted: false, reason: "busy" };
-  pi.sendMessage({
+}
+
+function nativeMessage(delivery) {
+  return {
     customType: customMessageType,
     content: delivery.body,
     display: true,
     details: { message_id: delivery.message_id },
-  }, { triggerTurn: true });
-  if (ctx.isIdle()) {
-    throw new Error("Pi did not start the native message turn");
-  }
+  };
+}
+
+// Pi 1.2.0 defers a triggerTurn send made during agent_settled handlers until
+// every settled handler has finished and stays idle until then
+// (agent-session.js:1836-1838, run at :696-703); outside that dispatch the
+// send sets the run flag before returning. Still idle after the send therefore
+// means deferred, and the delivery is accepted, inside or outside this
+// extension's own settled drain. If a deferred send then fails to start, the
+// error leaves _emitAgentSettled; no extension event reports it.
+export function appendNative(pi, ctx, delivery) {
+  validDelivery(ctx, delivery);
+  if (!ctx.isIdle()) return { accepted: false, reason: "busy" };
+  pi.sendMessage(nativeMessage(delivery), { triggerTurn: true });
+  return { accepted: true };
+}
+
+// While Pi is idle, as at every agent_settled (Pi 1.2.0 agent-session.js:686,
+// 1057-1059), a send with no options appends the message to history and the
+// model's context at once and starts no turn (:1848-1857). Its own message
+// events go only to session listeners, not to extensions.
+export function historyNative(pi, ctx, delivery) {
+  validDelivery(ctx, delivery);
+  pi.sendMessage(nativeMessage(delivery));
+}
+
+// While a native run is active Pi puts a triggerTurn custom message in its
+// steering queue synchronously (Pi 1.2.0 agent-session.js:1824-1835). The
+// agent loop reads that queue after each turn's tool results and adds it
+// before the next model request of the same run (agent-core
+// agent-loop.js:183-195). Nothing acknowledges consumption; the message's own
+// message_start/message_end show it. An idle session is not steered: that
+// would start a run of its own.
+export function steerNative(pi, ctx, delivery, running) {
+  validDelivery(ctx, delivery);
+  if (!running || ctx.isIdle()) return { accepted: false, reason: "idle" };
+  pi.sendMessage(nativeMessage(delivery), { triggerTurn: true, deliverAs: "steer" });
   return { accepted: true };
 }

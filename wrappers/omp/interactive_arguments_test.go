@@ -167,6 +167,69 @@ func TestOMPInteractivePlanNativePassthroughIsExact(t *testing.T) {
 	}
 }
 
+// OMP 18.18.5 registers 56 commands and 6 aliases (cli-commands.ts:27-319);
+// 18.17.0 added zsh, bash and sh. A missing entry starts a managed launch
+// that OMP then runs without our flags: `auth` or `web-search` before the
+// 18.11.0 list, a native shell before 18.17.0's three.
+func TestOMPCommandsMatchNativeRegistry(t *testing.T) {
+	native := strings.Fields(`launch acp auth auth-broker auth-gateway agents anonymize bench
+		browser-relay cleanse collab commit completions __complete compress config dry-balance
+		find gc grep gallery git grievances images if-bench install join login models plugin
+		predict ps say clip play share session setup shell zsh bash sh read render skill ssh
+		stats stream update usage tiny-models token toks ttsr worktree search
+		img plugins skills wt q web-search`)
+	want := make(map[string]bool, len(native))
+	for _, command := range native {
+		want[command] = true
+	}
+	if len(native) != 62 || !reflect.DeepEqual(ompCommands, want) {
+		t.Fatalf("commands = %d entries, differ from the native registry: %v", len(ompCommands), native)
+	}
+	for _, command := range []string{"auth", "session", "skills", "web-search"} {
+		plan, passthrough, err := InteractivePlan(argumentTestNative, []string{"--model", "gpt", command}, []string{"KEEP=value"})
+		if err != nil || !passthrough || !reflect.DeepEqual(plan.Args, []string{argumentTestNative.EntryPath, "--model", "gpt", command}) {
+			t.Fatalf("%s plan = %#v, %t, %v", command, plan, passthrough, err)
+		}
+	}
+}
+
+// OMP 18.17+ runs `omp zsh|bash|sh` as its own shell (cli.ts:472-473) and,
+// behind leading flags, hoists the word and strips our --extension
+// (cli-commands.ts:408-483). The wrapper runs them natively, byte for byte.
+func TestOMPInteractivePlanRunsNativeShellsDirectly(t *testing.T) {
+	for _, shell := range []string{"zsh", "bash", "sh"} {
+		for _, input := range [][]string{{shell}, {shell, "-c", "echo -g x"}, {"--model", "gpt", shell, "-l"}} {
+			plan, passthrough, err := InteractivePlan(argumentTestNative, input, []string{"KEEP=value"})
+			want := append([]string{argumentTestNative.EntryPath}, input...)
+			if err != nil || !passthrough || !reflect.DeepEqual(plan.Args, want) {
+				t.Fatalf("%v plan = %#v, %t, %v; want %#v", input, plan, passthrough, err, want)
+			}
+		}
+	}
+	// The managed form of such a prompt stays available through launch.
+	plan, passthrough, err := InteractivePlan(argumentTestNative, []string{"launch", "bash"}, nil)
+	if err != nil || passthrough || !reflect.DeepEqual(plan.Args, []string{argumentTestNative.EntryPath, "launch", "bash"}) {
+		t.Fatalf("launch bash plan = %#v, %t, %v", plan, passthrough, err)
+	}
+}
+
+// 18.18.5 string flags consume any successor, a flag-shaped one included
+// (flag-tables.ts:193-213, 403-418), so their value stays native data and
+// is never read as the wrapper's -g/-n.
+func TestOMPInteractivePlanKeepsNewStringFlagValues(t *testing.T) {
+	for _, flag := range []string{"--spinner-interval", "--max-fps", "--motion"} {
+		input := []string{flag, "-g", "a prompt"}
+		plan, passthrough, err := InteractivePlan(argumentTestNative, input, nil)
+		want := append([]string{argumentTestNative.EntryPath}, input...)
+		if err != nil || passthrough || !reflect.DeepEqual(plan.Args, want) {
+			t.Fatalf("%s plan = %#v, %t, %v; want %#v", flag, plan, passthrough, err, want)
+		}
+		if got := ompEnvironmentValue(plan.Env, host.GroupsEnv); got != "[]" {
+			t.Fatalf("%s value became wrapper groups %s", flag, got)
+		}
+	}
+}
+
 func TestOMPInteractivePlanRoutesEveryRegisteredNativeCommand(t *testing.T) {
 	for command := range ompCommands {
 		if command == "launch" {

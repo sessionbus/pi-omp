@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -45,6 +46,7 @@ type ompRunFixture struct {
 	registry *OwnerRegistry
 	native   *pifamily.Bridge
 	binding  OwnerBinding
+	owner    *ownerNativeFixture
 }
 
 func newOMPRunFixture(t *testing.T) *ompRunFixture {
@@ -75,7 +77,7 @@ func newOMPRunFixture(t *testing.T) *ompRunFixture {
 	rpc, peer := newNativeRPCTest(t, wrapper.observeNative, nativeRPCLimits{})
 	wrapper.owner = &NativeOwner{ctx: wrapper.ctx, rpc: rpc, registry: registry}
 	t.Cleanup(func() { wrapper.cancel(errNativeOwnerClosed) })
-	return &ompRunFixture{wrapper: wrapper, rpc: rpc, peer: peer, registry: registry, native: native, binding: binding}
+	return &ompRunFixture{wrapper: wrapper, rpc: rpc, peer: peer, registry: registry, native: native, binding: binding, owner: ownerFixture}
 }
 
 func attachHeldOMPRPC(t *testing.T, fixture *ompRunFixture) (*heldNativeRPCWriter, func()) {
@@ -149,6 +151,13 @@ func (fixture *ompRunFixture) preflight(t *testing.T, sequence uint64, token, pr
 	}
 }
 
+// promptResult writes OMP 18.11.0's report for our prompt
+// (rpc-prompt-results.ts:149-165), which now ends the owned Run.
+func (fixture *ompRunFixture) promptResult(t *testing.T, id, status string) {
+	t.Helper()
+	fixture.peer.write(t, `{"type":"prompt_result","id":`+mustOMPJSONText(t, id)+`,"agentInvoked":true,"status":"`+status+`","sessionSettled":true}`)
+}
+
 func mustOMPJSONText(t *testing.T, value string) string {
 	t.Helper()
 	body, err := json.Marshal(value)
@@ -160,11 +169,12 @@ func mustOMPJSONText(t *testing.T, value string) string {
 
 func TestOMPRunJoinsLatePreflightAndCurrentTerminalAssistant(t *testing.T) {
 	fixture := newOMPRunFixture(t)
-	_, started := fixture.prompt(t, "owned prompt", `{"agentInvoked":true}`)
+	id, started := fixture.prompt(t, "owned prompt", `{"agentInvoked":true}`)
 	fixture.peer.write(t, `{"type":"agent_start"}`)
 	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"native answer"}],"stopReason":"stop"}}`)
 	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
 	fixture.preflight(t, 1, "run-one", "owned prompt")
+	fixture.promptResult(t, id, "completed")
 	start := <-started
 	if start.err != nil || start.turn == nil {
 		t.Fatalf("start = %#v, %v", start.turn, start.err)
@@ -187,10 +197,11 @@ func TestOMPImmediateNoAgentIsFiniteWithoutBorrowedAssistant(t *testing.T) {
 		t.Fatalf("no-agent result = %+v, %v", result, err)
 	}
 	fixture.registry.mu.Lock()
-	preflights := len(fixture.registry.bindings[fixture.binding.OwnerToken].preflights)
+	state := fixture.registry.bindings[fixture.binding.OwnerToken]
+	window, consumed := state.preflightWindow, len(state.consumedPreflights)
 	fixture.registry.mu.Unlock()
-	if preflights != 0 {
-		t.Fatal("no-agent consumed a foreign preflight")
+	if window != nil || consumed != 0 {
+		t.Fatalf("no-agent left window %v and consumed %d preflights", window, consumed)
 	}
 }
 
@@ -317,9 +328,9 @@ func TestOMPRunRejectsForeignLeadingPreflight(t *testing.T) {
 	if nativeRPCField(t, command, "type") != "prompt" || string(command["message"]) != mustOMPJSONText(t, "owned prompt") {
 		t.Fatalf("prompt command = %#v", command)
 	}
-	// Hold the prompt response so both candidates arrive before waitPreflight
-	// retires the registry on the leading mismatch. A later report need not be
-	// admitted after that retirement.
+	// Both preflights fall in the Run's window, the foreign one first. Once
+	// OMP admits our prompt it was not busy with its own work, so the Run
+	// fails, as a turn failure that loses the lane.
 	fixture.preflight(t, 1, "foreign", "other prompt")
 	fixture.preflight(t, 2, "matching", "owned prompt")
 	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":true}`)
@@ -335,7 +346,7 @@ func TestOMPRunRejectsForeignLeadingPreflight(t *testing.T) {
 
 func TestOMPRunCancelsOwnedRuntimeUIAndJoinsWrite(t *testing.T) {
 	fixture := newOMPRunFixture(t)
-	_, started := fixture.prompt(t, "owned prompt", "")
+	id, started := fixture.prompt(t, "owned prompt", "")
 	fixture.preflight(t, 1, "run-one", "owned prompt")
 	fixture.peer.write(t, `{"type":"agent_start"}`)
 	start := <-started
@@ -358,6 +369,7 @@ func TestOMPRunCancelsOwnedRuntimeUIAndJoinsWrite(t *testing.T) {
 	}
 	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"","stopReason":"aborted"}}`)
 	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, id, "aborted")
 	result, err := start.turn.Wait(nativeRPCTestContext(t))
 	if err != nil || result.Outcome != "interrupted" || result.NativeStopReason != "aborted" {
 		t.Fatalf("UI-canceled result = %+v, %v", result, err)
@@ -367,7 +379,7 @@ func TestOMPRunCancelsOwnedRuntimeUIAndJoinsWrite(t *testing.T) {
 func TestOMPAdmittedInterruptJoinsAbortAndPreservesNextRun(t *testing.T) {
 	fixture := newOMPRunFixture(t)
 	run := &kit.Run{}
-	_, started := fixture.prompt(t, "first prompt", "")
+	firstID, started := fixture.prompt(t, "first prompt", "")
 	fixture.preflight(t, 1, "run-one", "first prompt")
 	fixture.peer.write(t, `{"type":"agent_start"}`)
 	first := <-started
@@ -390,6 +402,7 @@ func TestOMPAdmittedInterruptJoinsAbortAndPreservesNextRun(t *testing.T) {
 	}
 	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"","stopReason":"aborted"}}`)
 	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, firstID, "aborted")
 	result, err := first.turn.Wait(nativeRPCTestContext(t))
 	if err != nil || result.Outcome != "interrupted" || result.Result != "" || result.NativeStopReason != "aborted" {
 		t.Fatalf("interrupted result = %+v, %v", result, err)
@@ -398,7 +411,7 @@ func TestOMPAdmittedInterruptJoinsAbortAndPreservesNextRun(t *testing.T) {
 	fixture.wrapper.mu.Lock()
 	fixture.wrapper.run = nil
 	fixture.wrapper.mu.Unlock()
-	_, started = fixture.prompt(t, "second prompt", "")
+	secondID, started := fixture.prompt(t, "second prompt", "")
 	fixture.preflight(t, 2, "run-two", "second prompt")
 	fixture.peer.write(t, `{"type":"agent_start"}`)
 	second := <-started
@@ -407,6 +420,7 @@ func TestOMPAdmittedInterruptJoinsAbortAndPreservesNextRun(t *testing.T) {
 	}
 	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"healthy","stopReason":"stop"}}`)
 	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, secondID, "completed")
 	result, err = second.turn.Wait(nativeRPCTestContext(t))
 	if err != nil || result.Outcome != "completed" || result.Result != "healthy" {
 		t.Fatalf("post-interrupt result = %+v, %v", result, err)
@@ -536,17 +550,16 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 		}
 	}
 	request(3, "turn.interrupt", map[string]string{"session_id": fixture.binding.SessionID})
-	receiptSeen, readySeen, interruptSeen, workerEOF := false, false, false, false
+	// The written seed has no receipt: OMP may still run it. The Run ends
+	// interrupted and the lane stays. Before this change the receipt was a
+	// definite rejection and the Worker retired.
+	receiptSeen, readySeen, interruptSeen := false, false, false
 	for !receiptSeen || !readySeen || !interruptSeen {
 		if err = connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		frame, readErr := read()
 		if readErr != nil {
-			if receiptSeen && readySeen && errors.Is(readErr, io.EOF) {
-				workerEOF = true
-				break
-			}
 			t.Fatalf("Worker ended before receipt and terminal: %v", readErr)
 		}
 		switch {
@@ -565,11 +578,8 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 			write(ack)
 			readySeen = true
 		case frame.ID == 2:
-			var receipt kit.DeliveryReceipt
-			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
-				receipt.Disposition != "rejected" || receipt.Reason == "not_submitted" ||
-				!strings.Contains(receipt.Reason, errOMPRunInterrupted.Error()) {
-				t.Fatalf("submitted delivery receipt = %+v, decoded %+v", frame, receipt)
+			if frame.Error == nil || frame.Error.Code != protocol.Internal || string(frame.Error.Data) != `"uncertain_submission"` {
+				t.Fatalf("submitted delivery receipt = %+v", frame)
 			}
 			receiptSeen = true
 		case frame.ID == 3:
@@ -581,19 +591,7 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 			t.Fatalf("unexpected Worker frame = %+v", frame)
 		}
 	}
-	t.Logf("interrupt response observed before retirement: %v; EOF: %v", interruptSeen, workerEOF)
 	_ = connection.SetReadDeadline(time.Time{})
-	select {
-	case <-worker.Closed():
-	case <-deadline.Done():
-		t.Fatal("interrupted Worker did not retire")
-	}
-	serveErr := <-served
-	servedJoined = true
-	// The owned shutdown callback calls Worker.Shutdown, which now cancels Serve.
-	if !errors.Is(serveErr, context.Canceled) {
-		t.Fatalf("Worker Serve = %v", serveErr)
-	}
 	turn.mu.Lock()
 	submitted, preflight, starts := turn.submitted, turn.preflight, turn.starts
 	turn.mu.Unlock()
@@ -603,24 +601,91 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 	if queued := fixture.wrapper.handoff.Claim(); len(queued) != 0 {
 		t.Fatalf("submitted delivery became replayable: %#v", queued)
 	}
-	select {
-	case <-fixture.rpc.Done():
-	default:
-		t.Fatal("interrupted native RPC was not joined")
+
+	// OMP admitted the abandoned prompt, so it is aborted; its late run and
+	// prompt_result are OMP's answer to nobody.
+	abort := fixture.peer.read(t)
+	if nativeRPCField(t, abort, "type") != "abort" {
+		t.Fatalf("native command after the early stop = %#v", abort)
 	}
-	select {
-	case <-fixture.registry.Done():
-	default:
-		t.Fatal("interrupted owner registry was not joined")
+	if !fixture.rpc.AbandonedLive() {
+		t.Fatal("the stopped prompt was not abandoned")
 	}
-	select {
-	case <-fixture.native.Done():
-	default:
-		t.Fatal("interrupted native bridge endpoint was not joined")
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, nativeRPCField(t, abort, "id"))+`,"type":"response","command":"abort","success":true}`)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, promptID, "aborted")
+	for fixture.rpc.AbandonedLive() {
+		select {
+		case <-deadline.Done():
+			t.Fatal("abandoned prompt did not retire")
+		default:
+			runtime.Gosched()
+		}
 	}
-	waitNativeRPCStats(t, fixture.rpc, nativeRPCStats{})
-	if stats := fixture.native.Stats(); stats != (pifamily.BridgeStats{}) {
-		t.Fatalf("native bridge ownership after cleanup = %#v", stats)
+	fixture.wrapper.mu.Lock()
+	failure := fixture.wrapper.failure
+	fixture.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("the early stop failed the lane: %v", failure)
+	}
+
+	// The lane serves the next Run.
+	next := kit.DeliveryRequest{
+		RunID: "g/2", MessageID: "delivery-after-early-stop", Body: "next prompt",
+		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
+	}
+	request(4, "message.deliver", next)
+	command := fixture.peer.read(t)
+	nextID, nextPrompt := nativeRPCField(t, command, "id"), nativeRPCField(t, command, "message")
+	if nativeRPCField(t, command, "type") != "prompt" {
+		t.Fatalf("next native command = %#v", command)
+	}
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, nextID)+`,"type":"response","command":"prompt","success":true,"data":{"agentInvoked":true}}`)
+	fixture.preflight(t, 1, "run-after-early-stop", nextPrompt)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"after","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, nextID, "completed")
+	receiptSeen, readySeen = false, false
+	for !receiptSeen || !readySeen {
+		if err = connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		frame, readErr := read()
+		if readErr != nil {
+			t.Fatalf("Worker ended during the next Run: %v", readErr)
+		}
+		switch {
+		case frame.Method == "turn.ready":
+			var terminal struct {
+				State   string `json:"state"`
+				Outcome string `json:"outcome"`
+			}
+			if json.Unmarshal(frame.Params, &terminal) != nil || terminal.State != "done" || terminal.Outcome != "completed" {
+				t.Fatalf("next terminal = %s", frame.Params)
+			}
+			ack, encodeErr := protocol.ResultBytes(frame.ID, frame.Method, struct{}{})
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			write(ack)
+			readySeen = true
+		case frame.ID == 4:
+			var receipt kit.DeliveryReceipt
+			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "injected" {
+				t.Fatalf("next delivery receipt = %+v, decoded %+v", frame, receipt)
+			}
+			receiptSeen = true
+		default:
+			t.Fatalf("unexpected Worker frame = %+v", frame)
+		}
+	}
+	_ = connection.SetReadDeadline(time.Time{})
+	select {
+	case <-worker.Closed():
+		t.Fatal("the Worker retired after an early stop")
+	default:
 	}
 }
 
@@ -636,7 +701,7 @@ func TestOMPTerminalCancelsAndJoinsUnsettledUIBeforeResult(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newOMPRunFixture(t)
 			held, release := attachHeldOMPRPC(t, fixture)
-			_, started := fixture.prompt(t, "owned prompt", "")
+			id, started := fixture.prompt(t, "owned prompt", "")
 			fixture.preflight(t, 1, "run-one", "owned prompt")
 			fixture.peer.write(t, `{"type":"agent_start"}`)
 			start := <-started
@@ -670,10 +735,16 @@ func TestOMPTerminalCancelsAndJoinsUnsettledUIBeforeResult(t *testing.T) {
 			if err := start.turn.recordEvent("agent_end", json.RawMessage(`{"type":"agent_end","messages":[],"isTerminal":true}`)); err != nil {
 				t.Fatal(err)
 			}
+			if err := start.turn.recordEvent("prompt_result", json.RawMessage(`{"type":"prompt_result","id":`+mustOMPJSONText(t, id)+`,"agentInvoked":true,"status":"completed"}`)); err != nil {
+				t.Fatal(err)
+			}
 			if test.foreign {
-				retired := fixture.wrapper.observeNative(json.RawMessage(`{"type":"agent_start"}`))
+				// OMP's own work after our Run no longer retires the lane; a
+				// managed extension failure after the result still does.
+				managed := `{"type":"extension_error","extensionPath":` + mustOMPJSONText(t, fixture.wrapper.extension) + `,"event":"agent_end","error":"managed"}`
+				retired := fixture.wrapper.observeNative(json.RawMessage(managed))
 				if retired == nil {
-					t.Fatal("foreign post-terminal work was accepted")
+					t.Fatal("managed extension failure after the result was accepted")
 				}
 				fixture.rpc.stop(retired, false)
 				<-fixture.rpc.ctx.Done()
@@ -714,7 +785,10 @@ func TestOMPTerminalCancelsAndJoinsUnsettledUIBeforeResult(t *testing.T) {
 	}
 }
 
-func TestOMPManagedExtensionFailureAndPostTerminalWorkRetireRPC(t *testing.T) {
+// Was TestOMPManagedExtensionFailureAndPostTerminalWorkRetireRPC. Work after
+// our Run is now OMP's own (TestOMPRunEndsAtItsOwnPromptResultAndIgnoresOwnWork);
+// managed extension failures still retire the lane.
+func TestOMPManagedExtensionFailureRetiresRPC(t *testing.T) {
 	fixture := newOMPRunFixture(t)
 	ambient := `{"type":"extension_error","extensionPath":"/ambient.mjs","event":"agent_end","error":"ambient"}`
 	if err := fixture.wrapper.observeNative(json.RawMessage(ambient)); err != nil {
@@ -735,29 +809,31 @@ func TestOMPManagedExtensionFailureAndPostTerminalWorkRetireRPC(t *testing.T) {
 	}
 
 	second := newOMPRunFixture(t)
-	_, started := second.prompt(t, "owned prompt", "")
+	id, started := second.prompt(t, "owned prompt", "")
 	second.preflight(t, 1, "run-one", "owned prompt")
 	second.peer.write(t, `{"type":"agent_start"}`)
 	start := <-started
 	second.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"done","stopReason":"stop"}}`)
 	second.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
-	// A later foreign start retires future reuse without revoking the terminal
-	// which was already snapshotted under the event lock.
-	second.peer.write(t, `{"type":"agent_start"}`)
-	waitNativeRPCDone(t, second.rpc)
+	second.promptResult(t, id, "completed")
 	result, err := start.turn.Wait(nativeRPCTestContext(t))
 	if err != nil || result.Outcome != "completed" || result.Result != "done" {
-		t.Fatalf("cached terminal result = %+v, %v", result, err)
+		t.Fatalf("owned result = %+v, %v", result, err)
 	}
-	if second.rpc.Err() == nil || !strings.Contains(second.rpc.Err().Error(), "after the owned terminal") {
-		t.Fatalf("post-terminal RPC error = %v", second.rpc.Err())
+	// OMP's own work after the Run is ignored; a managed extension failure
+	// after it still retires the transport.
+	second.peer.write(t, `{"type":"agent_start"}`)
+	second.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	second.peer.write(t, managedAfter(t, second.wrapper.extension))
+	waitNativeRPCDone(t, second.rpc)
+	if second.rpc.Err() == nil || !strings.Contains(second.rpc.Err().Error(), "emitted extension_error outside an owned Run") {
+		t.Fatalf("post-result managed failure = %v", second.rpc.Err())
 	}
-	second.wrapper.mu.Lock()
-	lost := second.wrapper.failure
-	second.wrapper.mu.Unlock()
-	if lost == nil || !strings.Contains(lost.Error(), "after the owned terminal") {
-		t.Fatalf("post-terminal owner retirement = %v", lost)
-	}
+}
+
+func managedAfter(t *testing.T, extension string) string {
+	t.Helper()
+	return `{"type":"extension_error","extensionPath":` + mustOMPJSONText(t, extension) + `,"event":"agent_end","error":"managed after"}`
 }
 
 func TestOMPHeldCompletionWaitKeepsTerminalAcrossForeignRetirement(t *testing.T) {
@@ -765,7 +841,10 @@ func TestOMPHeldCompletionWaitKeepsTerminalAcrossForeignRetirement(t *testing.T)
 	wrapper.ctx, wrapper.cancel = context.WithCancelCause(context.Background())
 	t.Cleanup(func() { wrapper.cancel(errNativeOwnerClosed) })
 	turn := newOMPNativeTurn(wrapper, nil, "owned", OwnerBinding{})
-	turn.native = &nativePrompt{pending: &nativeRPCPending{lateReady: make(chan struct{})}}
+	turn.native = &nativePrompt{id: "omp:2", pending: &nativeRPCPending{lateReady: make(chan struct{})}}
+	if err := turn.recordPreflight("run-one", 0); err != nil {
+		t.Fatal(err)
+	}
 	held := &ompHeldDoneContext{Context: context.Background(), entered: make(chan struct{}), release: make(chan struct{})}
 	waited := make(chan error, 1)
 	go func() { waited <- turn.awaitCompletion(held) }()
@@ -779,9 +858,15 @@ func TestOMPHeldCompletionWaitKeepsTerminalAcrossForeignRetirement(t *testing.T)
 	if err := turn.recordEvent("agent_end", json.RawMessage(`{"type":"agent_end","isTerminal":true}`)); err != nil {
 		t.Fatal(err)
 	}
-	retired := turn.recordEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`))
+	if err := turn.recordEvent("prompt_result", json.RawMessage(`{"type":"prompt_result","id":"omp:2","agentInvoked":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := turn.recordEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+		t.Fatalf("OMP's own work after the result = %v", err)
+	}
+	retired := turn.recordEvent("extension_error", json.RawMessage(`{"type":"extension_error","event":"agent_end","error":"managed"}`))
 	if retired == nil {
-		t.Fatal("foreign post-terminal work was accepted")
+		t.Fatal("managed failure after the result was accepted")
 	}
 	wrapper.cancel(retired)
 	close(held.release)
@@ -801,11 +886,22 @@ func TestOMPAssistantDecoderRejectsUnknownStopAndUsesTextParts(t *testing.T) {
 	if _, _, err = decodeOMPAssistant(json.RawMessage(`{"type":"message_end","message":{"role":"assistant","content":"old","stopReason":"mystery"}}`)); err == nil {
 		t.Fatal("unknown stop reason accepted")
 	}
-	if _, err = decodeOMPTerminal(json.RawMessage(`{"type":"agent_end","messages":[],"messageCount":2}`)); err == nil {
+	if _, err = decodeOMPYield(json.RawMessage(`{"type":"agent_end","messages":[],"messageCount":2}`)); err == nil {
 		t.Fatal("elided agent_end was accepted without terminal authority")
 	}
-	if terminal, err := decodeOMPTerminal(json.RawMessage(`{"type":"agent_end","isTerminal":false}`)); err != nil || terminal {
-		t.Fatalf("nonterminal agent_end = %v, %v", terminal, err)
+	for body, want := range map[string]bool{
+		`{"type":"agent_end","isTerminal":false}`:                 false,
+		`{"type":"agent_end","isTerminal":true}`:                  true,
+		`{"type":"agent_end","isTerminal":false,"yielded":true}`:  true,
+		`{"type":"agent_end","isTerminal":true,"yielded":false}`:  false,
+		`{"type":"agent_end","isTerminal":false,"yielded":false}`: false,
+	} {
+		if yielded, err := decodeOMPYield(json.RawMessage(body)); err != nil || yielded != want {
+			t.Fatalf("agent_end %s = %v, %v", body, yielded, err)
+		}
+	}
+	if _, err = decodeOMPYield(json.RawMessage(`{"type":"agent_end","isTerminal":true,"yielded":"yes"}`)); err == nil {
+		t.Fatal("invalid yielded flag was accepted")
 	}
 	for name, body := range map[string]string{
 		"null content": `{"type":"message_end","message":{"role":"assistant","content":null,"stopReason":"stop"}}`,
@@ -817,4 +913,624 @@ func TestOMPAssistantDecoderRejectsUnknownStopAndUsesTextParts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (fixture *ompRunFixture) refuse(t *testing.T, id string) {
+	t.Helper()
+	// OMP 18.11.0's busy refusal: error, then success for the same id, then
+	// prompt_result agentInvoked:false (rpc-prompt-results.ts:286-296).
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":false,"error":"Agent is busy"}`)
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":true}`)
+	fixture.peer.write(t, `{"type":"prompt_result","id":`+mustOMPJSONText(t, id)+`,"agentInvoked":false,"status":"error","sessionSettled":false,"error":{"message":"Agent is busy","retryable":false}}`)
+}
+
+func (fixture *ompRunFixture) completeOwnedRun(t *testing.T, sequence uint64, prompt, answer string) {
+	t.Helper()
+	id, started := fixture.prompt(t, prompt, "")
+	fixture.preflight(t, sequence, fmt.Sprintf("run-%d", sequence), prompt)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":`+mustOMPJSONText(t, answer)+`,"stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+	fixture.promptResult(t, id, "completed")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	result, err := start.turn.Wait(nativeRPCTestContext(t))
+	if err != nil || result.Outcome != "completed" || result.Result != answer {
+		t.Fatalf("owned result = %+v, %v", result, err)
+	}
+}
+
+func (fixture *ompRunFixture) requireLane(t *testing.T) {
+	t.Helper()
+	fixture.wrapper.mu.Lock()
+	failure, active := fixture.wrapper.failure, fixture.wrapper.active
+	fixture.wrapper.mu.Unlock()
+	if failure != nil || active != nil || fixture.rpc.Err() != nil {
+		t.Fatalf("lane = failure %v, active %v, transport %v", failure, active, fixture.rpc.Err())
+	}
+}
+
+// A prompt OMP refuses while its own work runs ends only that prompt: the lane
+// and the transport stay, and the next Run is unaffected by the refused
+// prompt's trailing frames, the own work's events or its preflight. Before
+// this change the trailing success stopped the transport.
+func TestOMPRefusedPromptKeepsTheLaneForTheNextRun(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	started := fixture.start(t, "owned prompt")
+	id := nativeRPCField(t, fixture.peer.read(t), "id")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"own work","stopReason":"stop"}}`)
+	fixture.preflight(t, 1, "own-work", "own work prompt")
+	fixture.refuse(t, id)
+	start := <-started
+	var nativeErr *nativeRPCError
+	if start.turn != nil || !errors.As(start.err, &nativeErr) || nativeErr.Message != "Agent is busy" {
+		t.Fatalf("refused start = %#v, %v", start.turn, start.err)
+	}
+	// The own work ends after the refusal, with no Run open.
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+	fixture.requireLane(t)
+}
+
+// The Worker records a refused Run as unavailable with OMP's answer, reports
+// its seed delivery as not submitted, and keeps the lane for the next Run, as
+// for Pi's refusal.
+func TestOMPWorkerRefusedDeliveryIsNotSubmittedAndLaneStays(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	listener, err := net.Listen("unix", filepath.Join(testsocket.Directory(t), "bus.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(host.SocketEnv, listener.Addr().String())
+	t.Setenv(host.TokenEnv, "omp-refusal-worker-token")
+	t.Setenv(host.LocalKeyEnv, "")
+	worker := kit.NewWorker(&ompWorkerProduct{fixture.wrapper})
+	fixture.wrapper.SetCaller(worker.Caller())
+	served := make(chan error, 1)
+	go func() { served <- worker.Serve(context.Background()) }()
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = connection.Close()
+		_ = listener.Close()
+		worker.Shutdown()
+		<-worker.Closed()
+		<-served
+	})
+	reader := bufio.NewReader(connection)
+	read := func() protocol.Frame {
+		t.Helper()
+		if err := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		frame, decodeErr := protocol.DecodeFrame(line[:len(line)-1])
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		return frame
+	}
+	write := func(body []byte, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, writeErr := connection.Write(body); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	hello := read()
+	write(protocol.ResultBytes(hello.ID, hello.Method, struct{}{}))
+	write(protocol.RequestBytes(1, "session.open", kit.OpenRequest{Name: "managed@local", Groups: []string{}}))
+	if frame := read(); frame.ID != 1 || frame.Error != nil {
+		t.Fatalf("Open response = %+v", frame)
+	}
+	write(protocol.RequestBytes(2, "message.deliver", kit.DeliveryRequest{
+		RunID: "g/1", MessageID: "delivery-refused", Body: "refused delivery",
+		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
+	}))
+	id := nativeRPCField(t, fixture.peer.read(t), "id")
+	fixture.refuse(t, id)
+	receiptSeen, readySeen := false, false
+	for !receiptSeen || !readySeen {
+		frame := read()
+		// The Worker numbers its own requests independently: its turn.ready
+		// request can also carry ID 2, so only a response is the receipt.
+		switch {
+		case !frame.Request && frame.ID == 2:
+			var receipt kit.DeliveryReceipt
+			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+				receipt.Disposition != "rejected" || receipt.Reason != "not_submitted" {
+				t.Fatalf("refused delivery receipt = %+v, decoded %+v", frame, receipt)
+			}
+			receiptSeen = true
+		case frame.Request && frame.Method == "turn.ready":
+			var ready protocol.TurnReady
+			if json.Unmarshal(frame.Params, &ready) != nil || ready.State != "unavailable" || !strings.Contains(ready.Reason, "Agent is busy") {
+				t.Fatalf("refused terminal = %s", frame.Params)
+			}
+			write(protocol.ResultBytes(frame.ID, frame.Method, struct{}{}))
+			readySeen = true
+		default:
+			t.Fatalf("unexpected Worker frame = %+v", frame)
+		}
+	}
+	_ = connection.SetReadDeadline(time.Time{})
+	fixture.completeOwnedRun(t, 1, "next prompt", "next answer")
+	fixture.requireLane(t)
+}
+
+// Events and dialogs of OMP's own work with no Run open no longer end the
+// lane (owner decision 2026-10-15); the dialog is cancelled as for Pi. Before
+// this change both stopped the transport.
+func TestOMPOwnWorkOutsideARunKeepsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"own","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue"}`)
+	cancel := fixture.peer.read(t)
+	if nativeRPCField(t, cancel, "type") != "extension_ui_response" || nativeRPCField(t, cancel, "id") != "own-dialog" || string(cancel["cancelled"]) != "true" {
+		t.Fatalf("own-work dialog cancellation = %#v", cancel)
+	}
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.completeOwnedRun(t, 1, "owned prompt", "owned answer")
+	fixture.requireLane(t)
+}
+
+// Our Run ends at our own prompt_result and its result is cut at our run's
+// yielded agent_end. A non-yielded end is still ours. A run after the yield
+// is OMP's own: its events are ignored, its dialog is cancelled without the
+// Run, and neither ends the lane. Before this change the next agent_start or
+// the prompt_result retired the lane.
+func TestOMPRunEndsAtItsOwnPromptResultAndIgnoresOwnWork(t *testing.T) {
+	for name, yieldedEnd := range map[string]string{
+		"terminal":     `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`,
+		"pending wake": `{"type":"agent_end","messages":[],"isTerminal":false,"yielded":true,"awaitingAsyncWork":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			id, started := fixture.prompt(t, "owned prompt", "")
+			fixture.preflight(t, 1, "run-one", "owned prompt")
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			start := <-started
+			if start.err != nil || start.turn == nil {
+				t.Fatalf("start = %#v, %v", start.turn, start.err)
+			}
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"retrying","stopReason":"error"}}`)
+			fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":false,"yielded":false}`)
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+			fixture.peer.write(t, yieldedEnd)
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"own work","stopReason":"stop"}}`)
+			fixture.peer.write(t, `{"type":"extension_ui_request","id":"own-dialog","method":"input","title":"own"}`)
+			cancel := fixture.peer.read(t)
+			if nativeRPCField(t, cancel, "type") != "extension_ui_response" || nativeRPCField(t, cancel, "id") != "own-dialog" {
+				t.Fatalf("own-work dialog cancellation = %#v", cancel)
+			}
+			fixture.promptResult(t, id, "completed")
+			fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+			result, err := start.turn.Wait(nativeRPCTestContext(t))
+			if err != nil || result.Outcome != "completed" || result.Result != "owned answer" || result.NativeStopReason != "stop" {
+				t.Fatalf("owned result = %+v, %v", result, err)
+			}
+			start.turn.mu.Lock()
+			pendingUI, starts := start.turn.pendingUI, start.turn.starts
+			start.turn.mu.Unlock()
+			if pendingUI != 0 || starts != 2 {
+				t.Fatalf("owned turn joined %d dialogs and counted %d starts", pendingUI, starts)
+			}
+			fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+			fixture.requireLane(t)
+		})
+	}
+}
+
+// A preflight of OMP's own work between Runs is consumed when it arrives.
+// Before this change it waited in the queue and failed the next Run as a
+// registry protocol failure.
+func TestOMPOwnWorkPreflightBetweenRunsDoesNotReachTheNextRun(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	fixture.preflight(t, 1, "own-work", "own work prompt")
+	fixture.completeOwnedRun(t, 2, "owned prompt", "owned answer")
+	fixture.requireLane(t)
+	if err := fixture.registry.Err(); err != nil {
+		t.Fatalf("registry = %v", err)
+	}
+}
+
+// A preflight after ours in the same Run, for example the drain of a peer
+// message steered into it, is consumed without ending the Run or the next.
+func TestOMPPreflightAfterOursInTheRunIsConsumed(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.preflight(t, 1, "run-one", "owned prompt")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	fixture.preflight(t, 2, "steered-drain", "steered peer message")
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, id, "completed")
+	if result, err := start.turn.Wait(nativeRPCTestContext(t)); err != nil || result.Result != "owned answer" {
+		t.Fatalf("owned result = %+v, %v", result, err)
+	}
+	fixture.completeOwnedRun(t, 3, "next prompt", "next answer")
+	fixture.requireLane(t)
+}
+
+// OMP ran agent work for our prompt and reported it settled, but our own
+// preflight never came: the prompt it ran was rewritten or our preflight is
+// missing. The Run fails at our prompt_result. Before this change a rewritten
+// one failed the registry and a missing one waited until cancelled.
+func TestOMPRunFailsAtItsPromptResultWithoutItsOwnPreflight(t *testing.T) {
+	for name, test := range map[string]struct {
+		rewritten bool
+		want      string
+	}{
+		"rewritten": {rewritten: true, want: "(1 foreign preflights in the Run window)"},
+		"missing":   {want: "(0 foreign preflights in the Run window)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			id, started := fixture.prompt(t, "owned prompt", "")
+			if test.rewritten {
+				fixture.preflight(t, 1, "rewritten-run", "owned prompt, rewritten by an input handler")
+			}
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"answer","stopReason":"stop"}}`)
+			fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+			fixture.promptResult(t, id, "completed")
+			start := <-started
+			if start.err != nil || start.turn == nil {
+				t.Fatalf("start = %#v, %v", start.turn, start.err)
+			}
+			_, err := start.turn.Wait(nativeRPCTestContext(t))
+			if err == nil || !strings.Contains(err.Error(), "OMP owned preflight is missing or rewritten "+test.want) {
+				t.Fatalf("Run without its own preflight = %v", err)
+			}
+			if regErr := fixture.registry.Err(); regErr != nil {
+				t.Fatalf("registry = %v", regErr)
+			}
+		})
+	}
+}
+
+// waitOMPTurn waits until the turn has read the native frames a test wrote.
+func waitOMPTurn(t *testing.T, turn *ompNativeTurn, what string, ready func(*ompNativeTurn) bool) {
+	t.Helper()
+	ctx := nativeRPCTestContext(t)
+	for {
+		turn.mu.Lock()
+		done, changed := ready(turn), turn.changed
+		turn.mu.Unlock()
+		if done {
+			return
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatalf("OMP turn did not reach %s", what)
+		}
+	}
+}
+
+// activeTurn returns the turn startNativeTurn registered and binds it to a
+// public Run, as Run does for the Worker's Run. A zero Run cannot pass
+// through startNativeTurn, which marks its Run admitted.
+func (fixture *ompRunFixture) activeTurn(t *testing.T) (*ompNativeTurn, *kit.Run) {
+	t.Helper()
+	fixture.wrapper.mu.Lock()
+	defer fixture.wrapper.mu.Unlock()
+	turn := fixture.wrapper.active
+	if turn == nil {
+		t.Fatal("no active OMP turn")
+	}
+	run := &kit.Run{}
+	turn.run, fixture.wrapper.run = run, run
+	return turn, run
+}
+
+func (fixture *ompRunFixture) steers() []ownerSteerRequest {
+	fixture.owner.mu.Lock()
+	defer fixture.owner.mu.Unlock()
+	return append([]ownerSteerRequest(nil), fixture.owner.steers...)
+}
+
+func (fixture *ompRunFixture) answerSteers(answer func(ownerSteerRequest) (json.RawMessage, error)) {
+	fixture.owner.mu.Lock()
+	fixture.owner.steerAnswer = answer
+	fixture.owner.mu.Unlock()
+}
+
+func ompSteerDelivery(id string) kit.DeliveryRequest {
+	return kit.DeliveryRequest{MessageID: id, Body: "steered note",
+		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}}}
+}
+
+func requireOMPNotRunning(t *testing.T, receipt kit.DeliveryReceipt, err error, what string) {
+	t.Helper()
+	var notRunning *kit.ProtocolError
+	if !errors.As(err, &notRunning) || notRunning.Code != -32004 || receipt.Disposition != "" || receipt.Reason != "" {
+		t.Fatalf("%s = %+v, %v", what, receipt, err)
+	}
+}
+
+// A lane delivery is steered only while our Run is admitted and has not
+// yielded, with the token of the Run's own preflight, and is then answered
+// injected. Before our preflight and run start, for another Run, after our
+// run yielded, and when the extension finds OMP idle or another token
+// current, the lane is not running and nothing is steered. Before this change
+// every lane delivery was not running.
+func TestOMPLaneSteersOnlyItsAdmittedRunBeforeItsYield(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	ctx := nativeRPCTestContext(t)
+	receipt, err := fixture.wrapper.Deliver(ctx, ompSteerDelivery("no-run"), &kit.Run{})
+	requireOMPNotRunning(t, receipt, err, "delivery with no Run")
+	id, started := fixture.prompt(t, "owned prompt", "")
+	turn, run := fixture.activeTurn(t)
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("before-preflight"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery before our preflight")
+	fixture.preflight(t, 1, "run-one", "owned prompt")
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	start := <-started
+	if start.err != nil || start.turn != turn {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	if got := fixture.steers(); len(got) != 0 {
+		t.Fatalf("steers before admission = %+v", got)
+	}
+
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("steered"), run)
+	if err != nil || receipt.Disposition != "injected" || receipt.Reason != "" {
+		t.Fatalf("admitted delivery = %+v, %v", receipt, err)
+	}
+	steers := fixture.steers()
+	if len(steers) != 1 || steers[0].RunToken != "run-one" || steers[0].OwnerToken != fixture.binding.OwnerToken ||
+		steers[0].SessionID != fixture.binding.SessionID || steers[0].MessageID != "steered" || !strings.Contains(steers[0].Body, "steered note") {
+		t.Fatalf("steer = %+v", steers)
+	}
+
+	// The extension answers idle when OMP is idle at the call or the token
+	// is no longer its current run's.
+	fixture.answerSteers(func(request ownerSteerRequest) (json.RawMessage, error) {
+		accepted := false
+		return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted, Reason: "idle"})
+	})
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("idle"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery the extension found idle")
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("other-run"), &kit.Run{})
+	requireOMPNotRunning(t, receipt, err, "delivery for another Run")
+	if got := fixture.steers(); len(got) != 2 {
+		t.Fatalf("steers = %+v", got)
+	}
+	// At the delivery limits the extension answers queue_full: refused with
+	// that reason, not deferred as not running.
+	fixture.answerSteers(func(request ownerSteerRequest) (json.RawMessage, error) {
+		accepted := false
+		return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+			MessageID: request.MessageID, Accepted: &accepted, Reason: "queue_full"})
+	})
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("full"), run)
+	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
+		t.Fatalf("delivery at the steer limit = %+v, %v", receipt, err)
+	}
+
+	fixture.answerSteers(nil)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+	waitOMPTurn(t, turn, "its yield", func(turn *ompNativeTurn) bool { return turn.yielded })
+	receipt, err = fixture.wrapper.Deliver(ctx, ompSteerDelivery("after-yield"), run)
+	requireOMPNotRunning(t, receipt, err, "delivery after our run yielded")
+	if got := fixture.steers(); len(got) != 3 {
+		t.Fatalf("steer after the yield = %+v", got)
+	}
+	fixture.promptResult(t, id, "completed")
+	result, err := turn.Wait(ctx)
+	if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+		t.Fatalf("owned result = %+v, %v", result, err)
+	}
+	fixture.requireLane(t)
+	if err = fixture.registry.Err(); err != nil {
+		t.Fatalf("registry = %v", err)
+	}
+}
+
+// A failed or invalid steer answer leaves the native outcome uncertain: the
+// delivery fails with that reason, is not retried, and neither the Run nor
+// the lane ends. Unlike native.stage, no FIFO order was reserved.
+func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
+	for name, test := range map[string]struct {
+		answer    func(ownerSteerRequest) (json.RawMessage, error)
+		uncertain bool
+	}{
+		// The extension refuses a stale owner before its send: a definite
+		// refusal, reported as an error so the sender gets rejected.
+		"refused before the send": {answer: func(ownerSteerRequest) (json.RawMessage, error) {
+			return nil, pifamily.NewBridgeCallError("stale_owner", "native steer refused")
+		}},
+		// A handler failure may follow the send.
+		"handler error": {uncertain: true, answer: func(ownerSteerRequest) (json.RawMessage, error) {
+			return nil, errors.New("native steer failed")
+		}},
+		"invalid answer": {uncertain: true, answer: func(request ownerSteerRequest) (json.RawMessage, error) {
+			accepted := false
+			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+				MessageID: request.MessageID, Accepted: &accepted, Reason: "busy"})
+		}},
+		"changed identity": {uncertain: true, answer: func(request ownerSteerRequest) (json.RawMessage, error) {
+			accepted := true
+			return json.Marshal(ownerSteerResult{OwnerToken: request.OwnerToken, SessionID: request.SessionID,
+				MessageID: "another", Accepted: &accepted})
+		}},
+	} {
+		answer := test.answer
+		t.Run(name, func(t *testing.T) {
+			fixture := newOMPRunFixture(t)
+			ctx := nativeRPCTestContext(t)
+			id, started := fixture.prompt(t, "owned prompt", "")
+			turn, run := fixture.activeTurn(t)
+			fixture.preflight(t, 1, "run-one", "owned prompt")
+			fixture.peer.write(t, `{"type":"agent_start"}`)
+			if start := <-started; start.err != nil || start.turn != turn {
+				t.Fatalf("start = %#v, %v", start.turn, start.err)
+			}
+			fixture.answerSteers(answer)
+			receipt, err := fixture.wrapper.Deliver(ctx, ompSteerDelivery("uncertain"), run)
+			var protocolErr *kit.ProtocolError
+			isInternal := errors.As(err, &protocolErr) && protocolErr.Code == protocol.Internal && string(protocolErr.Data) == `"uncertain_submission"`
+			if err == nil || receipt.Disposition != "" || isInternal != test.uncertain ||
+				!test.uncertain && !strings.Contains(err.Error(), "OMP native steer was refused before it was sent") {
+				t.Fatalf("failed steer = %+v, %v (want uncertain %v)", receipt, err, test.uncertain)
+			}
+			if got := fixture.steers(); len(got) != 1 {
+				t.Fatalf("steers = %+v", got)
+			}
+			fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+			fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+			fixture.promptResult(t, id, "completed")
+			result, err := turn.Wait(ctx)
+			if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+				t.Fatalf("owned result = %+v, %v", result, err)
+			}
+			fixture.requireLane(t)
+			if err = fixture.registry.Err(); err != nil {
+				t.Fatalf("registry = %v", err)
+			}
+			fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+			if got := fixture.steers(); len(got) != 1 {
+				t.Fatalf("steer was retried: %+v", got)
+			}
+		})
+	}
+}
+
+// When OMP's own dialog cannot be cancelled because the native write queue is
+// full, the lane ends with that error instead of staying connected while the
+// dialog blocks OMP's own work and every later Run. Before this change the
+// error was discarded and the lane stayed, unusable.
+func TestOMPOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	fixture.rpc.mu.Lock()
+	saved := fixture.rpc.pendingWrites
+	fixture.rpc.pendingWrites = fixture.rpc.limits.maxPendingWrites
+	fixture.rpc.mu.Unlock()
+	defer func() {
+		fixture.rpc.mu.Lock()
+		fixture.rpc.pendingWrites = saved
+		fixture.rpc.mu.Unlock()
+	}()
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue"}`)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		fixture.wrapper.mu.Lock()
+		failure := fixture.wrapper.failure
+		fixture.wrapper.mu.Unlock()
+		if failure != nil {
+			if !errors.Is(failure, errNativeRPCBusy) {
+				t.Fatalf("lane failure = %v", failure)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an own-work dialog that could not be cancelled left the lane connected")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Close sets closing and ends native input before it cancels the wrapper
+// context, so an own-work dialog cancellation already under way can meet the
+// RPC's closed error while the context is live. That is the orderly end, not
+// a loss: Close would join it and fail a clean close. A busy writer while
+// closing, and a closed RPC while the lane is not closing, are still losses.
+func TestOMPOwnWorkDialogCancelDuringOrderlyCloseIsNoLoss(t *testing.T) {
+	failure := func(fixture *ompRunFixture) error {
+		fixture.wrapper.mu.Lock()
+		defer fixture.wrapper.mu.Unlock()
+		return fixture.wrapper.failure
+	}
+	closing := func(fixture *ompRunFixture) {
+		fixture.wrapper.mu.Lock()
+		fixture.wrapper.closing = true
+		fixture.wrapper.mu.Unlock()
+	}
+	t.Run("orderly close", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		closing(fixture)
+		if err := fixture.rpc.EndInput(nativeRPCTestContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); err != nil {
+			t.Fatalf("an orderly close recorded a loss: %v", err)
+		}
+	})
+	t.Run("busy while closing", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		closing(fixture)
+		fixture.rpc.mu.Lock()
+		saved := fixture.rpc.pendingWrites
+		fixture.rpc.pendingWrites = fixture.rpc.limits.maxPendingWrites
+		fixture.rpc.mu.Unlock()
+		defer func() {
+			fixture.rpc.mu.Lock()
+			fixture.rpc.pendingWrites = saved
+			fixture.rpc.mu.Unlock()
+		}()
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); !errors.Is(err, errNativeRPCBusy) {
+			t.Fatalf("busy cancellation while closing = %v", err)
+		}
+	})
+	t.Run("closed while live", func(t *testing.T) {
+		fixture := newOMPRunFixture(t)
+		if err := fixture.rpc.EndInput(nativeRPCTestContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		fixture.wrapper.cancelOwnWorkUI(fixture.wrapper.ctx, fixture.rpc, "own-dialog")
+		if err := failure(fixture); !errors.Is(err, errNativeRPCClosed) {
+			t.Fatalf("closed cancellation on a live lane = %v", err)
+		}
+	})
+}
+
+// OMP's prompt_result travels stdout and our run.preflight travels the
+// bridge, so the result can arrive first. The owner waits once for the
+// extension's earlier reports, finds the preflight and completes the Run; the
+// lane stays. Before this change the Run failed as a missing preflight and
+// the lane ended.
+func TestOMPPromptResultBeforeOurQueuedPreflightCompletesTheRun(t *testing.T) {
+	fixture := newOMPRunFixture(t)
+	id, started := fixture.prompt(t, "owned prompt", "")
+	fixture.owner.mu.Lock()
+	fixture.owner.reportsDrained = func() { fixture.preflight(t, 1, "run-1", "owned prompt") }
+	fixture.owner.mu.Unlock()
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"owned answer","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true,"yielded":true}`)
+	fixture.promptResult(t, id, "completed")
+	start := <-started
+	if start.err != nil || start.turn == nil {
+		t.Fatalf("start = %#v, %v", start.turn, start.err)
+	}
+	result, err := start.turn.Wait(nativeRPCTestContext(t))
+	if err != nil || result.Outcome != "completed" || result.Result != "owned answer" {
+		t.Fatalf("Run with a late preflight = %+v, %v", result, err)
+	}
+	fixture.requireLane(t)
+	fixture.completeOwnedRun(t, 2, "next prompt", "next answer")
+	fixture.requireLane(t)
 }

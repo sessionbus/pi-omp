@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendNative, describeNative } from "./native.mjs";
+import { appendNative, describeNative, historyNative } from "./native.mjs";
 
 // Pi d981de1 sets the native active bit synchronously, but persists the custom
 // entry later on message_end. Keep the leaf stale here to pin that distinction.
@@ -45,9 +45,12 @@ test("busy context retains wrapper ownership and makes no native submission", ()
   assert.equal(f.sends(), 0);
 });
 
-test("void API return without native ownership is a definite pre-submission failure", () => {
+// Pi 1.2.0 leaves the session idle after a triggerTurn send only when it
+// defers the send during settled dispatch (agent-session.js:1836-1838); the
+// send then runs after the settled handlers, so it is accepted.
+test("a send that Pi leaves idle is deferred by Pi and accepted", () => {
   const f = fixture({ starts: false });
-  assert.throws(() => appendNative(f.pi, f.ctx, delivery), /did not start/);
+  assert.deepEqual(appendNative(f.pi, f.ctx, delivery), { accepted: true });
   assert.equal(f.sends(), 1);
 });
 
@@ -70,4 +73,19 @@ test("delivery identity and body bounds reject before native submission", () => 
   }
   const f = fixture();
   assert.deepEqual(appendNative(f.pi, f.ctx, { ...delivery, message_id: "opaque message id" }), { accepted: true });
+});
+
+// DEF-04: a history write is a plain send with no options, which an idle Pi
+// appends to history with no turn (Pi 1.2.0 agent-session.js:1848-1857).
+test("history write is a plain send for the same native session", () => {
+  const sends = [];
+  const f = fixture();
+  f.pi.sendMessage = (message, options) => { sends.push({ message, options }); };
+  historyNative(f.pi, f.ctx, delivery);
+  assert.deepEqual(sends, [{
+    message: { customType: "sessionbus.message", content: delivery.body, display: true, details: { message_id: "message-1" } },
+    options: undefined,
+  }]);
+  assert.throws(() => historyNative(f.pi, f.ctx, { ...delivery, session_id: "other" }), /different native session/);
+  assert.equal(sends.length, 1);
 });

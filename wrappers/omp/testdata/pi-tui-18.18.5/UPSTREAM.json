@@ -1,0 +1,30 @@
+{
+  "package": "@oh-my-pi/pi-tui",
+  "version": "18.18.5",
+  "registryShasum": "1dce0da4cc1508c3bd010310ba62810c6ca157f9",
+  "verbatim": {
+    "prompt/markdown-prose.ts": "4f58f9060bbd5d11d114c4f369064d765570c482d09246590503ee7ec93e3c30",
+    "prompt/magic-keywords.ts": "2996db8c98fa3f4f00fff5281fb1240047d87b1fd26e026d2c7b436c26675b91",
+    "LICENSE": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63"
+  },
+  "stubs": {
+    "render/render-utils.ts": {
+      "upstream": "src/render/render-utils.ts",
+      "upstreamSha256": "a798535eab79ccd58dad317c7eed82b02bdd7c61ba052f89e8c7a05a14648077",
+      "line": 124
+    },
+    "prompt/gradient-highlight.ts": {
+      "upstream": "src/prompt/gradient-highlight.ts",
+      "upstreamSha256": "2e120c295771888d0c2e0ae4d3c50c63a9ba19e7078f18673475dfac306f3bd8",
+      "note": "highlighting only, not used by containsMagicKeyword"
+    }
+  },
+  "words": [
+    "ultrathink",
+    "chillax",
+    "orchestrate",
+    "workflowz",
+    "jevify"
+  ],
+  "wordsSource": "@oh-my-pi/pi-coding-agent 18.18.5 src/modes/magic-keywords.ts:91-142"
+}

@@ -20,7 +20,6 @@ import (
 
 	kit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/bus/sdk/go/protocol"
-	"github.com/sessionbus/peer-common/host"
 	"github.com/sessionbus/pi-omp/wrappers/pifamily"
 )
 
@@ -35,13 +34,34 @@ const (
 	ownerModeTUI             = "tui"
 	ownerModePrint           = "print"
 
-	maxOwnerBindings      = 256
+	maxOwnerBindings      = 64
 	maxOwnerWork          = 256
 	maxOwnerTrackedItems  = 256
 	maxOwnerTextBytes     = 1 << 20
 	maxOwnerRetainedBytes = 32 << 20
+	maxOwnerIDBytes       = 256
+	maxOwnerNameBytes     = 4096
+	maxOwnerCWDBytes      = 32 << 10
+	ownerMaxReportBytes   = 1 << 20
 	ownerPublicRetryDelay = 2 * time.Second
+
+	// ownerInternalReserve is the part of maxOwnerRetainedBytes that peer
+	// deliveries never use: all the registry itself can retain at its
+	// validation bounds. Per binding, its fields and three token histories
+	// (live batches, completed batches, consumed preflights); globally the
+	// retired owner tokens and one report frame. A factory's reports apply in
+	// order under registry.mu, so a report's raw is released before its tokens
+	// are reserved, and admission and removal share one acquire gate.
+	ownerMaxBindingBytes = 2*maxOwnerIDBytes + maxOwnerNameBytes + maxOwnerCWDBytes + len(ownerScopePrimary) + len(ownerModePrint)
+	ownerInternalReserve = maxOwnerBindings*(ownerMaxBindingBytes+3*maxOwnerTrackedItems*maxOwnerIDBytes) +
+		maxOwnerTrackedItems*maxOwnerIDBytes + ownerMaxReportBytes
+	maxOwnerPeerRetainedBytes = maxOwnerRetainedBytes - ownerInternalReserve
 )
+
+// errOwnerCapacity is our own binding cap refusing one Task child. Unlike any
+// other admission failure it leaves the registry running: the extension
+// detaches that child, which runs on natively without Sessionbus.
+var errOwnerCapacity = errors.New("OMP owner binding capacity is exhausted")
 
 type OwnerRegistryOptions struct {
 	Topology      string
@@ -77,8 +97,7 @@ type ownerRegistryState struct {
 	batches              map[string]*ownerDeliveryBatch
 	completed            []string
 	completedSet         map[string]struct{}
-	preflights           map[string]string
-	preflightOrder       []string
+	preflightWindow      *ownerPreflightWindow
 	preflightChanged     chan struct{}
 	consumedPreflights   []string
 	consumedPreflightSet map[string]struct{}
@@ -223,6 +242,41 @@ type ownerStageResult struct {
 	MessageID  string `json:"message_id"`
 	Queued     *bool  `json:"queued"`
 	Reason     string `json:"reason,omitempty"`
+	// Busy stays raw so that an absent member and JSON null differ: a
+	// pointer would decode both to nil.
+	Busy json.RawMessage `json:"busy,omitempty"`
+}
+
+// ownerStageBusy reads a stage answer's busy member. It is either absent or
+// exactly true or false; JSON null or any other value is invalid, as the
+// member was as an unknown field before it existed.
+func ownerStageBusy(raw json.RawMessage) (present, busy, valid bool) {
+	if raw == nil {
+		return false, false, true
+	}
+	switch string(bytes.TrimSpace(raw)) {
+	case "true":
+		return true, true, true
+	case "false":
+		return true, false, true
+	}
+	return true, false, false
+}
+
+type ownerSteerRequest struct {
+	OwnerToken string `json:"owner_token"`
+	SessionID  string `json:"session_id"`
+	MessageID  string `json:"message_id"`
+	Body       string `json:"body"`
+	RunToken   string `json:"run_token"`
+}
+
+type ownerSteerResult struct {
+	OwnerToken string `json:"owner_token"`
+	SessionID  string `json:"session_id"`
+	MessageID  string `json:"message_id"`
+	Accepted   *bool  `json:"accepted"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type ownerShutdownResult struct {
@@ -259,7 +313,7 @@ func NewOwnerRegistry(ctx context.Context, options OwnerRegistryOptions) (*Owner
 		!validOwnerText(options.Socket, 32<<10) || !validOwnerText(options.Directory, 32<<10) {
 		return nil, errors.New("OMP owner registry paths must be absolute")
 	}
-	if !validOwnerText(options.InitialName, 4096) {
+	if !validOwnerText(options.InitialName, maxOwnerNameBytes) {
 		return nil, errors.New("OMP owner registry initial name is invalid")
 	}
 	if (options.Topology == ownerTopologyLane) != (options.PrimaryCaller != nil) {
@@ -417,7 +471,7 @@ func (registry *OwnerRegistry) ownerReady(ctx context.Context, raw json.RawMessa
 	var request ownerReadyRequest
 	if err := decodeOwnerJSON(raw, &request); err != nil || !registry.validClassification(request.Topology, request.Scope, request.Mode) ||
 		request.Directory != registry.directory || !validOwnerToken(request.OwnerToken) || !validOwnerID(request.SessionID) ||
-		!validOwnerText(request.Name, 4096) {
+		!validOwnerText(request.Name, maxOwnerNameBytes) {
 		return nil, registry.protocolFailure("invalid OMP owner.ready", err)
 	}
 	if err := registry.acquire(ctx); err != nil {
@@ -429,6 +483,9 @@ func (registry *OwnerRegistry) ownerReady(ctx context.Context, raw json.RawMessa
 		return nil, registry.protocolFailure("OMP native description failed", err)
 	}
 	if err = registry.admit(ctx, request.Scope, request.Mode, description); err != nil {
+		if errors.Is(err, errOwnerCapacity) {
+			return nil, pifamily.NewBridgeCallError("owner_capacity", "OMP owner admission failed")
+		}
 		return nil, registry.protocolFailure("OMP owner admission failed", err)
 	}
 	return map[string]string{"owner_token": request.OwnerToken, "session_id": request.SessionID}, nil
@@ -439,7 +496,7 @@ func (registry *OwnerRegistry) ownerSwitch(ctx context.Context, raw json.RawMess
 	if err := decodeOwnerJSON(raw, &request); err != nil || !registry.validClassification(request.Topology, request.Scope, request.Mode) ||
 		request.Scope != ownerScopePrimary || !validOwnerToken(request.PreviousOwnerToken) || !validOwnerToken(request.OwnerToken) ||
 		request.PreviousOwnerToken == request.OwnerToken || !validOwnerID(request.PreviousSessionID) || !validOwnerID(request.SessionID) ||
-		!validOwnerText(request.Name, 4096) || !validOwnerText(request.Reason, 256) || request.Reason == "" {
+		!validOwnerText(request.Name, maxOwnerNameBytes) || !validOwnerText(request.Reason, 256) || request.Reason == "" {
 		return nil, registry.protocolFailure("invalid OMP owner.switch", err)
 	}
 	if registry.topology == ownerTopologyLane {
@@ -596,15 +653,23 @@ func (registry *OwnerRegistry) applyReportLocked(state *ownerRegistryState, repo
 	}
 	if report.preflight != nil {
 		request := report.preflight
-		_, consumed := state.consumedPreflightSet[request.RunToken]
-		if _, duplicate := state.preflights[request.RunToken]; duplicate || consumed || len(state.preflights) >= maxOwnerTrackedItems {
+		if _, consumed := state.consumedPreflightSet[request.RunToken]; consumed {
 			return registry.protocolFailureLocked("OMP preflight capacity or identity is invalid")
 		}
-		if err := registry.reserveStateLocked(state, len(request.RunToken)+len(request.Prompt)); err != nil {
+		if err := registry.reserveStateLocked(state, len(request.RunToken)); err != nil {
 			return err
 		}
-		state.preflights[request.RunToken] = request.Prompt
-		state.preflightOrder = append(state.preflightOrder, request.RunToken)
+		// Every preflight is consumed when it arrives, so none can wait for a
+		// later Run. Inside an open window the first one with our prompt is
+		// ours; one before it is recorded as foreign, not dropped.
+		if window := state.preflightWindow; window != nil && window.runToken == "" {
+			if request.Prompt == window.prompt {
+				window.runToken = request.RunToken
+			} else {
+				window.foreign++
+			}
+		}
+		registry.recordConsumedPreflightLocked(state, request.RunToken)
 		registry.signalPreflightLocked(state)
 		return nil
 	}
@@ -633,6 +698,13 @@ func (registry *OwnerRegistry) applyReportLocked(state *ownerRegistryState, repo
 	} else if !slices.Equal(request.MessageIDs, batch.messageIDs) {
 		return registry.protocolFailureLocked("OMP delivery observation changed batch identity")
 	}
+	if phase == deliveryPhaseAbandoned {
+		// The extension ended a claimed batch whose native events no longer
+		// matched what it sent. The attempt is retired with its consumption
+		// unknown: its receipt stands and it is not replayed.
+		registry.retireDeliveryBatchLocked(state, request.BatchToken, batch)
+		return nil
+	}
 	if phase != batch.phase+1 {
 		return registry.protocolFailureLocked("OMP delivery observation phase is out of order")
 	}
@@ -640,19 +712,25 @@ func (registry *OwnerRegistry) applyReportLocked(state *ownerRegistryState, repo
 	// were read in order. report_sequence reconstructs that per-factory order.
 	batch.phase = phase
 	if phase == 4 {
-		for _, messageID := range batch.messageIDs {
-			registry.releaseStateLocked(state, len(messageID))
-		}
-		delete(state.batches, request.BatchToken)
-		state.completed = append(state.completed, request.BatchToken)
-		state.completedSet[request.BatchToken] = struct{}{}
-		if len(state.completed) > maxOwnerTrackedItems {
-			registry.releaseStateLocked(state, len(state.completed[0]))
-			delete(state.completedSet, state.completed[0])
-			state.completed = state.completed[1:]
-		}
+		registry.retireDeliveryBatchLocked(state, request.BatchToken, batch)
 	}
 	return nil
+}
+
+// retireDeliveryBatchLocked stops tracking a completed or abandoned batch.
+// Its token stays recorded, within the bound, so it cannot be claimed again.
+func (registry *OwnerRegistry) retireDeliveryBatchLocked(state *ownerRegistryState, token string, batch *ownerDeliveryBatch) {
+	for _, messageID := range batch.messageIDs {
+		registry.releaseStateLocked(state, len(messageID))
+	}
+	delete(state.batches, token)
+	state.completed = append(state.completed, token)
+	state.completedSet[token] = struct{}{}
+	if len(state.completed) > maxOwnerTrackedItems {
+		registry.releaseStateLocked(state, len(state.completed[0]))
+		delete(state.completedSet, state.completed[0])
+		state.completed = state.completed[1:]
+	}
 }
 
 func (registry *OwnerRegistry) admit(ctx context.Context, scope, mode string, description ownerDescribeResult) error {
@@ -665,7 +743,7 @@ func (registry *OwnerRegistry) admit(ctx context.Context, scope, mode string, de
 			Name: description.Name, CWD: description.CWD, Scope: scope, Mode: mode,
 		},
 		stageGate: make(chan struct{}, 1), batches: make(map[string]*ownerDeliveryBatch),
-		completedSet: make(map[string]struct{}), preflights: make(map[string]string),
+		completedSet:         make(map[string]struct{}),
 		preflightChanged:     make(chan struct{}),
 		consumedPreflightSet: make(map[string]struct{}), reports: make(map[uint64]ownerReport),
 	}
@@ -678,7 +756,20 @@ func (registry *OwnerRegistry) admit(ctx context.Context, scope, mode string, de
 		registry.mu.Unlock()
 		return err
 	}
-	if _, retired := registry.retiredTokens[state.OwnerToken]; retired || registry.bindings[state.OwnerToken] != nil || len(registry.bindings) >= maxOwnerBindings {
+	if _, retired := registry.retiredTokens[state.OwnerToken]; retired || registry.bindings[state.OwnerToken] != nil {
+		registry.mu.Unlock()
+		return errors.New("OMP owner token is duplicate or capacity is exhausted")
+	}
+	children := len(registry.bindings)
+	if registry.primaryToken != "" {
+		children--
+	}
+	// The primary's slot is always kept, so only a child meets the cap.
+	if scope == ownerScopeChild && children >= maxOwnerBindings-1 {
+		registry.mu.Unlock()
+		return errOwnerCapacity
+	}
+	if len(registry.bindings) >= maxOwnerBindings {
 		registry.mu.Unlock()
 		return errors.New("OMP owner token is duplicate or capacity is exhausted")
 	}
@@ -919,6 +1010,19 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 			responseErr = errors.New("invalid OMP delivery parameters")
 		} else {
 			retained := ownerPublicDeliveryRetainedBytes(*delivery)
+			if retained >= 0 && registry.retainedBytes > maxOwnerPeerRetainedBytes-retained {
+				// A delivery over the peer share of the retained-byte budget
+				// is refused alone; the internal reserve stays free for the
+				// registry's own reservations, which would fail the owner.
+				registry.mu.Unlock()
+				if err := attempt.conn.Result(request, kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}); err != nil {
+					_ = attempt.conn.Close()
+					if ctx.Err() == nil {
+						registry.fail(err)
+					}
+				}
+				return
+			}
 			if err := registry.reserveStateLocked(state, retained); err != nil {
 				registry.mu.Unlock()
 				responseErr = err
@@ -930,9 +1034,16 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 					registry.mu.Unlock()
 					return
 				default:
+					// A full delivery queue refuses only this delivery.
 					registry.releaseStateLocked(state, retained)
 					registry.mu.Unlock()
-					responseErr = errors.New("OMP public delivery capacity exhausted")
+					if err := attempt.conn.Result(request, kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}); err != nil {
+						_ = attempt.conn.Close()
+						if ctx.Err() == nil {
+							registry.fail(err)
+						}
+					}
+					return
 				}
 			}
 		}
@@ -976,7 +1087,12 @@ func (registry *OwnerRegistry) deliveryLoop(state *ownerRegistryState, attempt *
 		case work := <-attempt.deliveries:
 			receipt, err := registry.deliver(work.ctx, state, work.value)
 			var responseErr error
-			if err != nil {
+			var refusal *ownerDeliveryRefusal
+			if errors.As(err, &refusal) {
+				// Nothing reached OMP: only this delivery is refused, with its
+				// reason, and the owner keeps serving.
+				responseErr = work.conn.Result(work.request, kit.DeliveryReceipt{Disposition: "rejected", Reason: refusal.reason})
+			} else if err != nil {
 				responseErr = work.conn.Error(work.request, -32603, "OMP native delivery failed; no replay")
 				if work.ctx.Err() == nil {
 					registry.fail(err)
@@ -1000,18 +1116,24 @@ func (registry *OwnerRegistry) releasePublicDelivery(state *ownerRegistryState, 
 	registry.releaseStateLocked(state, size)
 }
 
+// ownerDeliveryRefusal is a staged delivery refused before anything is sent
+// to OMP or recorded for it.
+type ownerDeliveryRefusal struct{ reason string }
+
+func (refusal *ownerDeliveryRefusal) Error() string { return refusal.reason }
+
 func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistryState, request kit.DeliveryRequest) (kit.DeliveryReceipt, error) {
-	body, err := host.RenderNativeMessage(request)
+	body, err := ompRenderPeerMessage(request)
 	if err != nil {
-		return kit.DeliveryReceipt{}, err
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: err.Error()}
 	}
 	if !validOwnerMessageID(request.MessageID) || !validOwnerText(body, maxOwnerTextBytes) {
-		return kit.DeliveryReceipt{}, errors.New("invalid OMP native staged delivery")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "invalid OMP native staged delivery"}
 	}
 	params := ownerStageRequest{OwnerToken: state.OwnerToken, SessionID: state.SessionID, MessageID: request.MessageID, Body: body}
 	encoded, err := json.Marshal(params)
 	if err != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
-		return kit.DeliveryReceipt{}, errors.New("OMP native staged delivery exceeds the private bridge frame")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "OMP native staged delivery exceeds the private bridge frame"}
 	}
 	select {
 	case <-ctx.Done():
@@ -1038,9 +1160,17 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		registry.mu.Unlock()
 		return kit.DeliveryReceipt{}, errors.New("OMP staged delivery does not own the current binding")
 	}
-	if len(state.staged) >= maxOwnerTrackedItems || ownerMessageTracked(state, request.MessageID) {
+	if ownerMessageTracked(state, request.MessageID) {
+		// The same delivery is still tracked: refuse this copy, replay nothing.
 		registry.mu.Unlock()
-		return kit.DeliveryReceipt{}, errors.New("OMP staged delivery capacity or identity is invalid")
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "OMP staged delivery capacity or identity is invalid"}
+	}
+	if len(state.staged) >= maxOwnerTrackedItems || registry.retainedBytes > maxOwnerPeerRetainedBytes-len(request.MessageID) {
+		// A full staged queue or peer share of the retained-byte budget
+		// refuses only this delivery, before reserveStateLocked would fail
+		// the owner.
+		registry.mu.Unlock()
+		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "queue_full"}
 	}
 	if err := registry.reserveStateLocked(state, len(request.MessageID)); err != nil {
 		registry.mu.Unlock()
@@ -1055,9 +1185,17 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		registry.fail(fmt.Errorf("OMP native stage outcome is uncertain: %w", err))
 		return kit.DeliveryReceipt{}, err
 	}
+	// The interactive primary session's extension also reports whether OMP
+	// was busy before its send: a busy OMP steers the message into its
+	// running task, an idle one starts a turn with it. Neither is a native
+	// confirmation. Task children keep queued_for_next_turn.
+	reportsBusy := registry.topology == ownerTopologyInteractive && state.Scope == ownerScopePrimary
 	var result ownerStageResult
-	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != state.OwnerToken || result.SessionID != state.SessionID ||
-		result.MessageID != request.MessageID || result.Queued == nil || (*result.Queued && result.Reason != "") || (!*result.Queued && result.Reason != "queue_full") {
+	err = decodeOwnerJSON(raw, &result)
+	busyPresent, busy, busyValid := ownerStageBusy(result.Busy)
+	if err != nil || result.OwnerToken != state.OwnerToken || result.SessionID != state.SessionID ||
+		result.MessageID != request.MessageID || result.Queued == nil || (*result.Queued && result.Reason != "") || (!*result.Queued && result.Reason != "queue_full") ||
+		!busyValid || busyPresent != (*result.Queued && reportsBusy) {
 		registry.fail(errors.New("OMP native stage acknowledgement is invalid"))
 		return kit.DeliveryReceipt{}, errors.New("OMP native stage acknowledgement is invalid")
 	}
@@ -1077,7 +1215,79 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		return kit.DeliveryReceipt{Disposition: "rejected", Reason: result.Reason}, nil
 	}
 	record.acknowledged = true
-	return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	if !reportsBusy {
+		return kit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	}
+	if busy {
+		return kit.DeliveryReceipt{Disposition: "injected"}, nil
+	}
+	return kit.DeliveryReceipt{Disposition: "written"}, nil
+}
+
+// steerPrimary hands a lane delivery to the primary session's running native
+// run. The extension checks runToken, OMP's busy state and sends in one
+// synchronous step; accepted means only that hand-off. Once the call has been
+// made its outcome is uncertain on any failure, so it is never retried, and as
+// for Pi the lane stays: unlike native.stage no FIFO order was reserved.
+// steerPrimary answers whether OMP took the steer and, when it did not, the
+// extension's reason: "idle" (no Run of this token runs) or "queue_full" (the
+// lane's unread steers are at the delivery limits).
+func (registry *OwnerRegistry) steerPrimary(ctx context.Context, binding OwnerBinding, runToken, messageID, body string) (bool, string, error) {
+	if registry.topology != ownerTopologyLane || !validOwnerToken(runToken) || !validOwnerMessageID(messageID) ||
+		!validOwnerText(body, maxOwnerTextBytes) {
+		return false, "", errors.New("invalid OMP native steer")
+	}
+	params := ownerSteerRequest{OwnerToken: binding.OwnerToken, SessionID: binding.SessionID, MessageID: messageID, Body: body, RunToken: runToken}
+	encoded, err := json.Marshal(params)
+	if err != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
+		return false, "", errors.New("OMP native steer exceeds the private bridge frame")
+	}
+	registry.mu.Lock()
+	state := registry.bindings[binding.OwnerToken]
+	current := !registry.ending && registry.err == nil && registry.primaryToken == binding.OwnerToken &&
+		state != nil && state.admitted && state.SessionID == binding.SessionID
+	bridge := registry.bridge
+	registry.mu.Unlock()
+	if !current || bridge == nil {
+		return false, "", errors.New("OMP native steer does not own the current primary session")
+	}
+	var raw json.RawMessage
+	if err = bridge.Call(ctx, "native.steer", params, &raw); err != nil {
+		if ompSteerRefusedBeforeSend(err) {
+			return false, "", fmt.Errorf("OMP native steer was refused before it was sent: %w", err)
+		}
+		return false, "", fmt.Errorf("%w: %w", errOMPSteerUncertain, err)
+	}
+	var result ownerSteerResult
+	if err = decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != binding.OwnerToken || result.SessionID != binding.SessionID ||
+		result.MessageID != messageID || result.Accepted == nil || (*result.Accepted && result.Reason != "") ||
+		(!*result.Accepted && result.Reason != "idle" && result.Reason != "queue_full") {
+		return false, "", fmt.Errorf("%w: its answer is invalid", errOMPSteerUncertain)
+	}
+	return *result.Accepted, result.Reason, nil
+}
+
+// errOMPSteerUncertain marks a steer that may have reached OMP.
+var errOMPSteerUncertain = errors.New("OMP native steer outcome is uncertain")
+
+// ompSteerRefusedBeforeSend reports a steer that certainly never reached OMP:
+// the bridge refused it before writing, or the extension refused it before
+// its send (extension.mjs native.steer: method_not_found, stale_owner, and an
+// abort that it checks before sending), or the bridge had no handler
+// capacity. Any other failure may follow the send.
+func ompSteerRefusedBeforeSend(err error) bool {
+	if errors.Is(err, pifamily.ErrBridgeNotSent) {
+		return true
+	}
+	var remote *pifamily.BridgeCallError
+	if !errors.As(err, &remote) {
+		return false
+	}
+	switch remote.Code {
+	case "method_not_found", "stale_owner", "cancelled", "busy":
+		return true
+	}
+	return false
 }
 
 func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID string) (ownerDescribeResult, error) {
@@ -1091,10 +1301,34 @@ func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID st
 	}
 	var result ownerDescribeResult
 	if err := decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != token || result.SessionID != sessionID ||
-		!validOwnerText(result.Name, 4096) || !validOwnerCWD(result.CWD) {
+		!validOwnerText(result.Name, maxOwnerNameBytes) || !validOwnerCWD(result.CWD) {
 		return ownerDescribeResult{}, errors.New("OMP native description is invalid")
 	}
 	return result, nil
+}
+
+// reportsDrained returns once every report the extension queued before this
+// call has been answered: its report queue is sequential, so a run.preflight
+// sent before OMP's prompt_result reached us is then recorded.
+func (registry *OwnerRegistry) reportsDrained(ctx context.Context, token, sessionID string) error {
+	bridge := registry.currentBridge()
+	if bridge == nil {
+		return errors.New("OMP bridge is unavailable")
+	}
+	var raw json.RawMessage
+	if err := bridge.Call(ctx, "native.reports_drained", ownerDescribeRequest{OwnerToken: token, SessionID: sessionID}, &raw); err != nil {
+		return err
+	}
+	var result struct {
+		OwnerToken string `json:"owner_token"`
+		SessionID  string `json:"session_id"`
+		Drained    *bool  `json:"drained"`
+	}
+	if err := decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != token || result.SessionID != sessionID ||
+		result.Drained == nil || !*result.Drained {
+		return errors.New("OMP native report drain answer is invalid")
+	}
+	return nil
 }
 
 func (registry *OwnerRegistry) shutdownPrimary(ctx context.Context) error {
@@ -1167,78 +1401,63 @@ func (registry *OwnerRegistry) checkGeneration(state *ownerRegistryState, genera
 	return pifamily.NewBridgeCallError("stale_owner", "OMP request crossed an owner generation")
 }
 
-func (registry *OwnerRegistry) takePreflight(token, sessionID, runToken string) (string, error) {
+// ownerPreflightWindow is one lane Run's view of native preflights. The Run
+// opens it before it sends its prompt and closes it when the turn ends. OMP
+// also preflights its own work (custom prompts, auto-continue, nextTurn and
+// queued drains reach before_agent_start through #prepareAgentStart), so
+// outside a window a preflight is only recorded as consumed.
+type ownerPreflightWindow struct {
+	registry *OwnerRegistry
+	state    *ownerRegistryState
+	prompt   string
+	runToken string
+	foreign  int
+}
+
+func (registry *OwnerRegistry) openPreflightWindow(token, sessionID, prompt string) (*ownerPreflightWindow, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.err != nil || registry.ctx.Err() != nil {
+		return nil, errors.Join(errors.New("OMP owner registry ended before the Run's preflight window"), registry.err)
+	}
 	state := registry.bindings[token]
 	if registry.ending || state == nil || !state.admitted || state.SessionID != sessionID {
-		return "", pifamily.NewBridgeCallError("stale_owner", "OMP preflight does not own a current binding")
+		return nil, pifamily.NewBridgeCallError("stale_owner", "OMP preflight does not own a current binding")
 	}
-	prompt, ok := state.preflights[runToken]
-	if !ok {
-		return "", pifamily.NewBridgeCallError("missing_preflight", "OMP native preflight is unavailable")
+	if state.preflightWindow != nil {
+		return nil, errors.New("OMP preflight window is already open")
 	}
-	return registry.consumePreflightLocked(state, runToken, prompt), nil
+	window := &ownerPreflightWindow{registry: registry, state: state, prompt: prompt}
+	state.preflightWindow = window
+	return window, nil
 }
 
-// waitPreflight joins the next native preflight for one exact binding. The
-// run token is generated inside the extension, so the controller must consume
-// source order rather than search past an earlier foreign witness for equal
-// text. Cancellation leaves any arrived witness owned by the registry.
-func (registry *OwnerRegistry) waitPreflight(ctx context.Context, token, sessionID, expectedPrompt string) (string, error) {
-	if ctx == nil {
-		return "", errors.New("OMP preflight wait requires context")
+// observe returns our preflight's run token once it arrived, the number of
+// foreign preflights recorded before it (or so far), and a channel that closes
+// at the binding's next preflight or retirement.
+func (window *ownerPreflightWindow) observe() (string, int, <-chan struct{}, error) {
+	registry := window.registry
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if registry.err != nil || registry.ctx.Err() != nil {
+		return "", 0, nil, errors.Join(errors.New("OMP owner registry ended while awaiting preflight"), registry.err)
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		registry.mu.Lock()
-		state := registry.bindings[token]
-		if registry.err != nil || registry.ctx.Err() != nil {
-			err := errors.Join(errors.New("OMP owner registry ended while awaiting preflight"), registry.err)
-			registry.mu.Unlock()
-			return "", err
-		}
-		if registry.ending || state == nil || !state.admitted || state.SessionID != sessionID {
-			registry.mu.Unlock()
-			return "", pifamily.NewBridgeCallError("stale_owner", "OMP preflight does not own a current binding")
-		}
-		if err := ctx.Err(); err != nil {
-			registry.mu.Unlock()
-			return "", err
-		}
-		if len(state.preflightOrder) != 0 {
-			runToken := state.preflightOrder[0]
-			prompt, ok := state.preflights[runToken]
-			if !ok || prompt != expectedPrompt {
-				err := registry.protocolFailureLocked("OMP native preflight does not match the owned Run")
-				registry.mu.Unlock()
-				return "", err
-			}
-			registry.consumePreflightLocked(state, runToken, prompt)
-			registry.mu.Unlock()
-			return runToken, nil
-		}
-		changed := state.preflightChanged
-		done := registry.ctx.Done()
-		registry.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-done:
-			return "", errors.Join(errors.New("OMP owner registry ended while awaiting preflight"), registry.Err())
-		case <-changed:
-		}
+	state := window.state
+	if registry.ending || registry.bindings[state.OwnerToken] != state || !state.admitted || state.preflightWindow != window {
+		return "", 0, nil, pifamily.NewBridgeCallError("stale_owner", "OMP preflight does not own a current binding")
 	}
+	return window.runToken, window.foreign, state.preflightChanged, nil
 }
 
-func (registry *OwnerRegistry) consumePreflightLocked(state *ownerRegistryState, runToken, prompt string) string {
-	delete(state.preflights, runToken)
-	if index := slices.Index(state.preflightOrder, runToken); index >= 0 {
-		state.preflightOrder = slices.Delete(state.preflightOrder, index, index+1)
+func (window *ownerPreflightWindow) close() {
+	window.registry.mu.Lock()
+	if window.state.preflightWindow == window {
+		window.state.preflightWindow = nil
 	}
-	registry.releaseStateLocked(state, len(prompt))
+	window.registry.mu.Unlock()
+}
+
+func (registry *OwnerRegistry) recordConsumedPreflightLocked(state *ownerRegistryState, runToken string) {
 	state.consumedPreflights = append(state.consumedPreflights, runToken)
 	state.consumedPreflightSet[runToken] = struct{}{}
 	if len(state.consumedPreflights) > maxOwnerTrackedItems {
@@ -1246,7 +1465,6 @@ func (registry *OwnerRegistry) consumePreflightLocked(state *ownerRegistryState,
 		delete(state.consumedPreflightSet, state.consumedPreflights[0])
 		state.consumedPreflights = state.consumedPreflights[1:]
 	}
-	return prompt
 }
 
 func (registry *OwnerRegistry) signalPreflightLocked(state *ownerRegistryState) {
@@ -1330,8 +1548,8 @@ func (registry *OwnerRegistry) removeBinding(ctx context.Context, state *ownerRe
 		}
 	}
 	state.retainedBytes = 0
-	state.staged, state.batches, state.preflights, state.reports = nil, nil, nil, nil
-	state.preflightOrder, state.preflightChanged = nil, nil
+	state.staged, state.batches, state.reports = nil, nil, nil
+	state.preflightWindow, state.preflightChanged = nil, nil
 	state.completed, state.consumedPreflights = nil, nil
 	state.completedSet, state.consumedPreflightSet = nil, nil
 	registry.mu.Unlock()
@@ -1498,11 +1716,11 @@ func decodeOwnerJSON(raw json.RawMessage, value any) error {
 }
 
 func validOwnerToken(value string) bool {
-	return value != "" && len(value) <= 256 && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0 && !strings.ContainsRune(value, ' ')
+	return value != "" && len(value) <= maxOwnerIDBytes && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0 && !strings.ContainsRune(value, ' ')
 }
 
 func validOwnerID(value string) bool {
-	return value != "" && len(value) <= 256 && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsSpace) < 0 && strings.IndexFunc(value, unicode.IsControl) < 0
+	return value != "" && len(value) <= maxOwnerIDBytes && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsSpace) < 0 && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 func validOwnerMessageID(value string) bool {
@@ -1514,7 +1732,7 @@ func validOwnerText(value string, limit int) bool {
 }
 
 func validOwnerCWD(value string) bool {
-	return filepath.IsAbs(value) && validOwnerText(value, 32<<10)
+	return filepath.IsAbs(value) && validOwnerText(value, maxOwnerCWDBytes)
 }
 
 func validOwnerMessageIDs(values []string) bool {
@@ -1569,7 +1787,13 @@ func deliveryPhaseIndex(phase string) int {
 		return 3
 	case "context":
 		return 4
+	case "abandoned":
+		return deliveryPhaseAbandoned
 	default:
 		return 0
 	}
 }
+
+// deliveryPhaseAbandoned ends a claimed batch from any phase; it is outside
+// the claimed, message_start, message_end, context sequence.
+const deliveryPhaseAbandoned = 5

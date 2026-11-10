@@ -15,8 +15,16 @@ import (
 	"unicode/utf8"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/sdk/go/protocol"
 	"github.com/sessionbus/peer-common/host"
 )
+
+// uncertainSubmission is a delivery that may have reached the native: the
+// Worker passes Internal through and the daemon answers no_receipt (the same
+// form claude-peer uses for an uncertain write).
+func uncertainSubmission() error {
+	return &sessionkit.ProtocolError{Code: protocol.Internal, Message: "internal", Data: json.RawMessage(`"uncertain_submission"`)}
+}
 
 var ompLaneRules = []host.ArgumentRule{
 	{Name: "--system-prompt", TakesValue: true},
@@ -71,6 +79,10 @@ type Wrapper struct {
 	closeOnce   sync.Once
 	closeErr    error
 	workers     sync.WaitGroup
+
+	// drainReports is set by an early stop: the next Run first waits for
+	// the extension's earlier reports (see drainAfterEarlyStop).
+	drainReports bool
 }
 
 func New(socket, provisional string, native NativeExecutable, extension string) *Wrapper {
@@ -422,20 +434,59 @@ func (p *Wrapper) lose(err error) {
 	}
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	if _, err := host.RenderNativeMessage(request); err != nil {
+// Deliver steers a message into the lane's running task: while this Run's
+// native run is admitted and has not yielded, the managed extension hands it
+// to OMP as a steer. The steer carries the token of the Run's own preflight;
+// the extension checks it, OMP's busy state and sends in one synchronous step,
+// so a steer for this Run never enters a later one. `injected` claims only that
+// hand-off: OMP places the message after an await of its own, and one it
+// queues after the run's last steering poll is answered by OMP's own
+// continuation, outside this Run's result. Otherwise the lane is not running
+// and the daemon starts a later Run.
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
+	body, err := ompRenderPeerMessage(request)
+	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	p.mu.Lock()
 	available := p.opened && !p.closing && p.failure == nil && p.ctx.Err() == nil
+	turn, owner := p.active, p.owner
+	current := run != nil && p.run == run && turn != nil && turn.run == run && owner != nil && owner.registry != nil
 	p.mu.Unlock()
 	if !available {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "lane_unavailable"}, nil
 	}
-	return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	if !current {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	turn.mu.Lock()
+	running := turn.failure == nil && turn.preflight && turn.starts > 0 && !turn.ownEndedLocked()
+	token, binding := turn.preflightToken, turn.binding
+	turn.mu.Unlock()
+	if !running {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	accepted, reason, err := owner.registry.steerPrimary(ctx, binding, token, request.MessageID, body)
+	if errors.Is(err, errOMPSteerUncertain) {
+		// The steer may have reached OMP: no receipt, so the sender does not
+		// treat it as refused and resend it. Nothing is retried here.
+		return sessionkit.DeliveryReceipt{}, uncertainSubmission()
+	}
+	if err != nil {
+		return sessionkit.DeliveryReceipt{}, err
+	}
+	if !accepted && reason == "queue_full" {
+		// The Run's unread steers are at the existing delivery limits: refused
+		// with the stage path's reason, as an interactive full queue is.
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}, nil
+	}
+	if !accepted {
+		return sessionkit.DeliveryReceipt{}, host.NotRunning()
+	}
+	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
 
 func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {

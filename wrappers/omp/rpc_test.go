@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,7 +117,7 @@ func TestNativeRPCRejectsInvalidReadiness(t *testing.T) {
 		"wrong protocol": `{"type":"ready","protocolVersion":2,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`,
 		"wrong versions": `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[2,1],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}`,
 		"wrong physical": `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1,"maxReassembledFrameBytes":67108864}`,
-		"extra field":    `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"extra":true}`,
+		"missing field":  `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}`,
 		"event first":    `{"type":"agent_start"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -310,6 +311,52 @@ func TestNativeRPCPromptKeepsCorrelationForLateNativeFailure(t *testing.T) {
 	waitNativeRPCStats(t, rpc, nativeRPCStats{})
 }
 
+// OMP's ready frame and negotiation result are open objects (18.18.1 added
+// supportsBashExcludeFromContext to ready): the fields the wrapper uses keep
+// their exact checks, and any other field is ignored.
+func TestNativeRPCIgnoresAdditiveReadinessAndNegotiationFields(t *testing.T) {
+	for name, test := range map[string]struct {
+		ready, negotiated string
+		valid             bool
+	}{
+		"OMP 18.18 ready": {
+			ready:      `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"supportsBashExcludeFromContext":true}`,
+			negotiated: `{"protocolVersion":2}`, valid: true,
+		},
+		"unknown ready field": {
+			ready:      `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"x":{}}`,
+			negotiated: `{"protocolVersion":2}`, valid: true,
+		},
+		"unknown negotiation field":  {ready: nativeRPCReadyFrame, negotiated: `{"protocolVersion":2,"x":1}`, valid: true},
+		"wrong negotiated version":   {ready: nativeRPCReadyFrame, negotiated: `{"protocolVersion":1,"x":1}`},
+		"missing negotiated version": {ready: nativeRPCReadyFrame, negotiated: `{"x":2}`},
+		"null negotiation":           {ready: nativeRPCReadyFrame, negotiated: `null`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rpc, peer := newUnreadyNativeRPCTest(t, nil, nativeRPCLimits{})
+			ready := make(chan error, 1)
+			go func() { ready <- rpc.Ready(nativeRPCTestContext(t)) }()
+			peer.write(t, test.ready)
+			request := peer.read(t)
+			if nativeRPCField(t, request, "id") != "omp:1" || nativeRPCField(t, request, "type") != "negotiate_protocol" {
+				t.Fatalf("negotiation command = %#v", request)
+			}
+			peer.write(t, `{"id":"omp:1","type":"response","command":"negotiate_protocol","success":true,"data":`+test.negotiated+`}`)
+			err := <-ready
+			if test.valid {
+				if err != nil {
+					t.Fatalf("readiness = %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errNativeRPCProtocol) {
+				t.Fatalf("readiness error = %v", err)
+			}
+			waitNativeRPCDone(t, rpc)
+		})
+	}
+}
+
 func TestNativeRPCPromptPreservesTypedImmediateAgentOutcome(t *testing.T) {
 	for name, test := range map[string]struct {
 		data    string
@@ -322,7 +369,9 @@ func TestNativeRPCPromptPreservesTypedImmediateAgentOutcome(t *testing.T) {
 		"missing field": {data: `{}`},
 		"null field":    {data: `{"agentInvoked":null}`},
 		"wrong type":    {data: `{"agentInvoked":"false"}`},
-		"extra field":   {data: `{"agentInvoked":true,"extra":1}`},
+		"extra field":   {data: `{"agentInvoked":true,"extra":1}`, invoked: true, known: true, valid: true},
+		"extra false":   {data: `{"agentInvoked":false,"x":{}}`, known: true, valid: true},
+		"extra only":    {data: `{"extra":true}`},
 		"null data":     {data: `null`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -489,6 +538,44 @@ func nativeRPCChunkFrame(logical []byte, index int) map[string]any {
 		"count": count, "byteLength": len(logical),
 		"data": base64.StdEncoding.EncodeToString(logical[start:end]),
 	}
+}
+
+// rpc_chunk is an open frame: like OMP's own decoder, the wrapper reads the
+// chunk fields it uses and ignores any other field.
+func TestNativeRPCReassemblesChunksWithAdditiveFields(t *testing.T) {
+	events := make(chan json.RawMessage, 1)
+	rpc, peer := newNativeRPCTest(t, func(raw json.RawMessage) error {
+		events <- append(json.RawMessage(nil), raw...)
+		return nil
+	}, nativeRPCLimits{})
+	want := strings.Repeat("λ", 600_000)
+	logical, err := json.Marshal(map[string]any{
+		"type": "message_end", "message": map[string]any{"role": "assistant", "content": want},
+	})
+	if err != nil || len(logical) <= nativeRPCPhysicalFrameBytes {
+		t.Fatalf("logical frame bytes = %d, error = %v", len(logical), err)
+	}
+	writeNativeRPCChunked(t, peer, logical, func(_ int, frame map[string]any) {
+		frame["x"] = map[string]any{}
+	})
+	var raw json.RawMessage
+	select {
+	case raw = <-events:
+	case <-rpc.Done():
+		t.Fatalf("chunk with an added field ended the reader: %v", rpc.Err())
+	case <-nativeRPCTestContext(t).Done():
+		t.Fatal("waiting for the reassembled event timed out")
+	}
+	var got struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err = json.Unmarshal(raw, &got); err != nil || got.Type != "message_end" || got.Message.Content != want {
+		t.Fatalf("chunked event bytes = %d, error = %v", len(got.Message.Content), err)
+	}
+	waitNativeRPCStats(t, rpc, nativeRPCStats{})
 }
 
 func TestNativeRPCReassemblesProtocolTwoResponse(t *testing.T) {
@@ -1232,4 +1319,146 @@ func TestNativeRPCRejectsPartialCRLFAndOversizedOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// OMP 18.11.0 answers a prompt it refuses before admission (AgentBusyError
+// while its own work runs) with an error response, then a success response
+// for the same id, then prompt_result agentInvoked:false (rpc-prompt-results.ts
+// :286-296, rpc-mode.ts:1835-1882). Before this change the success was an
+// unknown response id, so a busy refusal stopped the transport and lost the lane.
+func TestNativeRPCRefusedPromptAbsorbsItsTrailingSuccessAndNoAgentResult(t *testing.T) {
+	refuse := func(t *testing.T, rpc *nativeRPC, peer *nativeRPCTestPeer) string {
+		t.Helper()
+		type started struct {
+			prompt    *nativePrompt
+			submitted bool
+			err       error
+		}
+		result := make(chan started, 1)
+		go func() {
+			prompt, submitted, err := rpc.StartPrompt(nativeRPCTestContext(t), "owned prompt")
+			result <- started{prompt, submitted, err}
+		}()
+		id := nativeRPCField(t, peer.read(t), "id")
+		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":false,"error":"Agent is busy"}`)
+		got := <-result
+		// The return values are checked on their own, so a matching busy
+		// error cannot hide an owned correlation or an unsubmitted prompt.
+		if got.prompt != nil || !got.submitted {
+			t.Errorf("refused prompt returned prompt=%v submitted=%v", got.prompt != nil, got.submitted)
+		}
+		err := got.err
+		var nativeErr *nativeRPCError
+		if !errors.As(err, &nativeErr) || nativeErr.Command != "prompt" || nativeErr.Message != "Agent is busy" {
+			t.Fatalf("refused prompt start = %#v", err)
+		}
+		return id
+	}
+	observer := func() (func(json.RawMessage) error, func() []string) {
+		var mu sync.Mutex
+		var seen []string
+		return func(raw json.RawMessage) error {
+				mu.Lock()
+				seen = append(seen, string(raw))
+				mu.Unlock()
+				return nil
+			}, func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				return slices.Clone(seen)
+			}
+	}
+	t.Run("absorbed once and the next prompt runs", func(t *testing.T) {
+		observe, seen := observer()
+		rpc, peer := newNativeRPCTest(t, observe, nativeRPCLimits{})
+		id := refuse(t, rpc, peer)
+		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":true}`)
+		peer.write(t, `{"type":"prompt_result","id":"`+id+`","agentInvoked":false,"status":"error","sessionSettled":false,"error":{"message":"Agent is busy","retryable":false}}`)
+		peer.write(t, `{"type":"agent_end","marker":"after"}`)
+		ctx := nativeRPCTestContext(t)
+		for len(seen()) == 0 {
+			select {
+			case <-ctx.Done():
+				t.Fatal("event after the refusal was not observed")
+			default:
+				runtime.Gosched()
+			}
+		}
+		if got := seen(); len(got) != 1 || got[0] != `{"type":"agent_end","marker":"after"}` {
+			t.Fatalf("observed after refusal = %q", got)
+		}
+		started := make(chan *nativePrompt, 1)
+		go func() {
+			prompt, _, err := rpc.StartPrompt(nativeRPCTestContext(t), "next prompt")
+			if err != nil {
+				t.Error(err)
+			}
+			started <- prompt
+		}()
+		next := nativeRPCField(t, peer.read(t), "id")
+		if next == id {
+			t.Fatalf("next prompt reused refused id %q", id)
+		}
+		peer.write(t, `{"id":"`+next+`","type":"response","command":"prompt","success":true}`)
+		prompt := <-started
+		if prompt == nil || rpc.Err() != nil {
+			t.Fatalf("next prompt = %#v, transport %v", prompt, rpc.Err())
+		}
+		if err := prompt.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		waitNativeRPCStats(t, rpc, nativeRPCStats{})
+	})
+	t.Run("a second success for the refused id still stops", func(t *testing.T) {
+		rpc, peer := newNativeRPCTest(t, nil, nativeRPCLimits{})
+		id := refuse(t, rpc, peer)
+		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":true}`)
+		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":true}`)
+		waitNativeRPCDone(t, rpc)
+		if err := rpc.Err(); !errors.Is(err, errNativeRPCProtocol) || !strings.Contains(err.Error(), "unknown or duplicate response id") {
+			t.Fatalf("second trailing success = %v", err)
+		}
+	})
+	t.Run("an agent-invoked result for the refused id is not absorbed", func(t *testing.T) {
+		observe, seen := observer()
+		rpc, peer := newNativeRPCTest(t, observe, nativeRPCLimits{})
+		id := refuse(t, rpc, peer)
+		frame := `{"type":"prompt_result","id":"` + id + `","agentInvoked":true,"status":"completed","sessionSettled":true}`
+		peer.write(t, frame)
+		ctx := nativeRPCTestContext(t)
+		for len(seen()) == 0 {
+			select {
+			case <-ctx.Done():
+				t.Fatal("agent-invoked prompt_result was absorbed")
+			default:
+				runtime.Gosched()
+			}
+		}
+		if got := seen(); got[0] != frame {
+			t.Fatalf("observed = %q", got)
+		}
+	})
+	t.Run("the next admitted prompt clears the slot", func(t *testing.T) {
+		rpc, peer := newNativeRPCTest(t, nil, nativeRPCLimits{})
+		id := refuse(t, rpc, peer)
+		// The error-only setup failure writes nothing more for the refused id.
+		started := make(chan *nativePrompt, 1)
+		go func() {
+			prompt, _, err := rpc.StartPrompt(nativeRPCTestContext(t), "next prompt")
+			if err != nil {
+				t.Error(err)
+			}
+			started <- prompt
+		}()
+		next := nativeRPCField(t, peer.read(t), "id")
+		peer.write(t, `{"id":"`+next+`","type":"response","command":"prompt","success":true}`)
+		if prompt := <-started; prompt == nil {
+			t.Fatal("next prompt was not admitted")
+		}
+		peer.write(t, `{"id":"`+id+`","type":"response","command":"prompt","success":true}`)
+		waitNativeRPCDone(t, rpc)
+		if err := rpc.Err(); !errors.Is(err, errNativeRPCProtocol) || !strings.Contains(err.Error(), "unknown or duplicate response id") {
+			t.Fatalf("success after the slot cleared = %v", err)
+		}
+	})
 }

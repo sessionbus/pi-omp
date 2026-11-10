@@ -61,7 +61,7 @@ func TestPiNativeHelper(t *testing.T) {
 func runPiNativeHelper(mode string) error {
 	var launch piLaunch
 	if json.Unmarshal([]byte(os.Getenv(launchEnvironmentName)), &launch) != nil ||
-		launch.Topology != "lane" || launch.OwnerPID != os.Getppid() {
+		launch.Topology != "lane" || launch.BridgeFD < 3 {
 		return errors.New("invalid helper launch descriptor")
 	}
 	for _, name := range []string{
@@ -80,7 +80,12 @@ func runPiNativeHelper(mode string) error {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		return nil
 	}
-	connection, err := net.Dial("unix", launch.Socket)
+	bridgeFile := os.NewFile(uintptr(launch.BridgeFD), "pi-test-bridge")
+	if bridgeFile == nil {
+		return errors.New("invalid inherited bridge descriptor")
+	}
+	connection, err := net.FileConn(bridgeFile)
+	_ = bridgeFile.Close()
 	if err != nil {
 		return err
 	}
@@ -104,12 +109,40 @@ func runPiNativeHelper(mode string) error {
 	if err = os.WriteFile(sessionFile, []byte("owned native history\n"), 0o600); err != nil {
 		return err
 	}
+	// The managed extension holds the owned run's token from its preflight
+	// answer to its settle and steers only for that token.
+	var tokenMu sync.Mutex
+	runToken := ""
+	setRunToken := func(value string) {
+		tokenMu.Lock()
+		runToken = value
+		tokenMu.Unlock()
+	}
+	currentRunToken := func() string {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return runToken
+	}
 	var bridge *pifamily.Bridge
 	bridge, err = pifamily.NewBridge(connection, pifamily.BridgeNative,
 		func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
 			switch method {
 			case "native.describe":
 				return json.Marshal(piNativeDescription{SessionID: id, Name: name, Cwd: cwd})
+			case "native.steer":
+				var steer struct {
+					SessionID string `json:"session_id"`
+					MessageID string `json:"message_id"`
+					Body      string `json:"body"`
+					Run       string `json:"run"`
+				}
+				if mode != "run-abort" || json.Unmarshal(raw, &steer) != nil || steer.SessionID != id || steer.MessageID == "" || steer.Body == "" {
+					return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected helper method")
+				}
+				if steer.Run == "" || steer.Run != currentRunToken() {
+					return json.Marshal(map[string]any{"session_id": id, "message_id": steer.MessageID, "accepted": false, "reason": "idle"})
+				}
+				return json.Marshal(map[string]any{"session_id": id, "message_id": steer.MessageID, "accepted": true})
 			default:
 				return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected helper method")
 			}
@@ -121,7 +154,7 @@ func runPiNativeHelper(mode string) error {
 	if err = bridge.Ready(context.Background()); err != nil {
 		return err
 	}
-	ready := piOwnerReady{Topology: "lane", Directory: launch.Directory, SessionID: id, Name: name}
+	ready := piOwnerReady{Topology: "lane", SessionID: id, Name: name}
 	var acknowledged struct {
 		SessionID string `json:"session_id"`
 	}
@@ -146,6 +179,51 @@ func runPiNativeHelper(mode string) error {
 	writer := bufio.NewWriter(os.Stdout)
 	history := make([]map[string]any, 0)
 	var leaf any
+	// settled counts the agent_settled frames written, as the managed
+	// extension counts the settles it sees; turns counts prompts.
+	settled, turns := 0, 0
+	ownDialog := false
+	// ownMode keeps history across prompts and honours the append cursor.
+	ownMode := strings.HasPrefix(mode, "run-own-") || strings.HasPrefix(mode, "run-refuse") || strings.HasPrefix(mode, "handled-")
+	latePreflight := false
+	// Pi's own run, which another extension started: its entries and its
+	// stdout frames, which the lag mode writes after the owned preflight.
+	ownEntries := func() {
+		parent := leaf
+		user, answer := fmt.Sprintf("own-user-%d", turns), fmt.Sprintf("own-answer-%d", turns)
+		history = append(history,
+			map[string]any{"id": user, "parentId": parent, "type": "message", "message": map[string]any{"role": "user", "content": "own prompt"}},
+			map[string]any{"id": answer, "parentId": user, "type": "message", "message": map[string]any{"role": "assistant", "content": "own answer", "stopReason": "stop"}},
+		)
+		leaf = answer
+		settled++
+	}
+	ownFrames := func() error {
+		for _, line := range []string{
+			`{"type":"agent_start"}`,
+			`{"type":"message_start","message":{"role":"user","content":"own prompt"}}`,
+			`{"type":"agent_settled"}`,
+		} {
+			if _, err := fmt.Fprintln(writer, line); err != nil {
+				return err
+			}
+		}
+		return writer.Flush()
+	}
+	settle := func(what string) error {
+		var echo struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := bridge.Call(context.Background(), "run.settling", map[string]any{"session_id": id, "run": currentRunToken(), "leaf": leaf}, &echo); err != nil || echo.SessionID != id {
+			return errors.Join(err, fmt.Errorf("helper %s witness was not acknowledged", what))
+		}
+		setRunToken("")
+		if _, err := fmt.Fprintln(writer, `{"type":"agent_settled"}`); err != nil {
+			return err
+		}
+		settled++
+		return writer.Flush()
+	}
 	if mode == "run-offbranch" {
 		history = []map[string]any{
 			{"id": "selected", "parentId": nil, "type": "custom", "data": map[string]any{"owned": true}},
@@ -163,6 +241,21 @@ func runPiNativeHelper(mode string) error {
 			return errors.New("helper received invalid native RPC identity")
 		}
 		response := map[string]any{"id": requestID, "type": "response", "command": kind, "success": true}
+		if latePreflight {
+			// The extension that handled the earlier prompt forwards it late:
+			// its preflight comes after the wrapper ended that Run (the next
+			// command shows it did) and before the next Run's input, so it is
+			// Pi's own work, not a Run's.
+			latePreflight = false
+			var echo struct {
+				SessionID string  `json:"session_id"`
+				Run       *string `json:"run"`
+			}
+			params := map[string]any{"session_id": id, "settling": false, "prompt": "late forwarded", "leaf": leaf, "settled": settled}
+			if err = bridge.Call(context.Background(), "run.preflight", params, &echo); err != nil || echo.SessionID != id || echo.Run != nil {
+				return errors.Join(err, errors.New("helper late preflight after handled was not Pi's own work"))
+			}
+		}
 		switch kind {
 		case "get_state":
 			response["data"] = piNativeState{SessionID: id, SessionName: name, SessionFile: sessionFile}
@@ -184,34 +277,141 @@ func runPiNativeHelper(mode string) error {
 				} else {
 					response["data"] = map[string]any{"entries": history, "leafId": leaf}
 				}
+			} else if ownMode {
+				entries := history
+				if raw, present := command["since"]; present {
+					var since string
+					index := -1
+					if json.Unmarshal(raw, &since) == nil {
+						index = slices.IndexFunc(history, func(entry map[string]any) bool { return entry["id"] == since })
+					}
+					if index < 0 {
+						return fmt.Errorf("helper received unknown append cursor %q", since)
+					}
+					entries = history[index+1:]
+				}
+				response["data"] = map[string]any{"entries": entries, "leafId": leaf}
 			} else {
 				response["data"] = map[string]any{"entries": history, "leafId": leaf}
 			}
 		case "prompt":
 			var prompt string
-			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
+			if mode != "run" && mode != "run-abort" && mode != "run-offbranch" && mode != "run-hold" && mode != "handled" && !ownMode || json.Unmarshal(command["message"], &prompt) != nil || prompt == "" {
 				return errors.New("helper received invalid native prompt")
 			}
-			var echo struct {
-				SessionID string `json:"session_id"`
+			turns++
+			forwardFail := strings.HasPrefix(mode, "run-refuse-forward-fail-") && turns == 1
+			// Pi answers "handled" when an extension consumed the prompt
+			// (agent-session.js 1.4.0:1644, :1654); the reply carries it as
+			// data.disposition (rpc-mode.js:298-317). handled-missing omits it,
+			// handled-extra adds an unknown field, and handled-cased spells the
+			// key "Disposition".
+			early := (mode == "handled-missing" || mode == "handled-early" || mode == "handled-late-preflight" ||
+				mode == "handled-extra" || mode == "handled-cased") && turns == 1
+			after := (mode == "handled-after" || mode == "handled-after-fail") && turns == 1
+			if mode == "handled" || turns == 1 && (mode == "handled-early" || mode == "handled-late-preflight" || after) {
+				response["data"] = map[string]any{"disposition": "handled"}
+			} else if mode == "handled-extra" && turns == 1 {
+				response["data"] = map[string]any{"disposition": "handled", "x": map[string]any{}}
+			} else if mode == "handled-cased" && turns == 1 {
+				response["data"] = map[string]any{"Disposition": "handled"}
 			}
-			witnesses := []struct {
-				method string
-				params any
-			}{
-				{"run.input", map[string]any{"session_id": id, "source": "rpc", "text": prompt, "settling": false}},
-				{"run.preflight", map[string]any{"session_id": id, "prompt": prompt + " expanded", "settling": false}},
-				{"run.start", map[string]any{"session_id": id, "settling": false}},
+			steps := []string{"run.input", "run.preflight", "run.start"}
+			if mode == "handled" || early {
+				steps = nil
+			} else if mode == "handled-after-fail" && turns == 1 {
+				steps = steps[:2]
+			} else if mode == "run-hold" || mode == "run-refuse" && turns == 1 {
+				steps = steps[:1]
+			} else if forwardFail || mode == "run-refuse-witnessed-other-error" && turns == 1 {
+				steps = steps[:2]
 			}
-			if mode == "handled" {
-				witnesses = nil
-			} else if mode == "run-hold" {
-				witnesses = witnesses[:1]
+			if mode == "run-own-before" && turns == 2 {
+				// A send another extension deferred during the last settle runs
+				// before this prompt, which Pi deferred too.
+				ownEntries()
+				if err = ownFrames(); err != nil {
+					return err
+				}
 			}
-			for _, witness := range witnesses {
-				if err = bridge.Call(context.Background(), witness.method, witness.params, &echo); err != nil || echo.SessionID != id {
+			if mode == "run-own-lag" && turns == 2 {
+				// Pi ran its own work first, but its stdout frames are read
+				// after the owned preflight.
+				ownEntries()
+			}
+			for _, method := range steps {
+				params := map[string]any{"session_id": id, "settling": false}
+				switch method {
+				case "run.input":
+					params["source"], params["text"] = "rpc", prompt
+				case "run.preflight":
+					params["prompt"], params["leaf"], params["settled"] = prompt+" expanded", leaf, settled
+				case "run.start":
+					params["run"] = currentRunToken()
+				}
+				var echo struct {
+					SessionID string  `json:"session_id"`
+					Run       *string `json:"run"`
+				}
+				if err = bridge.Call(context.Background(), method, params, &echo); err != nil || echo.SessionID != id {
 					return errors.Join(err, errors.New("helper Run witness was not acknowledged"))
 				}
+				if method == "run.preflight" {
+					if echo.Run == nil {
+						return errors.New("helper owned preflight has no Run token")
+					}
+					setRunToken(*echo.Run)
+					if mode == "run-own-lag" && turns == 2 {
+						if err = ownFrames(); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			if mode == "run-refuse" && turns == 1 {
+				// Pi ran input handlers, then refused: it was running work of
+				// its own (agent-session.js:1634-1636).
+				response["success"] = false
+				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
+				break
+			}
+			if forwardFail {
+				// An input extension forwarded our prompt with sendUserMessage;
+				// that run failed in its preparation after our preflight and
+				// before it started, and Pi refused our prompt as busy. Pi
+				// reports the failure only as a runtime extension_error
+				// (agent-session.js 1.4.0:2774-2780, rpc-mode.js:259-260), on
+				// the same stdout as the busy reply, in either order.
+				response["success"] = false
+				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
+				reply, _ := json.Marshal(response)
+				// Pi can also throw an Error with an empty message.
+				text := "forwarded prompt failed"
+				if strings.Contains(mode, "-empty-") {
+					text = ""
+				}
+				failure, _ := json.Marshal(map[string]string{"type": "extension_error", "extensionPath": "<runtime>", "event": "send_user_message", "error": text})
+				frames := []string{string(failure), string(reply)}
+				if strings.HasSuffix(mode, "-after") {
+					frames = []string{string(reply), string(failure)}
+				}
+				for _, line := range frames {
+					if _, err = fmt.Fprintln(writer, line); err != nil {
+						return err
+					}
+				}
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				continue
+			}
+			if (mode == "run-refuse-witnessed" || mode == "run-refuse-witnessed-other-error") && turns == 1 {
+				// An input extension forwarded our prompt with sendUserMessage
+				// and returned while that run, already witnessed from our
+				// input inside our preflight window, is active: Pi then
+				// refuses the original prompt as busy, and the run goes on.
+				response["success"] = false
+				response["error"] = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 			}
 			if mode == "run-hold" {
 				continue
@@ -220,7 +420,36 @@ func runPiNativeHelper(mode string) error {
 			if _, err = writer.Write(append(body, '\n')); err != nil {
 				return err
 			}
-			if mode == "handled" {
+			if mode == "run-refuse-witnessed-other-error" && turns == 1 {
+				// Another runtime failure, not a forwarded prompt's, inside the
+				// window before the forwarded run starts: it is not ours to act
+				// on. Then that run starts.
+				if _, err = fmt.Fprintln(writer, `{"type":"extension_error","extensionPath":"<runtime>","event":"send_message","error":"another send failed"}`); err != nil {
+					return err
+				}
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				var echo struct {
+					SessionID string `json:"session_id"`
+				}
+				if err = bridge.Call(context.Background(), "run.start", map[string]any{"session_id": id, "settling": false, "run": currentRunToken()}, &echo); err != nil || echo.SessionID != id {
+					return errors.Join(err, errors.New("helper Run start was not acknowledged"))
+				}
+			}
+			if mode == "handled" || early {
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+				latePreflight = mode == "handled-late-preflight"
+				continue
+			}
+			if mode == "handled-after-fail" && turns == 1 {
+				// The forwarded run fails before it starts, after Pi answered
+				// "handled" for our prompt.
+				if _, err = fmt.Fprintln(writer, `{"type":"extension_error","extensionPath":"<runtime>","event":"send_user_message","error":"forwarded prompt failed"}`); err != nil {
+					return err
+				}
 				if err = writer.Flush(); err != nil {
 					return err
 				}
@@ -241,16 +470,57 @@ func runPiNativeHelper(mode string) error {
 			if mode == "run-abort" {
 				continue
 			}
-			if mode != "run-offbranch" {
+			if ownMode {
+				user, answer := fmt.Sprintf("entry-user-%d", turns), fmt.Sprintf("entry-answer-%d", turns)
+				history = append(history,
+					map[string]any{"id": user, "parentId": leaf, "type": "message", "message": map[string]any{"role": "user", "content": prompt + " expanded"}},
+					map[string]any{"id": answer, "parentId": user, "type": "message", "message": map[string]any{"role": "assistant", "content": fmt.Sprintf("native answer %d", turns), "stopReason": "stop"}},
+				)
+				leaf = answer
+			} else if mode == "run-offbranch" {
+				leaf = "entry-answer"
+			} else {
 				history = []map[string]any{
 					{"id": "entry-user", "parentId": nil, "type": "message", "message": map[string]any{"role": "user", "content": prompt + " expanded"}},
 					{"id": "entry-answer", "parentId": "entry-user", "type": "message", "message": map[string]any{"role": "assistant", "content": "native answer", "stopReason": "stop"}},
 				}
 				leaf = "entry-answer"
 			}
-			if err = bridge.Call(context.Background(), "run.settling", map[string]string{"session_id": id}, &echo); err != nil || echo.SessionID != id {
-				return errors.Join(err, errors.New("helper settling witness was not acknowledged"))
+			if err = settle("settling"); err != nil {
+				return err
 			}
+			if mode == "run-own-after" && turns == 1 {
+				// Another extension's settled handler starts work of Pi's own;
+				// it saves entries before the Run's history is read.
+				ownEntries()
+				if err = ownFrames(); err != nil {
+					return err
+				}
+			}
+			if mode == "run-own-dialog" && turns == 1 {
+				// Work of Pi's own asks for a confirmation and settles only
+				// once the dialog is answered.
+				ownDialog = true
+				for _, line := range []string{
+					`{"type":"agent_start"}`,
+					`{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue?"}`,
+				} {
+					if _, err = fmt.Fprintln(writer, line); err != nil {
+						return err
+					}
+				}
+				if err = writer.Flush(); err != nil {
+					return err
+				}
+			}
+			continue
+		case "extension_ui_response":
+			var cancelled bool
+			if !ownDialog || requestID != "own-dialog" || json.Unmarshal(command["cancelled"], &cancelled) != nil || !cancelled {
+				return errors.New("helper received an unexpected dialog answer")
+			}
+			ownDialog = false
+			ownEntries()
 			if _, err = fmt.Fprintln(writer, `{"type":"agent_settled"}`); err != nil {
 				return err
 			}
@@ -265,16 +535,7 @@ func runPiNativeHelper(mode string) error {
 					{"id": "entry-answer", "parentId": "entry-user", "type": "message", "message": map[string]any{"role": "assistant", "content": "", "stopReason": "aborted"}},
 				}
 				leaf = "entry-answer"
-				var echo struct {
-					SessionID string `json:"session_id"`
-				}
-				if err = bridge.Call(context.Background(), "run.settling", map[string]string{"session_id": id}, &echo); err != nil || echo.SessionID != id {
-					return errors.Join(err, errors.New("helper abort settling witness was not acknowledged"))
-				}
-				if _, err = fmt.Fprintln(writer, `{"type":"agent_settled"}`); err != nil {
-					return err
-				}
-				if err = writer.Flush(); err != nil {
+				if err = settle("abort settling"); err != nil {
 					return err
 				}
 			}
@@ -360,12 +621,8 @@ func TestPiOwnedOpenCloseFreshAndResume(t *testing.T) {
 			if result.SessionID != test.wantID || wrapper.owner.Name != test.wantName {
 				t.Fatalf("result=%+v owner=%+v", result, wrapper.owner)
 			}
-			launchDirectory := wrapper.process.directory
 			if err = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}); err != nil {
 				t.Fatal(err)
-			}
-			if _, err = os.Stat(launchDirectory); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("private launch directory survived Close: %v", err)
 			}
 			if stats := wrapper.rpc.Stats(); stats.pendingCalls != 0 || stats.pendingWrites != 0 || stats.retainedBytes != 0 {
 				t.Fatalf("native RPC retained work: %+v", stats)
@@ -442,15 +699,11 @@ func TestPiCloseForgetLeavesNativeHistoryToDaemonRowOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := filepath.Join(cwd, "pi-fresh.jsonl")
-	launchDirectory := wrapper.process.directory
 	if err := wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{Forget: true}); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(history); err != nil || string(body) != "owned native history\n" {
 		t.Fatalf("native history after row forget = %q, %v", body, err)
-	}
-	if _, err := os.Stat(launchDirectory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("private launch directory survived Forget Close: %v", err)
 	}
 }
 
@@ -470,11 +723,47 @@ func TestPiOpenFailureJoinsOwnedProcessAndResources(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("owned native process was not joined")
 				}
-				if _, statErr := os.Stat(wrapper.process.directory); !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("private launch directory survived failed Open: %v", statErr)
-				}
 			}
 		})
+	}
+}
+
+func TestPiFailedStartUsesOneFreshAttachmentAndClosesChildCopies(t *testing.T) {
+	previousCommand, previousAttach := piCommand, piAttachInheritedBridge
+	t.Cleanup(func() {
+		piCommand, piAttachInheritedBridge = previousCommand, previousAttach
+	})
+	directory := testsocket.Directory(t)
+	var command *exec.Cmd
+	piCommand = func(string, ...string) *exec.Cmd {
+		command = exec.Command(filepath.Join(directory, "missing-native"))
+		return command
+	}
+	attachments := 0
+	var childCopies []*os.File
+	piAttachInheritedBridge = func(candidate *exec.Cmd) (*pifamily.InheritedBridgeTransport, error) {
+		attachments++
+		if candidate != command {
+			t.Fatal("inherited bridge attached to a different command")
+		}
+		before := len(candidate.ExtraFiles)
+		transport, err := pifamily.AttachPiInheritedBridge(candidate)
+		if err == nil {
+			childCopies = append(childCopies, candidate.ExtraFiles[before:]...)
+		}
+		return transport, err
+	}
+	_, err := startPiProcess(filepath.Join(directory, "daemon.sock"), "failed-start", "/unused", directory, nil)
+	if err == nil {
+		t.Fatal("missing native executable started")
+	}
+	if attachments != 1 || len(childCopies) != 1 {
+		t.Fatalf("attachments=%d child copies=%d", attachments, len(childCopies))
+	}
+	for _, child := range childCopies {
+		if _, statErr := child.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("child bridge copy remained open after failed Start: %v", statErr)
+		}
 	}
 }
 
@@ -485,7 +774,6 @@ func TestPiCancelledCloseForcesAndJoinsExactChild(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	launchDirectory := wrapper.process.directory
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := wrapper.Close(ctx, sessionkit.SessionCloseRequest{})
@@ -496,9 +784,6 @@ func TestPiCancelledCloseForcesAndJoinsExactChild(t *testing.T) {
 	case <-wrapper.process.done:
 	default:
 		t.Fatal("forced child was not joined")
-	}
-	if _, statErr := os.Stat(launchDirectory); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("private launch directory survived forced Close: %v", statErr)
 	}
 }
 
@@ -545,9 +830,6 @@ func TestPiCloseWaitsForStartupResourceAdmission(t *testing.T) {
 	}
 	if wrapper.process == nil {
 		t.Fatal("held process was not published for cleanup")
-	}
-	if _, err := os.Stat(wrapper.process.directory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("held startup directory survived Close: %v", err)
 	}
 }
 
@@ -776,4 +1058,111 @@ func TestPiNameAndStateValidation(t *testing.T) {
 	if !strings.Contains((&piLog{data: []byte("stderr")}).String(), "stderr") {
 		t.Fatal("bounded stderr unavailable")
 	}
+}
+
+// When Pi's own dialog cannot be cancelled because the native write queue is
+// full, the lane ends with that error instead of staying connected while the
+// dialog blocks Pi's own work and every later Run. Before this change the
+// error was discarded and the lane stayed, unusable.
+func TestPiOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
+	wrapper, cwd := newPiTestWrapper(t, "startup-widget")
+	if _, err := wrapper.Open(context.Background(), sessionkit.OpenRequest{
+		Name: "managed@local", Open: sessionkit.OpenOptions{Cwd: cwd},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wrapper.Close(context.Background(), sessionkit.SessionCloseRequest{}) })
+	// Pi's own work is running and the native write queue is full.
+	wrapper.mu.Lock()
+	wrapper.ownWork = true
+	rpc := wrapper.rpc
+	wrapper.mu.Unlock()
+	rpc.mu.Lock()
+	saved := rpc.pendingWrites
+	rpc.pendingWrites = rpc.limits.maxPendingWrites
+	rpc.mu.Unlock()
+	defer func() {
+		rpc.mu.Lock()
+		rpc.pendingWrites = saved
+		rpc.mu.Unlock()
+	}()
+	if err := wrapper.observeNative(json.RawMessage(
+		`{"type":"extension_ui_request","id":"own-dialog","method":"confirm","title":"own","message":"continue?"}`,
+	)); err != nil {
+		t.Fatalf("own-work dialog = %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		wrapper.mu.Lock()
+		failure := wrapper.failure
+		wrapper.mu.Unlock()
+		if failure != nil {
+			if !errors.Is(failure, errNativeRPCBusy) {
+				t.Fatalf("lane failure = %v", failure)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an own-work dialog that could not be cancelled left the lane connected")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Close sets closing and ends native input before it cancels the wrapper
+// context, so an own-work dialog cancellation already under way can meet the
+// RPC's closed error while the context is live. That is the orderly end, not
+// a loss: Close would join it and fail a clean close. A busy writer while
+// closing, and a closed RPC while the lane is not closing, are still losses.
+func TestPiOwnWorkDialogCancelDuringOrderlyCloseIsNoLoss(t *testing.T) {
+	lane := func(t *testing.T, closing bool) (*Wrapper, *nativeRPC) {
+		rpc, _ := newNativeRPCTest(t, func(json.RawMessage) error { return nil }, nativeRPCLimits{})
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(errors.New("test done")) })
+		return &Wrapper{opened: true, closing: closing, ctx: ctx, cancel: cancel, rpc: rpc}, rpc
+	}
+	failure := func(wrapper *Wrapper) error {
+		wrapper.mu.Lock()
+		defer wrapper.mu.Unlock()
+		return wrapper.failure
+	}
+	endInput := func(t *testing.T, rpc *nativeRPC) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := rpc.EndInput(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("orderly close", func(t *testing.T) {
+		wrapper, rpc := lane(t, true)
+		endInput(t, rpc)
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); err != nil {
+			t.Fatalf("an orderly close recorded a loss: %v", err)
+		}
+	})
+	t.Run("busy while closing", func(t *testing.T) {
+		wrapper, rpc := lane(t, true)
+		rpc.mu.Lock()
+		saved := rpc.pendingWrites
+		rpc.pendingWrites = rpc.limits.maxPendingWrites
+		rpc.mu.Unlock()
+		defer func() {
+			rpc.mu.Lock()
+			rpc.pendingWrites = saved
+			rpc.mu.Unlock()
+		}()
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); !errors.Is(err, errNativeRPCBusy) {
+			t.Fatalf("busy cancellation while closing = %v", err)
+		}
+	})
+	t.Run("closed while live", func(t *testing.T) {
+		wrapper, rpc := lane(t, false)
+		endInput(t, rpc)
+		wrapper.cancelOwnWorkUI(wrapper.ctx, rpc, "own-dialog")
+		if err := failure(wrapper); !errors.Is(err, errNativeRPCClosed) {
+			t.Fatalf("closed cancellation on a live lane = %v", err)
+		}
+	})
 }

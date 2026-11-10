@@ -20,6 +20,14 @@ const maxOMPAssistantMessages = 256
 const maxOMPAssistantBytes = 8 << 20
 
 var errOMPRunInterrupted = errors.New("OMP Run interrupted before native admission")
+
+// ompEarlyStop is a Run that an interrupt stopped before OMP admitted its
+// prompt, with no other failure: only that Run ends and the lane stays.
+type ompEarlyStop struct{}
+
+func (ompEarlyStop) Error() string { return errOMPRunInterrupted.Error() }
+func (ompEarlyStop) Unwrap() error { return errOMPRunInterrupted }
+
 var errOMPUIUnsettled = errors.New("OMP native UI cancellation remained unsettled at turn completion")
 
 type ompAssistant struct {
@@ -33,6 +41,7 @@ type ompNativeTurn struct {
 	prompt  string
 	binding OwnerBinding
 	native  *nativePrompt
+	window  *ownerPreflightWindow
 
 	mu               sync.Mutex
 	changed          chan struct{}
@@ -41,7 +50,7 @@ type ompNativeTurn struct {
 	preflight        bool
 	preflightToken   string
 	starts           int
-	terminal         bool
+	yielded          bool
 	noAgent          bool
 	promptResultSeen bool
 	promptResultID   string
@@ -50,6 +59,7 @@ type ompNativeTurn struct {
 	assistantBytes   int
 	result           sessionkit.TurnResult
 	resultReady      bool
+	promptFailure    *nativePromptFailure
 	retirement       error
 	finalized        bool
 	uiClosed         bool
@@ -62,6 +72,10 @@ type ompNativeTurn struct {
 	interruptStarted bool
 	interruptError   error
 	report           func(sessionkit.DeliveryReceipt, error) error
+	// earlyStop is an interrupt before OMP admitted our prompt. The prompt is
+	// then abandoned (nativeAbandonedPrompt): its late work is OMP's own.
+	earlyStop  bool
+	abandonErr error
 }
 
 func newOMPNativeTurn(owner *Wrapper, run *sessionkit.Run, prompt string, binding OwnerBinding) *ompNativeTurn {
@@ -89,11 +103,49 @@ func (turn *ompNativeTurn) fail(err error) {
 	turn.mu.Unlock()
 }
 
-func (turn *ompNativeTurn) recordPreflight(token string) error {
+// stopEarly records an interrupt before OMP admitted our prompt. No run of
+// ours opens a dialog now; a later one is OMP's own.
+func (turn *ompNativeTurn) stopEarly() {
+	turn.mu.Lock()
+	turn.stopEarlyLocked()
+	turn.mu.Unlock()
+}
+
+func (turn *ompNativeTurn) stopEarlyLocked() {
+	turn.earlyStop = true
+	turn.uiClosed = true
+	turn.signalLocked()
+}
+
+// interruptedEarly reports an interrupt before admission as the cause of a
+// failed start step, so that the Run ends alone instead of the lane.
+func interruptedEarly(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errOMPRunInterrupted)
+}
+
+// stoppedByInterrupt reports a start step that failed only because that
+// interrupt cancelled it; any other failure keeps its own outcome.
+func stoppedByInterrupt(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) && interruptedEarly(ctx)
+}
+
+// recordPreflight takes our own preflight from the Run's window. A foreign
+// preflight recorded before it fails the Run: once OMP admitted our prompt it
+// was not busy with work of its own, so that earlier start was not ours.
+func (turn *ompNativeTurn) recordPreflight(token string, foreign int) error {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	if turn.failure != nil {
 		return turn.failure
+	}
+	if turn.earlyStop {
+		// The interrupt won: this preflight no longer admits the Run.
+		return nil
+	}
+	if foreign != 0 {
+		err := fmt.Errorf("OMP native preflight does not match the owned Run (%d foreign preflights before it)", foreign)
+		turn.failLocked(err)
+		return err
 	}
 	if turn.preflight || !validOwnerToken(token) || turn.noAgent {
 		err := errors.New("OMP native preflight is outside the owned Run")
@@ -102,8 +154,30 @@ func (turn *ompNativeTurn) recordPreflight(token string) error {
 	}
 	turn.preflight = true
 	turn.preflightToken = token
+	turn.settleLocked()
 	turn.signalLocked()
 	return nil
+}
+
+// ownEndedLocked reports whether our prompt's work is over. OMP reports the
+// prompt at its run's first yielded agent_end (rpc-prompt-results.ts:129-147),
+// so later runs, until and after our prompt_result, are OMP's own work.
+func (turn *ompNativeTurn) ownEndedLocked() bool {
+	return turn.yielded || turn.noAgent || turn.resultReady || turn.finalized || turn.promptFailure != nil || turn.earlyStop
+}
+
+// settleLocked ends the Run at our own agent-invoked prompt_result once our
+// preflight and run start are known. The snapshot taken at our run's yielded
+// agent_end is the result.
+func (turn *ompNativeTurn) settleLocked() {
+	if turn.resultReady || !turn.promptResultSeen || !turn.promptInvoked || !turn.preflight || turn.starts == 0 {
+		return
+	}
+	if !turn.yielded {
+		turn.failLocked(errors.New("OMP native prompt_result preceded the owned run's end"))
+		return
+	}
+	turn.resultReady = true
 }
 
 func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
@@ -112,31 +186,26 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	if turn.failure != nil {
 		return turn.failure
 	}
-	if turn.resultReady || turn.finalized {
-		err := fmt.Errorf("OMP native emitted %s after the owned terminal", kind)
-		turn.retirement = errors.Join(turn.retirement, err)
-		turn.signalLocked()
-		return err
+	switch kind {
+	case "agent_start", "message_end", "agent_end":
+		// A run event before our run starts or after it yielded is OMP's own
+		// work (owner decision 2026-10-15): it is not ours and does not end
+		// the lane.
+		if turn.ownEndedLocked() || kind != "agent_start" && turn.starts == 0 {
+			return nil
+		}
+	default:
+		if turn.resultReady || turn.finalized {
+			err := fmt.Errorf("OMP native emitted %s after the owned terminal", kind)
+			turn.retirement = errors.Join(turn.retirement, err)
+			turn.signalLocked()
+			return err
+		}
 	}
 	switch kind {
 	case "agent_start":
-		if turn.terminal || turn.noAgent {
-			err := errors.New("OMP native work started after the owned terminal")
-			turn.failLocked(err)
-			return err
-		}
 		turn.starts++
 	case "message_end":
-		if turn.terminal || turn.noAgent {
-			err := errors.New("OMP native message ended after the owned terminal")
-			turn.failLocked(err)
-			return err
-		}
-		if turn.starts == 0 {
-			err := errors.New("OMP native message ended outside the owned Run")
-			turn.failLocked(err)
-			return err
-		}
 		assistant, ok, err := decodeOMPAssistant(raw)
 		if err != nil {
 			turn.failLocked(err)
@@ -152,23 +221,13 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 			turn.assistantBytes += len(assistant.text)
 		}
 	case "agent_end":
-		if turn.starts == 0 {
-			err := errors.New("OMP native agent ended outside the owned Run")
-			turn.failLocked(err)
-			return err
-		}
-		terminal, err := decodeOMPTerminal(raw)
+		yielded, err := decodeOMPYield(raw)
 		if err != nil {
 			turn.failLocked(err)
 			return err
 		}
-		if terminal {
-			if turn.terminal || turn.noAgent || turn.starts == 0 {
-				err = errors.New("OMP native terminal is outside the owned Run")
-				turn.failLocked(err)
-				return err
-			}
-			turn.terminal = true
+		if yielded {
+			turn.yielded = true
 			turn.uiClosed = true
 			if len(turn.assistants) == 0 {
 				err = errors.New("OMP terminal has no current assistant result")
@@ -185,16 +244,34 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 			case "error", "length", "toolUse":
 				turn.result.Outcome = "failed"
 			}
-			turn.resultReady = true
+			turn.settleLocked()
 		}
 	case "prompt_result":
-		invoked, err := turn.decodePromptResult(raw)
+		invoked, status, message, err := turn.decodePromptResult(raw)
 		if err != nil {
 			turn.failLocked(err)
 			return err
 		}
-		if !invoked {
-			if turn.starts != 0 || turn.preflight || turn.terminal || len(turn.assistants) != 0 {
+		if turn.earlyStop {
+			// OMP's answer to the stopped prompt, read before it was abandoned
+			// or before StartPrompt resolved; there its ID is checked.
+			break
+		}
+		if invoked && turn.notDispatchedLocked(status) {
+			// OMP admitted our prompt and ended it before any run, for example
+			// on a usage-preflight denial: the prompt still counts as invoked
+			// and its result reports no run (agent-session.ts 18.12.2:8203,
+			// 7829-7838; rpc-prompt-results.ts 18.12.2:89-101). 18.13.x adds
+			// its cost cap to the same report. Only the Run fails, with OMP's
+			// text when it gives one; the lane stays.
+			if message == "" {
+				message = "OMP ended the prompt before its run (" + status + ")"
+			}
+			turn.promptFailure = &nativePromptFailure{err: errors.New(message)}
+			// No run of ours will open a dialog now; a later one is OMP's own.
+			turn.uiClosed = true
+		} else if !invoked {
+			if turn.starts != 0 || turn.preflight || turn.yielded || len(turn.assistants) != 0 {
 				err = errors.New("OMP no-agent result contradicts native Run evidence")
 				turn.failLocked(err)
 				return err
@@ -203,6 +280,8 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 			turn.uiClosed = true
 			turn.result = sessionkit.TurnResult{Outcome: "completed", NativeStopReason: "no_agent"}
 			turn.resultReady = true
+		} else {
+			turn.settleLocked()
 		}
 	case "extension_error":
 		var event struct {
@@ -218,41 +297,108 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 	return nil
 }
 
-func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, error) {
+// errOMPUnansweredPromptResult is a prompt_result read while StartPrompt was
+// unresolved when no prompt was answered: OMP answers a prompt before its
+// prompt_result, so it is none of ours.
+var errOMPUnansweredPromptResult = errors.New("OMP native prompt_result is invalid")
+
+// sealWithoutPrompt seals a turn StartPrompt dropped without a prompt, after
+// finishNativeTurn. Under the lock recordEvent runs under it marks the turn
+// finalized, so a prompt_result an event already holding the turn delivers
+// later is refused as after the owned terminal, and the reader ends the lane
+// with it; OMP's own run events stay harmless. A prompt_result the turn
+// already took ends the lane here, as the reader ends it for an invalid one.
+// An earlier transport failure stays the lane's cause.
+func (turn *ompNativeTurn) sealWithoutPrompt(rpc *nativeRPC) {
+	turn.mu.Lock()
+	turn.finalized = true
+	seen := turn.promptResultSeen
+	turn.mu.Unlock()
+	if seen {
+		rpc.stop(errOMPUnansweredPromptResult, false)
+	}
+}
+
+// decodePromptResult returns the prompt_result's agentInvoked, its status and
+// OMP's error text, which is empty when OMP gives none.
+func (turn *ompNativeTurn) decodePromptResult(raw json.RawMessage) (bool, string, string, error) {
 	var event struct {
 		ID           *string         `json:"id"`
 		AgentInvoked json.RawMessage `json:"agentInvoked"`
+		Status       json.RawMessage `json:"status"`
+		Error        json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &event) != nil || event.ID == nil || !validOwnerID(*event.ID) || turn.promptResultSeen ||
-		(turn.native != nil && *event.ID != turn.native.id) {
-		return false, errors.New("OMP native prompt_result is invalid")
+		(turn.native != nil && *event.ID != turn.native.id) || (turn.earlyStop && turn.submitted && turn.native == nil) {
+		return false, "", "", errors.New("OMP native prompt_result is invalid")
 	}
 	trimmed := bytes.TrimSpace(event.AgentInvoked)
 	var invoked bool
 	if json.Unmarshal(trimmed, &invoked) != nil || (!bytes.Equal(trimmed, []byte("true")) && !bytes.Equal(trimmed, []byte("false"))) {
-		return false, errors.New("OMP native prompt_result is invalid")
+		return false, "", "", errors.New("OMP native prompt_result is invalid")
+	}
+	// Status and error text only classify a report without a run; any other
+	// shape leaves them empty, as before they were read.
+	var status string
+	_ = json.Unmarshal(event.Status, &status)
+	var detail struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(event.Error, &detail)
+	message := detail.Message
+	if len(message) > 64<<10 {
+		message = ""
 	}
 	turn.promptResultSeen = true
 	turn.promptResultID = *event.ID
 	turn.promptInvoked = invoked
-	return invoked, nil
+	return invoked, status, message, nil
 }
 
-func decodeOMPTerminal(raw json.RawMessage) (bool, error) {
+// notDispatchedLocked reports an agent-invoked prompt_result that OMP wrote
+// for our prompt without any run: status aborted or error, and no run start,
+// yield or assistant message. Our preflight may already be recorded, since
+// OMP emits before_agent_start before it hands the prompt to the agent.
+func (turn *ompNativeTurn) notDispatchedLocked(status string) bool {
+	return (status == "aborted" || status == "error") && turn.failure == nil && turn.promptFailure == nil &&
+		turn.starts == 0 && !turn.yielded && len(turn.assistants) == 0 && !turn.noAgent && !turn.resultReady
+}
+
+// decodeOMPYield applies OMP's own prompt-report rule, `yielded ??
+// isTerminal !== false` (rpc-prompt-results.ts:136). OMP 18.11.0 writes both
+// flags (agent-session.ts:5049-5070).
+func decodeOMPYield(raw json.RawMessage) (bool, error) {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(raw, &object) != nil || object == nil {
 		return false, errors.New("OMP native agent_end is invalid")
 	}
-	value, ok := object["isTerminal"]
+	terminal, ok, err := decodeOMPFlag(object, "isTerminal")
+	if err != nil {
+		return false, err
+	}
 	if !ok {
 		return false, errors.New("OMP native agent_end omitted its terminal authority")
 	}
-	trimmed := bytes.TrimSpace(value)
-	var terminal bool
-	if json.Unmarshal(trimmed, &terminal) != nil || (!bytes.Equal(trimmed, []byte("true")) && !bytes.Equal(trimmed, []byte("false"))) {
-		return false, errors.New("OMP native agent_end terminal flag is invalid")
+	yielded, ok, err := decodeOMPFlag(object, "yielded")
+	if err != nil {
+		return false, err
 	}
-	return terminal, nil
+	if !ok {
+		return terminal, nil
+	}
+	return yielded, nil
+}
+
+func decodeOMPFlag(object map[string]json.RawMessage, key string) (value, ok bool, err error) {
+	raw, ok := object[key]
+	if !ok {
+		return false, false, nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if json.Unmarshal(trimmed, &value) != nil || (!bytes.Equal(trimmed, []byte("true")) && !bytes.Equal(trimmed, []byte("false"))) {
+		return false, true, fmt.Errorf("OMP native agent_end %s flag is invalid", key)
+	}
+	return value, true, nil
 }
 
 func decodeOMPAssistant(raw json.RawMessage) (ompAssistant, bool, error) {
@@ -321,6 +467,12 @@ func (turn *ompNativeTurn) admission() (bool, bool, <-chan struct{}, error) {
 	if turn.failure != nil {
 		return false, false, turn.changed, turn.failure
 	}
+	if turn.promptFailure != nil {
+		return false, false, turn.changed, turn.promptFailure
+	}
+	if turn.earlyStop {
+		return false, false, turn.changed, errOMPRunInterrupted
+	}
 	return turn.preflight && turn.starts > 0, turn.noAgent, turn.changed, nil
 }
 
@@ -330,6 +482,12 @@ func (turn *ompNativeTurn) completion() (bool, <-chan struct{}, error) {
 	if turn.failure != nil {
 		return false, turn.changed, turn.failure
 	}
+	if turn.promptFailure != nil {
+		return false, turn.changed, turn.promptFailure
+	}
+	if turn.earlyStop {
+		return false, turn.changed, errOMPRunInterrupted
+	}
 	return turn.resultReady && turn.pendingUI == 0, turn.changed, nil
 }
 
@@ -337,6 +495,29 @@ func (turn *ompNativeTurn) hasResult() bool {
 	turn.mu.Lock()
 	defer turn.mu.Unlock()
 	return turn.resultReady
+}
+
+// failBeforeRun records OMP's own late answer to our admitted prompt as the
+// Run's failure when OMP's run for it never started: no run start, yield or
+// assistant message. Our preflight may already be recorded, since OMP emits
+// before_agent_start before it hands the prompt to the agent. Any other late
+// failure is left to the caller.
+func (turn *ompNativeTurn) failBeforeRun(err error) bool {
+	var native *nativeRPCError
+	if !errors.As(err, &native) || native.Command != "prompt" {
+		return false
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	if turn.failure != nil || turn.starts != 0 || turn.yielded || len(turn.assistants) != 0 ||
+		turn.promptResultSeen || turn.noAgent || turn.resultReady {
+		return false
+	}
+	turn.promptFailure = &nativePromptFailure{err: err}
+	// No run of ours will open a dialog now; a later one is OMP's own.
+	turn.uiClosed = true
+	turn.signalLocked()
+	return true
 }
 
 func (turn *ompNativeTurn) awaitCompletion(ctx context.Context) error {
@@ -377,6 +558,27 @@ func (turn *ompNativeTurn) finishPrompt(err error) error {
 	if turn.native == nil {
 		return err
 	}
+	turn.mu.Lock()
+	earlyStop := turn.earlyStop
+	turn.mu.Unlock()
+	if earlyStop {
+		var abandonErr error
+		if invoked, known := turn.native.ImmediateAgentInvoked(); known && !invoked {
+			// OMP already finished the prompt without a run, and nothing
+			// follows that answer: there is nothing to abandon.
+			abandonErr = turn.native.Finish()
+		} else {
+			var resultSeen bool
+			resultSeen, abandonErr = turn.native.Abandon()
+			if abandonErr == nil && resultSeen {
+				abandonErr = turn.awaitPromptResult()
+			}
+		}
+		turn.mu.Lock()
+		turn.abandonErr = abandonErr
+		turn.mu.Unlock()
+		return errors.Join(err, abandonErr)
+	}
 	finishErr := turn.native.Finish()
 	turn.mu.Lock()
 	if turn.resultReady && finishErr != nil && turn.retirement != nil && errors.Is(turn.retirement, finishErr) {
@@ -389,18 +591,44 @@ func (turn *ompNativeTurn) finishPrompt(err error) error {
 	return errors.Join(err, finishErr)
 }
 
-func (turn *ompNativeTurn) cancelUI(requestID string) error {
+// awaitPromptResult waits for the prompt_result that the reader already
+// passed on, so that it reaches this turn and not a lane without a Run.
+func (turn *ompNativeTurn) awaitPromptResult() error {
+	rpc := turn.owner.owner.rpc
+	for {
+		turn.mu.Lock()
+		seen, failure, changed := turn.promptResultSeen, turn.failure, turn.changed
+		turn.mu.Unlock()
+		if seen || failure != nil {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-rpc.Done():
+			return rpc.Err()
+		}
+	}
+}
+
+// cancelUI cancels a dialog of our run and joins that cancellation before the
+// Run's result. owned=false means our run's dialogs are closed, so the dialog
+// is OMP's own work and the caller cancels it without a Run to join.
+func (turn *ompNativeTurn) cancelUI(requestID string) (owned bool, err error) {
 	turn.mu.Lock()
 	if turn.failure != nil {
 		err := turn.failure
 		turn.mu.Unlock()
-		return err
+		return true, err
 	}
-	if turn.uiClosed || turn.uiIDs[requestID] || len(turn.uiIDs) >= maxOMPTurnUIRequests {
+	if turn.uiClosed {
+		turn.mu.Unlock()
+		return false, nil
+	}
+	if turn.uiIDs[requestID] || len(turn.uiIDs) >= maxOMPTurnUIRequests {
 		err := errors.New("OMP native extension UI request is outside its owned bound")
 		turn.failLocked(err)
 		turn.mu.Unlock()
-		return err
+		return true, err
 	}
 	turn.uiIDs[requestID] = true
 	turn.pendingUI++
@@ -420,7 +648,7 @@ func (turn *ompNativeTurn) cancelUI(requestID string) error {
 		}
 		turn.mu.Unlock()
 	}()
-	return nil
+	return true, nil
 }
 
 func (turn *ompNativeTurn) joinOwnedWork(cause error) {
@@ -449,11 +677,12 @@ func (turn *ompNativeTurn) joinOwnedWork(cause error) {
 func (turn *ompNativeTurn) Wait(ctx context.Context) (result sessionkit.TurnResult, err error) {
 	defer turn.owner.finishNativeTurn(turn)
 	turn.mu.Lock()
-	admitted, noAgent := turn.preflight && turn.starts > 0, turn.noAgent
+	admitted, noAgent, stopped := turn.preflight && turn.starts > 0, turn.noAgent, turn.earlyStop
 	turn.mu.Unlock()
+	// An early stop's seed gets its one receipt from Run.
 	if admitted && turn.report != nil {
 		err = turn.report(sessionkit.DeliveryReceipt{Disposition: "injected"}, nil)
-	} else if noAgent && turn.report != nil {
+	} else if noAgent && !stopped && turn.report != nil {
 		err = turn.report(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "native_submission_refused"}, nil)
 	}
 	if err == nil && turn.run != nil && turn.run.Interrupted() && admitted {
@@ -487,7 +716,21 @@ func (turn *ompNativeTurn) Wait(ctx context.Context) (result sessionkit.TurnResu
 	turn.uiClosed = true
 	turn.signalLocked()
 	retirement := turn.retirement
+	promptFailure, failure := turn.promptFailure, turn.failure
+	earlyStop, abandonErr, interruptErr := turn.earlyStop, turn.abandonErr, turn.interruptError
 	turn.mu.Unlock()
+	if promptFailure != nil && failure == nil && !interruptStarted && retirement == nil {
+		// OMP failed our prompt before its run: only the Run fails.
+		return sessionkit.TurnResult{}, promptFailure
+	}
+	if earlyStop && failure == nil && retirement == nil && abandonErr == nil && interruptErr == nil {
+		// An interrupt before OMP admitted our prompt ends only this Run;
+		// any other failure above still ends the lane.
+		turn.owner.mu.Lock()
+		turn.owner.drainReports = true
+		turn.owner.mu.Unlock()
+		return sessionkit.TurnResult{}, ompEarlyStop{}
+	}
 	if err != nil {
 		turn.owner.lose(err)
 	} else if retirement != nil {
@@ -500,7 +743,7 @@ func (turn *ompNativeTurn) Interrupt(ctx context.Context) error {
 	turn.interruptOnce.Do(func() {
 		turn.mu.Lock()
 		turn.interruptStarted = true
-		terminal := turn.terminal || turn.noAgent || turn.finalized
+		terminal := turn.ownEndedLocked()
 		turn.mu.Unlock()
 		defer close(turn.interruptDone)
 		if !terminal {
@@ -539,6 +782,10 @@ func (p *Wrapper) observeNative(raw json.RawMessage) error {
 		return nil
 	}
 	if turn == nil {
+		if envelope.Type == "agent_start" || envelope.Type == "message_end" || envelope.Type == "agent_end" {
+			// OMP's own work (owner decision 2026-10-15) does not end the lane.
+			return nil
+		}
 		return fmt.Errorf("OMP native emitted %s outside an owned Run", envelope.Type)
 	}
 	return turn.recordEvent(envelope.Type, raw)
@@ -575,29 +822,87 @@ func (p *Wrapper) observeNativeUI(raw json.RawMessage) error {
 		return fmt.Errorf("OMP native requested unknown extension UI method %q", event.Method)
 	}
 	p.mu.Lock()
-	turn, opened, closing := p.active, p.opened, p.closing
+	turn, opened, closing, owner, ctx := p.active, p.opened, p.closing, p.owner, p.ctx
 	p.mu.Unlock()
-	if !opened || closing || turn == nil {
+	if !opened || closing || owner == nil {
 		return fmt.Errorf("OMP native requested unsupported startup UI method %q", event.Method)
 	}
-	return turn.cancelUI(event.ID)
+	if turn != nil {
+		if owned, err := turn.cancelUI(event.ID); owned {
+			return err
+		}
+	}
+	// A dialog of OMP's own work is cancelled the same way, with no Run to
+	// join, as for Pi.
+	go p.cancelOwnWorkUI(ctx, owner.rpc, event.ID)
+	return nil
+}
+
+// cancelOwnWorkUI cancels a dialog of OMP's own work. If that cancellation
+// fails while the lane is live, the dialog would block OMP's work and every
+// later Run, so the lane ends with the error through the usual loss path;
+// nothing is retried. Close sets closing and ends native input before it
+// cancels the wrapper context, so a cancellation under way then meets the
+// RPC's closed error with the context live: that is the orderly end, not a
+// loss. Every other error, and a closed RPC while the lane is not closing,
+// still ends the lane.
+func (p *Wrapper) cancelOwnWorkUI(ctx context.Context, rpc *nativeRPC, id string) {
+	err := rpc.CancelUI(ctx, id)
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	if errors.Is(err, errNativeRPCClosed) {
+		p.mu.Lock()
+		closing := p.closing
+		p.mu.Unlock()
+		if closing {
+			return
+		}
+	}
+	p.lose(fmt.Errorf("OMP own-work dialog could not be cancelled: %w", err))
 }
 
 func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prompt string) (*ompNativeTurn, error) {
 	if !validOMPArgument(prompt, nativeRPCPhysicalFrameBytes-1024) || strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("OMP lane prompt is empty or exceeds its native bound")
+		return nil, &nativePromptFailure{err: errors.New("OMP lane prompt is empty or exceeds its native bound")}
+	}
+	if err := p.drainAfterEarlyStop(ctx); err != nil {
+		return nil, err
 	}
 	p.mu.Lock()
 	if !p.opened || p.closing || p.failure != nil || p.ctx.Err() != nil || p.active != nil || p.owner == nil {
 		p.mu.Unlock()
 		return nil, errors.New("OMP lane is unavailable or busy")
 	}
+	if p.owner.rpc.AbandonedLive() {
+		p.mu.Unlock()
+		// A stopped Run's prompt is still OMP's work until its prompt_result,
+		// as OMP itself refuses a prompt while one runs: refused before any
+		// write, the Run fails and the lane stays.
+		return nil, &nativePromptRefusal{err: errors.New("OMP lane is unavailable or busy")}
+	}
 	binding := p.binding
 	turn := newOMPNativeTurn(p, run, prompt, binding)
 	p.active = turn
 	owner := p.owner
 	p.mu.Unlock()
+	// The window opens before OMP can read our prompt, so our own preflight
+	// always falls inside it; see ownerPreflightWindow.
+	window, err := owner.registry.openPreflightWindow(binding.OwnerToken, binding.SessionID, prompt)
+	if err != nil {
+		p.finishNativeTurn(turn)
+		return nil, err
+	}
+	turn.window = window
 	native, submitted, callErr := owner.rpc.StartPrompt(ctx, prompt)
+	var refusal *nativePromptRefusal
+	if errors.As(callErr, &refusal) {
+		// Nothing of the prompt reached the agent. The turn and anything it
+		// recorded from OMP's own work are dropped; the lane stays.
+		p.finishNativeTurn(turn)
+		turn.sealWithoutPrompt(owner.rpc)
+		return nil, refusal
+	}
 	turn.mu.Lock()
 	turn.submitted = submitted
 	turn.native = native
@@ -605,7 +910,14 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		turn.failLocked(errors.New("OMP native prompt_result changed request identity"))
 	}
 	if callErr != nil && submitted {
-		turn.failLocked(callErr)
+		if errors.Is(callErr, errNativePromptAbandoned) && interruptedEarly(ctx) {
+			turn.stopEarlyLocked()
+		} else {
+			turn.failLocked(callErr)
+		}
+	}
+	if native == nil && submitted && turn.promptResultSeen {
+		turn.failLocked(errOMPUnansweredPromptResult)
 	}
 	turn.mu.Unlock()
 	if callErr != nil {
@@ -613,15 +925,18 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 		p.finishNativeTurn(turn)
+		turn.sealWithoutPrompt(owner.rpc)
 		return nil, callErr
 	}
 	invoked, known := native.ImmediateAgentInvoked()
 	if known {
 		turn.mu.Lock()
-		if turn.failure != nil {
+		if turn.failure != nil || turn.earlyStop {
+			// A failure stands; an interrupt that won leaves no no-agent
+			// result, and the early stop finishes the prompt.
 		} else if turn.promptResultSeen && turn.promptInvoked != invoked {
 			turn.failLocked(errors.New("OMP prompt results contradict each other"))
-		} else if !invoked && (turn.starts != 0 || turn.preflight || turn.terminal || len(turn.assistants) != 0) {
+		} else if !invoked && (turn.starts != 0 || turn.preflight || turn.yielded || len(turn.assistants) != 0) {
 			turn.failLocked(errors.New("OMP immediate no-agent result contradicts native Run evidence"))
 		} else if !invoked {
 			turn.noAgent = true
@@ -635,23 +950,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 	}
-	preflightCtx, cancelPreflight := context.WithCancel(ctx)
-	type preflightResult struct {
-		token string
-		err   error
-	}
-	preflightDone := make(chan preflightResult, 1)
-	go func() {
-		token, waitErr := owner.registry.waitPreflight(preflightCtx, binding.OwnerToken, binding.SessionID, prompt)
-		preflightDone <- preflightResult{token: token, err: waitErr}
-	}()
-	preflightJoined := false
-	defer func() {
-		cancelPreflight()
-		if !preflightJoined {
-			<-preflightDone
-		}
-	}()
+	reportsDrained := false
 	for {
 		admitted, noAgent, changed, admissionErr := turn.admission()
 		if admissionErr != nil {
@@ -669,35 +968,108 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		if noAgent {
 			return turn, nil
 		}
+		// Read the turn before the window: a preflight applied before our
+		// prompt_result was recorded is then always seen below. The same read
+		// also sees an admission or failure recorded since admission() above,
+		// so the top of the loop handles it, never a "missing preflight".
+		turn.mu.Lock()
+		settled := turn.failure != nil || turn.promptFailure != nil || turn.noAgent || turn.preflight && turn.starts > 0
+		preflight, ended := turn.preflight, turn.promptResultSeen && turn.promptInvoked
+		turn.mu.Unlock()
+		if settled {
+			continue
+		}
+		runToken, foreign, preflightChanged, windowErr := window.observe()
+		if windowErr != nil {
+			turn.fail(windowErr)
+			return turn, nil
+		}
+		if runToken != "" && !preflight {
+			if err := turn.recordPreflight(runToken, foreign); err != nil {
+				return turn, nil
+			}
+			continue
+		}
+		if ended {
+			// OMP's prompt_result comes over stdout, our run.preflight over the
+			// bridge, so the result can arrive first. Wait once for the
+			// extension's earlier reports, then read the window again.
+			if runToken == "" && !reportsDrained {
+				reportsDrained = true
+				if err := owner.registry.reportsDrained(ctx, binding.OwnerToken, binding.SessionID); err != nil {
+					if stoppedByInterrupt(ctx, err) {
+						turn.stopEarly()
+					} else {
+						turn.fail(fmt.Errorf("OMP owned preflight could not be confirmed: %w", err))
+					}
+					return turn, nil
+				}
+				continue
+			}
+			// Our agent-invoked prompt_result is OMP's report that all work of
+			// our prompt settled; before this change the Run waited until it
+			// was cancelled. Without our preflight by then, the prompt OMP ran
+			// was not ours as sent.
+			if runToken == "" {
+				turn.fail(fmt.Errorf("OMP owned preflight is missing or rewritten (%d foreign preflights in the Run window)", foreign))
+			} else {
+				turn.fail(errors.New("OMP native reported agent work for the owned prompt without a run"))
+			}
+			return turn, nil
+		}
 		select {
-		case value := <-preflightDone:
-			preflightJoined = true
-			if value.err != nil {
-				turn.fail(value.err)
-				return turn, nil
-			}
-			if err := turn.recordPreflight(value.token); err != nil {
-				return turn, nil
-			}
+		case <-preflightChanged:
 		case <-native.Late():
 			err := native.Finish()
 			if err == nil {
 				err = errors.New("OMP native prompt correlation ended before admission")
+			} else if turn.failBeforeRun(err) {
+				return turn, nil
 			}
 			turn.fail(err)
 			return turn, nil
 		case <-ctx.Done():
-			turn.fail(context.Cause(ctx))
+			if interruptedEarly(ctx) {
+				turn.stopEarly()
+			} else {
+				turn.fail(context.Cause(ctx))
+			}
 			return turn, nil
 		case <-p.ctx.Done():
 			turn.fail(context.Cause(p.ctx))
 			return turn, nil
+		case <-owner.registry.Done():
 		case <-changed:
 		}
 	}
 }
 
+// drainAfterEarlyStop runs before the first Run after an early stop, once the
+// stopped prompt's prompt_result has opened the gate. The extension queued
+// that prompt's run.preflight inside before_agent_start, before OMP wrote
+// the result (agent-session.ts 18.18.5 :9328), so draining the reports now
+// applies it outside any Run's window. The flag clears only on success; a
+// drain cancelled by an interrupt leaves this Run unsubmitted.
+func (p *Wrapper) drainAfterEarlyStop(ctx context.Context) error {
+	p.mu.Lock()
+	drain, owner, binding := p.drainReports, p.owner, p.binding
+	p.mu.Unlock()
+	if !drain || owner == nil || owner.rpc.AbandonedLive() {
+		return nil
+	}
+	if err := owner.registry.reportsDrained(ctx, binding.OwnerToken, binding.SessionID); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.drainReports = false
+	p.mu.Unlock()
+	return nil
+}
+
 func (p *Wrapper) finishNativeTurn(turn *ompNativeTurn) {
+	if turn.window != nil {
+		turn.window.close()
+	}
 	p.mu.Lock()
 	if p.active == turn {
 		p.active = nil
@@ -711,8 +1083,14 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	p.mu.Unlock()
 	if matching {
 		if turn != nil {
+			// Decided under the lock admission is recorded under: once the
+			// interrupt wins, a later admission frame no longer admits the
+			// Run, so either side keeps the lane.
 			turn.mu.Lock()
 			admitted := turn.preflight && turn.starts > 0
+			if !admitted && cancel != nil && !turn.ownEndedLocked() {
+				turn.stopEarlyLocked()
+			}
 			turn.mu.Unlock()
 			if admitted {
 				return turn.Interrupt(ctx)
@@ -748,9 +1126,7 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		return reject(errors.New("OMP Run was interrupted before native submission"))
 	}
 	var input string
-	if seed.Text != nil {
-		input = *seed.Text
-	} else if input, err = host.RenderNativeMessage(*seed.Delivery); err != nil {
+	if input, err = runInput(seed); err != nil {
 		return reject(err)
 	}
 	p.mu.Lock()
@@ -790,23 +1166,35 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		}
 		return turn, startErr
 	})
-	if !nativeAdmitted && errors.Is(context.Cause(runCtx), errOMPRunInterrupted) {
-		var reportErr error
+	var refusal *nativePromptRefusal
+	var failure *nativePromptFailure
+	if errors.As(err, &refusal) || errors.As(err, &failure) {
+		// The handoff returned its staged messages to the queue; the seed was
+		// not submitted. As for Pi, the refused Run fails and the lane stays,
+		// as does a Run whose prompt failed before OMP's run for it started.
 		if seed.Delivery != nil {
+			err = errors.Join(err, run.ReportDelivery(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "not_submitted"}, nil))
+		}
+		return sessionkit.TurnResult{}, err
+	}
+	var early ompEarlyStop
+	if !nativeAdmitted && interruptedEarly(runCtx) && (errors.As(err, &early) || !nativeSubmitted && errors.Is(err, context.Canceled)) {
+		// An interrupt before OMP admitted the prompt ends only this Run. A
+		// written prompt may still reach OMP, so its seed has no receipt and
+		// its staged messages stay consumed; an unwritten one was requeued.
+		if seed.Delivery != nil {
+			var reportErr error
 			if nativeSubmitted {
-				reportErr = run.ReportDelivery(sessionkit.DeliveryReceipt{}, errOMPRunInterrupted)
+				reportErr = run.ReportDelivery(sessionkit.DeliveryReceipt{}, uncertainSubmission())
 			} else {
 				reportErr = run.ReportDelivery(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "not_submitted"}, nil)
 			}
-			err = errors.Join(err, reportErr)
+			if reportErr != nil {
+				p.lose(reportErr)
+				return sessionkit.TurnResult{}, reportErr
+			}
 		}
-		p.lose(errOMPRunInterrupted)
-		if reportErr != nil {
-			return sessionkit.TurnResult{}, err
-		}
-		if err == nil || errors.Is(err, errOMPRunInterrupted) || errors.Is(err, context.Canceled) {
-			return sessionkit.TurnResult{Outcome: "interrupted"}, nil
-		}
+		return sessionkit.TurnResult{Outcome: "interrupted"}, nil
 	}
 	if err == nil && !nativeSubmitted && !nativeAdmitted && result.Outcome == "interrupted" && seed.Delivery != nil {
 		if reportErr := run.ReportDelivery(sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "not_submitted"}, nil); reportErr != nil {
@@ -821,4 +1209,18 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, seed sessionkit.
 		}
 	}
 	return result, err
+}
+
+// runInput is a Run seed's prompt: the owner's text as given, or the rendered
+// peer message with its file mentions escaped, so that OMP reads no file a
+// peer names. Steered messages do not reach OMP's prompt path.
+func runInput(seed sessionkit.RunInput) (string, error) {
+	if seed.Text != nil {
+		return *seed.Text, nil
+	}
+	rendered, err := ompRenderPeerMessage(*seed.Delivery)
+	if err != nil {
+		return "", err
+	}
+	return escapeFileMentions(rendered), nil
 }

@@ -11,6 +11,201 @@ Current integration: see [Pi/OMP design](../designs/pi-omp-0.5.0/DESIGN.md) and
 The facts and `UNVERIFIED` questions below describe the older source snapshot;
 they are preserved as historical inputs, not the current release checklist.
 
+## A lane prompt that an input extension forwards (2026-11-09)
+
+When an input extension forwards the lane's prompt with `sendUserMessage`,
+Pi starts that run from our input, refuses the original prompt as busy, and
+the managed extension has already witnessed our input and the run's
+preflight. The Run then follows the forwarded run. If that forwarded prompt
+fails in its preparation after the preflight and before the run starts (a
+throw in `_prepareRun` after `before_agent_start`; `agent-session.js`
+1.4.0:1424-1437, 1480-1494), Pi emits no `agent_start` and no
+`agent_settled`, only `extension_error` with `extensionPath: "<runtime>"`
+and `event: "send_user_message"` (:2774-2780, `rpc-mode.js:259-260`), before
+or after the busy reply. The wrapper arms the Run's window before it sends
+the prompt and takes exactly that frame only inside it (our input and
+preflight witnessed, the preflight's settle generation, no start yet); the
+Run is then unavailable with both answers and the lane stays. The
+forwarding extension received the input, so the turn is consumed: staged
+messages are not requeued, and a delivery seed gets the uncertain receipt
+(the Worker's Internal `uncertain_submission` error, `no_receipt` for the
+sender). Any other extension error is handled as before. Another
+extension's own failed `sendUserMessage` in that same window also ends the
+Run as unavailable; if the forwarded run then starts, it is Pi's own work.
+
+Pi's answer to the prompt carries a disposition, `handled`, `queued` or
+`started` (`rpc-mode.js` 1.4.0:298-317; `agent-session.js` :1644, :1654,
+:1675, :1693). An exact `handled` after our input and the forwarded run's
+preflight makes the Run follow that run, as after a busy refusal. An exact
+`handled` before any preflight of ours ends only that Run as unavailable
+(`Pi native prompt: handled`): the turn is consumed, so the input is not
+replayed; a delivery seed gets an uncertain receipt and is not resent; the
+lane stays. A missing, unknown, `started` or `queued` disposition keeps the
+missing-preflight failure. A later preflight of the extension's run is
+Pi's own work while no next Run has recorded its input. Limit: Pi's
+preflight carries no prompt identity, so if that late preflight arrives
+after the next Run recorded its input and before its own preflight, the
+next Run can take it. A dialog that our turn owned is cancelled and joined
+before the turn is consumed, also before a `handled` answer is taken; a
+failed cancellation ends the lane, as elsewhere, and a preflight that wins
+during that join is followed. Once consumed, the turn is no longer ours:
+stdout frames, Run witnesses and dialogs that still reach it are Pi's own
+work. Limit: an interrupt while an owned dialog's cancellation is still
+being written waits for that write; if Pi stops reading its input, the Run
+ends only when the lane closes, as at the normal end of a Run.
+
+## Steer limit (2026-11-09)
+
+Steers the extension handed to Pi that Pi has not ended yet (the admitted
+steered entries; each leaves at its `message_end`, when it is written to
+history, or at session end) are held to the owner FIFO's limits: 256 entries
+and 8 MiB of message ID plus body bytes, counted as the FIFO counts them. The
+count is taken only when a steer would be sent (a running, non-idle Pi); at
+the limit `native.steer` answers a private `queue_full` and sends nothing.
+Pi is busy then, so in a terminal the owner's append answers busy and the
+delivery waits in the FIFO (`queued_for_next_turn`), refused with
+`Pi delivery queue is full` only when the FIFO is full too. A lane refuses
+it with that reason. Entries are counted from the admitted map itself, so
+no counter is kept that a Run end could reset.
+
+## Tool-list patterns in managed launches (2026-10-28)
+
+Pi matches `--tools` and `--exclude-tools` entries as exact names or as
+patterns whose `*` matches any characters over the whole name
+(`mcp-servers.js` `toolPatternRegExp`, `createToolNameMatcher`; applied in
+`sdk.js:158-160` and `agent-session.js:193-197`). An excluded tool is never
+registered, so the extension cannot restore it. The managed launch guard
+compared both lists by exact name only, so `--exclude-tools 'session*'` (found
+by the PR #9 review bot) removed the Sessionbus tool unnoticed, and an
+allowlist pattern such as `--tools '*'` was refused although it keeps the
+tool. Decision (2026-10-28): the guard matches both lists as Pi does. Exact
+names, `+name`/`-name` modifier lists and lists that do not select the tool
+keep their earlier handling.
+
+## Steered peer messages left unread without an abort (2026-10-28)
+
+Pi 1.4.0 can end a task with a steered peer message never started and no
+abort: Alt+Up restores Pi's queue to the editor and clears agent-core's queue
+(`interactive-mode.js:3645-3652, 3852-3870`; `agent-session.js:1944-1952`), a
+failed compaction-queue flush clears it (`interactive-mode.js:3886-3899`), and
+a task whose context cannot continue settles with the message still queued
+(`_runBeforeSettleBoundary`). Only typed text returns to the editor; our
+custom steer lives in agent-core's queue, and `ctx.hasPendingMessages()`
+counts typed text only, so an extension cannot tell a dropped message from a
+held one. Decision (2026-10-28, the owner's "Clear the queue first" and
+"History only, no new turn"): at every settle, not only an aborted one, a
+steered message that never started is kept as at Escape: one `ctx.abort()`
+clears Pi's queues, then the message is written to history once with no
+turn. The abort comes only with such a message; at a settle Pi's run is no
+longer active, so it requests no run abort and leaves the deferred starts of
+settled handlers, including the extension's own drain that follows,
+untouched (`agent-session.js:683-706, 1866-1867`). A message held for a later
+task therefore reaches history at once instead of at that task. Quitting
+while Pi is idle writes any such message too, since Pi awaits
+`session_shutdown` before it disposes the session
+(`agent-session-runtime.js:296-303`). A steered message that started stays
+as it is: attempted, consumption unknown.
+
+Quitting while a task runs: Pi 1.5.0 does not abort the task before
+`session_shutdown` (Pi 1.5.1 does; see "Quit and session switch on Pi 1.5.1"
+below) and awaits that handler with no bound of its own. With a
+never-started steer, or (since 2026-11-09) with deliveries still waiting in
+the owner for Pi's next task, the extension aborts the task, or a
+compaction, as Escape does, waits up to 2 seconds (`quitWaitMs`) for Pi to
+become idle, then writes the steer once. At quit the extension first calls
+the owner's `owner.quit`, which answers whether deliveries wait and from then
+on refuses a delivery that would wait for a next task ("native owner
+closed") instead of queueing it to be dropped at session end; while Pi
+quits no delivery is steered, so a crossing delivery is written to history
+once Pi is idle or refused.
+A settle in that window keeps it the same way. Every drain, scheduled or at a
+settle, is gated while Pi quits, and a delivery crossing the quit is written
+to history once Pi is idle instead of starting a turn. Once Pi is idle, the
+quit drain writes the deliveries still queued for Pi's next task to history
+once, after the never-started steers, in arrival order. Still busy at the
+bound, nothing is written and those messages are lost as before; quit is
+delayed only in that state.
+
+## Quit and session switch on Pi 1.5.1 (2026-11-10)
+
+Pi 1.5.1 aborts the running task, and a manual compaction, before it emits
+`session_shutdown` on quit (`agent-session-runtime.js` `dispose`), as both Pi
+1.5.0 and 1.5.1 do before a session switch (`teardownCurrent`). Pi awaits the
+deferred sends of that aborted settle, a whole new task for a turn-starting
+send, before it gets to `session_shutdown`. Before this change the settle's
+own drain (and the `session_compact_failed` drain) therefore started one more
+task with the deliveries waiting in the owner, after the TUI had stopped.
+
+- An aborted settle, and a compaction failure, drain on the next tick
+  (`scheduleDrain`) instead of inline. At quit or a switch Pi reaches
+  `session_shutdown` in the same microtask chain, so the gate is closed first
+  and the drain writes nothing; after Escape, or a compaction failure alone,
+  it picks up the next queued delivery one tick later.
+- `session_shutdown` for `new`, `resume` and `fork` runs the quit history
+  drain: each delivery still waiting is written once to the history of the
+  session being left, with no turn. Before, a busy switch ran them in that
+  session and an idle switch dropped them at `session_end`. Both gates (the
+  extension's `quitting`, the owner's `#quitClosed`) are reset when the
+  successor session is ready, also for a same-ID resume.
+- Inline drains kept: `before_agent_start` (Pi's run is already active, so an
+  append is refused busy and starts nothing), a settle without an abort, and
+  the shutdown history drain itself.
+- Recorded limit, decided by Fable (2026-11-10, `cruvge20y750`) and not yet
+  seen by the owner: another extension's `agent_settled` handler that awaits
+  real I/O can let the deferred drain run before `session_shutdown`, and then
+  it starts that task.
+
+## A delivery deferred during a settle (2026-11-09)
+
+A peer delivery accepted while another extension's settled handler runs can be lost if an earlier deferred Pi action fails (a Pi defect, reported as [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955); tested on Pi 1.4.0). Pi defers a turn-starting send made while any extension's
+`agent_settled` handler runs (`agent-session.js:686-693, 1866-1868`) and
+then runs the deferred actions in sequence with no per-action error
+handling (`:695-704`), so one throwing action drops every later one. The
+extension cannot rescue such a message safely: an earlier deferred action
+can start a run whose own settle happens before the later action runs, so a
+rescue there would duplicate it.
+
+## A lane prompt refused before it reaches Pi (2026-10-28)
+
+A blank lane prompt, and one whose JSON encoding exceeds the 1 MiB native
+input frame (Go escapes `<`, `>` and `&` as six bytes each), were refused
+before anything was written but ended the lane. Decision (2026-10-28): both
+now end only the Run, with the reason, as Pi's own refusal does; nothing is
+written or replayed, and the lane stays.
+
+## Tool loadout on resume (Pi 1.3.0, 2026-10-19)
+
+Pi 1.3.0 restores a resumed session's recorded tool loadout whenever
+`--tools` names no tools. The restore replaces the active set with the
+transcript's `toolsAdded` (`agent-session.js` 1.3.0:214-215, 1374-1383). In
+1.2.0 the same restore never ran. A later refresh activates only tools
+registered after the previous build (`:2914-2918`). So a resumed session
+whose transcript never declared `sessionbus`, for example one started by
+plain `pi`, would run without its comms tool.
+
+The managed extension therefore checks the active tools at every
+`session_start` (startup, reload, new, resume and fork). If `sessionbus` is
+missing it calls `setActiveTools` with our tool added after the others. If it
+is present it does nothing. No other tool is removed or reordered.
+
+## Tool modifiers in managed launches (2026-10-19)
+
+Pi's `--tools` takes either plain names and patterns, or only `+name`/`-name`
+modifiers. Modifiers change the default selection, in order
+(`settings-manager.js:37-73`, `sdk.js:149-156`). With `--no-tools`, the
+modifiers start from an empty selection that also bounds the allowed tools.
+A list that mixes the two forms is Pi's own error.
+
+The managed launch guard used to compare names with the `+`/`-` still
+attached. It therefore rejected valid modifier lists such as
+`--tools +sessionbus`. The guard now follows Pi's rule:
+- a plain list must name `sessionbus`;
+- a modifier list is refused only if it removes `sessionbus` last, or if
+  `--no-tools` is set and the list does not add `+sessionbus`;
+- a mixed list passes through, and Pi rejects it.
+
+Arguments always pass through unchanged.
+
 ## Mandatory-wake source boundary (2026-09-21)
 
 Pi 0.85.1 is bound to upstream `d981de1229ef899957bbe968bc8dcda02a21f477`.
