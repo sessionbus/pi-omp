@@ -1835,52 +1835,112 @@ func TestPiLaneSteerFailureIsDefiniteOrUncertain(t *testing.T) {
 	}
 }
 
-// A lane delivery that grows past the extension's 1 MiB native bound once
-// rendered is refused with that check's text before any native call. Before
-// this change it was sent and failed in the extension.
+// A lane delivery past the extension's 1 MiB native bound once rendered, or
+// whose encoded steer would pass the bridge's frame, is refused with the
+// owner-approved text before any native call, and the lane goes on. The
+// encoded steer parameters may take the frame less OMP's 1024-byte reserve for
+// the request envelope. Before the frame check, a delivery within the
+// rendered bound whose steer passed the frame was refused by the bridge with
+// its internal text.
 func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	left, right := net.Pipe()
-	run := &sessionkit.Run{}
-	wrapper := &Wrapper{opened: true, ctx: ctx, id: "native", run: run, active: &piNativeTurn{admitted: true, token: "run-token"}}
-	calls := 0
-	hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, nil, pifamily.BridgeLimits{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
-		calls++
-		var steer struct {
-			SessionID string `json:"session_id"`
-			MessageID string `json:"message_id"`
-		}
-		if method != "native.steer" || json.Unmarshal(raw, &steer) != nil {
-			return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected call")
-		}
-		return json.Marshal(map[string]any{"session_id": steer.SessionID, "message_id": steer.MessageID, "accepted": true})
-	}, pifamily.BridgeLimits{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = hostBridge.Close(); _ = nativeBridge.Close() }()
-	if err = hostBridge.Ready(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err = nativeBridge.Ready(ctx); err != nil {
-		t.Fatal(err)
-	}
-	wrapper.bridge = hostBridge
+	const tooLarge = "message too large for Pi (over its 1 MiB input limit after formatting)"
 	sender := strings.Repeat("s", 128) + "@h"
-	receipt, err := wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "message-abcdefghijkl", Body: strings.Repeat("\U0001F600", 262030),
-		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
-	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "message too large for Pi (over its 1 MiB input limit after formatting)" || calls != 0 {
-		t.Fatalf("oversized lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+	request := func(id, body string) sessionkit.DeliveryRequest {
+		return sessionkit.DeliveryRequest{MessageID: id, Body: body,
+			From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}
 	}
-	// The lane goes on: the next valid delivery is steered as usual.
-	receipt, err = wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "message-after", Body: "note",
-		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
-	if err != nil || receipt.Disposition != "injected" || calls != 1 {
-		t.Fatalf("next lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+	// steerSize is the encoded steer parameters of a body, as the lane sends them.
+	steerSize := func(t *testing.T, body string) int {
+		rendered, err := host.RenderNativeMessage(request("message-abcdefghijkl", body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(map[string]string{"session_id": "native", "message_id": "message-abcdefghijkl", "body": rendered, "run": "run-token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(encoded)
+	}
+	// padded is a plain body whose rendered message is size bytes, or whose
+	// encoded steer is size bytes.
+	padded := func(t *testing.T, size int, encoded bool) string {
+		base := 0
+		if encoded {
+			base = steerSize(t, "")
+		} else {
+			rendered, err := host.RenderNativeMessage(request("message-abcdefghijkl", ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			base = len(rendered)
+		}
+		return strings.Repeat("a", size-base)
+	}
+	for _, test := range []struct {
+		name     string
+		body     func(*testing.T) string
+		injected bool
+	}{
+		{"past the bound once rendered", func(*testing.T) string { return strings.Repeat("\U0001F600", 262030) }, false},
+		{"escaped past the frame", func(*testing.T) string { return strings.Repeat("<", 175000) }, false},
+		{"at the rendered bound, its fields past the frame", func(t *testing.T) string { return padded(t, 1<<20, false) }, false},
+		{"one byte past the steer limit", func(t *testing.T) string { return padded(t, 1<<20-1024+1, true) }, false},
+		{"at the steer limit", func(t *testing.T) string { return padded(t, 1<<20-1024, true) }, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			left, right := net.Pipe()
+			run := &sessionkit.Run{}
+			wrapper := &Wrapper{opened: true, ctx: ctx, id: "native", run: run, active: &piNativeTurn{admitted: true, token: "run-token"}}
+			calls := 0
+			hostBridge, err := pifamily.NewBridge(left, pifamily.BridgeHost, nil, pifamily.BridgeLimits{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nativeBridge, err := pifamily.NewBridge(right, pifamily.BridgeNative, func(_ context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+				calls++
+				var steer struct {
+					SessionID string `json:"session_id"`
+					MessageID string `json:"message_id"`
+				}
+				if method != "native.steer" || json.Unmarshal(raw, &steer) != nil {
+					return nil, pifamily.NewBridgeCallError("method_not_found", "unexpected call")
+				}
+				return json.Marshal(map[string]any{"session_id": steer.SessionID, "message_id": steer.MessageID, "accepted": true})
+			}, pifamily.BridgeLimits{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = hostBridge.Close(); _ = nativeBridge.Close() }()
+			if err = hostBridge.Ready(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err = nativeBridge.Ready(ctx); err != nil {
+				t.Fatal(err)
+			}
+			wrapper.bridge = hostBridge
+			body := test.body(t)
+			rendered, err := host.RenderNativeMessage(request("message-abcdefghijkl", body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("rendered %d bytes, encoded steer %d bytes", len(rendered), steerSize(t, body))
+			receipt, err := wrapper.Deliver(ctx, request("message-abcdefghijkl", body), run)
+			switch {
+			case test.injected:
+				if err != nil || receipt.Disposition != "injected" || calls != 1 {
+					t.Fatalf("delivery = %+v, %v, native calls %d", receipt, err, calls)
+				}
+			case err != nil || receipt.Disposition != "rejected" || receipt.Reason != tooLarge || calls != 0:
+				t.Fatalf("oversized lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+			}
+			// The lane goes on: the next valid delivery is steered as usual.
+			before := calls
+			receipt, err = wrapper.Deliver(ctx, request("message-after", "note"), run)
+			if err != nil || receipt.Disposition != "injected" || calls != before+1 {
+				t.Fatalf("next lane delivery = %+v, %v, native calls %d", receipt, err, calls)
+			}
+		})
 	}
 }

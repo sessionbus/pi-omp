@@ -645,6 +645,10 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
 
+// piMessageTooLarge is the owner-approved reason for a lane delivery Pi cannot
+// take in one native input.
+const piMessageTooLarge = "message too large for Pi (over its 1 MiB input limit after formatting)"
+
 // Deliver steers a message into the lane's running task: while this Run's
 // native prompt is admitted and not settled, the managed extension puts it in
 // Pi's steering queue, which the running task reads at its next boundary.
@@ -662,7 +666,7 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	// validDelivery); one that grows past it once rendered is refused here,
 	// before any native call, with the owner-approved reason.
 	if len(body) > 1<<20 {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "message too large for Pi (over its 1 MiB input limit after formatting)"}, nil
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: piMessageTooLarge}, nil
 	}
 	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
@@ -685,13 +689,22 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	if !running || token == "" {
 		return sessionkit.DeliveryReceipt{}, host.NotRunning()
 	}
+	// The bridge refuses a frame past its limit before sending it, and JSON
+	// escaping and the steer's fields can carry a body within the bound above
+	// past it. The encoded parameters are measured as OMP's steerPrimary
+	// measures them, with its reserve for the request envelope, and refused
+	// with the same reason before any native call.
+	params := map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}
+	if encoded, encodeErr := json.Marshal(params); encodeErr != nil || len(encoded) > pifamily.DefaultBridgeLimits.MaxFrameBytes-1024 {
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: piMessageTooLarge}, nil
+	}
 	var answer struct {
 		SessionID string `json:"session_id"`
 		MessageID string `json:"message_id"`
 		Accepted  *bool  `json:"accepted"`
 		Reason    string `json:"reason"`
 	}
-	if err = bridge.Call(ctx, "native.steer", map[string]string{"session_id": id, "message_id": request.MessageID, "body": body, "run": token}, &answer); err != nil {
+	if err = bridge.Call(ctx, "native.steer", params, &answer); err != nil {
 		if piSteerRefusedBeforeSend(err) {
 			return sessionkit.DeliveryReceipt{}, fmt.Errorf("Pi native steer was refused before it was sent: %w", err)
 		}
