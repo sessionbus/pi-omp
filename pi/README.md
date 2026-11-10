@@ -116,6 +116,10 @@ messages (8 MiB) that it has not read yet; a further one is refused with
 `Pi delivery queue is full`. Without an active Run the lane is not running
 and the daemon starts a later Run.
 
+Interrupting a lane Run before Pi has started work on its prompt ends the
+lane. Pi gives a prompt no identity, so the work it may still do for that
+prompt could not be told apart from a later Run's.
+
 A lane's Run ends when Pi settles its run. Pi can then run work of its own,
 for example a run another extension starts; that work is not part of the
 caller's Run, is not in its result and does not end the lane. A later Run

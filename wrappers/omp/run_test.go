@@ -550,17 +550,16 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 		}
 	}
 	request(3, "turn.interrupt", map[string]string{"session_id": fixture.binding.SessionID})
-	receiptSeen, readySeen, interruptSeen, workerEOF := false, false, false, false
+	// The written seed has no receipt: OMP may still run it. The Run ends
+	// interrupted and the lane stays. Before this change the receipt was a
+	// definite rejection and the Worker retired.
+	receiptSeen, readySeen, interruptSeen := false, false, false
 	for !receiptSeen || !readySeen || !interruptSeen {
 		if err = connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		frame, readErr := read()
 		if readErr != nil {
-			if receiptSeen && readySeen && errors.Is(readErr, io.EOF) {
-				workerEOF = true
-				break
-			}
 			t.Fatalf("Worker ended before receipt and terminal: %v", readErr)
 		}
 		switch {
@@ -579,11 +578,8 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 			write(ack)
 			readySeen = true
 		case frame.ID == 2:
-			var receipt kit.DeliveryReceipt
-			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
-				receipt.Disposition != "rejected" || receipt.Reason == "not_submitted" ||
-				!strings.Contains(receipt.Reason, errOMPRunInterrupted.Error()) {
-				t.Fatalf("submitted delivery receipt = %+v, decoded %+v", frame, receipt)
+			if frame.Error == nil || frame.Error.Code != protocol.Internal || string(frame.Error.Data) != `"uncertain_submission"` {
+				t.Fatalf("submitted delivery receipt = %+v", frame)
 			}
 			receiptSeen = true
 		case frame.ID == 3:
@@ -595,19 +591,7 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 			t.Fatalf("unexpected Worker frame = %+v", frame)
 		}
 	}
-	t.Logf("interrupt response observed before retirement: %v; EOF: %v", interruptSeen, workerEOF)
 	_ = connection.SetReadDeadline(time.Time{})
-	select {
-	case <-worker.Closed():
-	case <-deadline.Done():
-		t.Fatal("interrupted Worker did not retire")
-	}
-	serveErr := <-served
-	servedJoined = true
-	// The owned shutdown callback calls Worker.Shutdown, which now cancels Serve.
-	if !errors.Is(serveErr, context.Canceled) {
-		t.Fatalf("Worker Serve = %v", serveErr)
-	}
 	turn.mu.Lock()
 	submitted, preflight, starts := turn.submitted, turn.preflight, turn.starts
 	turn.mu.Unlock()
@@ -617,24 +601,91 @@ func TestOMPWorkerInterruptsSubmittedDeliveryBeforePreflight(t *testing.T) {
 	if queued := fixture.wrapper.handoff.Claim(); len(queued) != 0 {
 		t.Fatalf("submitted delivery became replayable: %#v", queued)
 	}
-	select {
-	case <-fixture.rpc.Done():
-	default:
-		t.Fatal("interrupted native RPC was not joined")
+
+	// OMP admitted the abandoned prompt, so it is aborted; its late run and
+	// prompt_result are OMP's answer to nobody.
+	abort := fixture.peer.read(t)
+	if nativeRPCField(t, abort, "type") != "abort" {
+		t.Fatalf("native command after the early stop = %#v", abort)
 	}
-	select {
-	case <-fixture.registry.Done():
-	default:
-		t.Fatal("interrupted owner registry was not joined")
+	if !fixture.rpc.AbandonedLive() {
+		t.Fatal("the stopped prompt was not abandoned")
 	}
-	select {
-	case <-fixture.native.Done():
-	default:
-		t.Fatal("interrupted native bridge endpoint was not joined")
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, nativeRPCField(t, abort, "id"))+`,"type":"response","command":"abort","success":true}`)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, promptID, "aborted")
+	for fixture.rpc.AbandonedLive() {
+		select {
+		case <-deadline.Done():
+			t.Fatal("abandoned prompt did not retire")
+		default:
+			runtime.Gosched()
+		}
 	}
-	waitNativeRPCStats(t, fixture.rpc, nativeRPCStats{})
-	if stats := fixture.native.Stats(); stats != (pifamily.BridgeStats{}) {
-		t.Fatalf("native bridge ownership after cleanup = %#v", stats)
+	fixture.wrapper.mu.Lock()
+	failure := fixture.wrapper.failure
+	fixture.wrapper.mu.Unlock()
+	if failure != nil {
+		t.Fatalf("the early stop failed the lane: %v", failure)
+	}
+
+	// The lane serves the next Run.
+	next := kit.DeliveryRequest{
+		RunID: "g/2", MessageID: "delivery-after-early-stop", Body: "next prompt",
+		From: kit.DeliverySource{SessionID: "sender@local", Product: "fixture", Groups: []string{}},
+	}
+	request(4, "message.deliver", next)
+	command := fixture.peer.read(t)
+	nextID, nextPrompt := nativeRPCField(t, command, "id"), nativeRPCField(t, command, "message")
+	if nativeRPCField(t, command, "type") != "prompt" {
+		t.Fatalf("next native command = %#v", command)
+	}
+	fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, nextID)+`,"type":"response","command":"prompt","success":true,"data":{"agentInvoked":true}}`)
+	fixture.preflight(t, 1, "run-after-early-stop", nextPrompt)
+	fixture.peer.write(t, `{"type":"agent_start"}`)
+	fixture.peer.write(t, `{"type":"message_end","message":{"role":"assistant","content":"after","stopReason":"stop"}}`)
+	fixture.peer.write(t, `{"type":"agent_end","messages":[],"isTerminal":true}`)
+	fixture.promptResult(t, nextID, "completed")
+	receiptSeen, readySeen = false, false
+	for !receiptSeen || !readySeen {
+		if err = connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		frame, readErr := read()
+		if readErr != nil {
+			t.Fatalf("Worker ended during the next Run: %v", readErr)
+		}
+		switch {
+		case frame.Method == "turn.ready":
+			var terminal struct {
+				State   string `json:"state"`
+				Outcome string `json:"outcome"`
+			}
+			if json.Unmarshal(frame.Params, &terminal) != nil || terminal.State != "done" || terminal.Outcome != "completed" {
+				t.Fatalf("next terminal = %s", frame.Params)
+			}
+			ack, encodeErr := protocol.ResultBytes(frame.ID, frame.Method, struct{}{})
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			write(ack)
+			readySeen = true
+		case frame.ID == 4:
+			var receipt kit.DeliveryReceipt
+			if frame.Error != nil || protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "injected" {
+				t.Fatalf("next delivery receipt = %+v, decoded %+v", frame, receipt)
+			}
+			receiptSeen = true
+		default:
+			t.Fatalf("unexpected Worker frame = %+v", frame)
+		}
+	}
+	_ = connection.SetReadDeadline(time.Time{})
+	select {
+	case <-worker.Closed():
+		t.Fatal("the Worker retired after an early stop")
+	default:
 	}
 }
 

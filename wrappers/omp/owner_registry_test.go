@@ -1069,6 +1069,12 @@ func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
+		registry.mu.Lock()
+		want := registry.retainedBytes
+		registry.mu.Unlock()
+		if disposition == "written" {
+			want += len(messageID)
+		}
 		ownerWrite(t, public, body)
 		frame := ownerFrame(t, scanner)
 		var receipt kit.DeliveryReceipt
@@ -1079,6 +1085,19 @@ func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testin
 		}
 		if err = registry.Err(); err != nil {
 			t.Fatalf("%s failed the owner: %v", messageID, err)
+		}
+		// The delivery loop releases the intake bytes after its answer: wait
+		// for that before the next step sets the budget.
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			registry.mu.Lock()
+			retained := registry.retainedBytes
+			registry.mu.Unlock()
+			if retained == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s left %d retained bytes, want %d", messageID, retained, want)
+			}
 		}
 	}
 	registry.mu.Lock()
@@ -1101,12 +1120,12 @@ func TestOwnerRegistryRefusesCapacityAndDuplicateDeliveriesPerDelivery(t *testin
 	registry.mu.Lock()
 	state.staged = staged
 	retained := registry.retainedBytes
-	registry.retainedBytes = maxOwnerRetainedBytes - intake - len("message-byte-cap") + 1
+	registry.retainedBytes = maxOwnerPeerRetainedBytes - intake - len("message-byte-cap") + 1
 	registry.mu.Unlock()
 	deliver("message-byte-cap", "rejected", "queue_full")
 	intake = ownerPublicDeliveryRetainedBytes(kit.DeliveryRequest{MessageID: "message-intake-cap", From: from, Body: "hello"})
 	registry.mu.Lock()
-	registry.retainedBytes = maxOwnerRetainedBytes - intake + 1
+	registry.retainedBytes = maxOwnerPeerRetainedBytes - intake + 1
 	registry.mu.Unlock()
 	deliver("message-intake-cap", "rejected", "queue_full")
 	registry.mu.Lock()
@@ -1149,11 +1168,27 @@ func TestOwnerRegistryRefusesAFullDeliveryQueuePerDelivery(t *testing.T) {
 	}
 	registry.mu.Lock()
 	state := registry.bindings["owner-one"]
+	baseline := registry.retainedBytes
 	registry.mu.Unlock()
-	// Hold the stage gate: the loop takes one delivery and waits in deliver,
-	// and the next maxOwnerWork fill the queue.
+	// Hold the stage gate, send one delivery and wait until the delivery loop
+	// owns it: its intake bytes are reserved and the queue is empty again, so
+	// the loop has taken it and waits in deliver. Public requests are handled
+	// one at a time in id order, so the next maxOwnerWork fill the queue.
 	<-state.stageGate
-	for id := int64(1); id <= maxOwnerWork+1; id++ {
+	send(1)
+	first := ownerPublicDeliveryRetainedBytes(kit.DeliveryRequest{MessageID: "message-1", From: from, Body: "hello"})
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		registry.mu.Lock()
+		owned := registry.retainedBytes == baseline+first && state.attempt != nil && len(state.attempt.deliveries) == 0
+		registry.mu.Unlock()
+		if owned {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the delivery loop did not take the first delivery")
+		}
+	}
+	for id := int64(2); id <= maxOwnerWork+1; id++ {
 		send(id)
 	}
 	overflow := int64(maxOwnerWork + 2)
@@ -1187,6 +1222,231 @@ func TestOwnerRegistryRefusesAFullDeliveryQueuePerDelivery(t *testing.T) {
 	}
 	if err := registry.Err(); err != nil {
 		t.Fatalf("owner after the full queue: %v", err)
+	}
+}
+
+// The reserve is the registry's own worst case at the validation bounds, which
+// these constants are; peers get the rest (DEV1 e4yk: 16,089,856 and 17,464,576).
+func TestOwnerInternalReserveMatchesTheValidationBounds(t *testing.T) {
+	if ownerInternalReserve != 16_089_856 || maxOwnerPeerRetainedBytes != 17_464_576 || ownerMaxBindingBytes != 37_388 {
+		t.Fatalf("reserve %d, peer share %d, binding %d", ownerInternalReserve, maxOwnerPeerRetainedBytes, ownerMaxBindingBytes)
+	}
+	if ownerMaxReportBytes != pifamily.DefaultBridgeLimits.MaxFrameBytes {
+		t.Fatalf("report bound %d, bridge frame %d", ownerMaxReportBytes, pifamily.DefaultBridgeLimits.MaxFrameBytes)
+	}
+	id := strings.Repeat("i", maxOwnerIDBytes)
+	if !validOwnerToken(id) || validOwnerToken(id+"i") || !validOwnerID(id) || validOwnerID(id+"i") {
+		t.Fatal("token and id bounds differ from maxOwnerIDBytes")
+	}
+	name := strings.Repeat("n", maxOwnerNameBytes)
+	if !validOwnerText(name, maxOwnerNameBytes) || validOwnerText(name+"n", maxOwnerNameBytes) {
+		t.Fatal("name bound differs from maxOwnerNameBytes")
+	}
+	cwd := "/" + strings.Repeat("c", maxOwnerCWDBytes-1)
+	if !validOwnerCWD(cwd) || validOwnerCWD(cwd+"c") {
+		t.Fatal("cwd bound differs from maxOwnerCWDBytes")
+	}
+	longest := 0
+	for _, scope := range []string{ownerScopePrimary, ownerScopeChild} {
+		for _, mode := range []string{ownerModeRPC, ownerModeTUI, ownerModePrint} {
+			longest = max(longest, len(scope)+len(mode))
+		}
+	}
+	if longest != len(ownerScopePrimary)+len(ownerModePrint) {
+		t.Fatalf("longest scope and mode = %d", longest)
+	}
+}
+
+// ownerAnswerHellos accepts every later public connection on listener and
+// answers its hello, for tests that admit many bindings.
+func ownerAnswerHellos(t *testing.T, listener net.Listener) {
+	t.Helper()
+	done := make(chan struct{})
+	var conns []net.Conn
+	var mu sync.Mutex
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			go func() {
+				scanner := bufio.NewScanner(conn)
+				scanner.Buffer(make([]byte, 0, 64<<10), protocol.MaxFrameBytes)
+				for scanner.Scan() {
+					frame, err := protocol.DecodeFrame(scanner.Bytes())
+					if err != nil || !frame.Request || frame.Method != "session.hello" {
+						continue
+					}
+					if body, err := protocol.ResultBytes(frame.ID, frame.Method, struct{}{}); err == nil {
+						_, _ = conn.Write(append(body, '\n'))
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-done
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+}
+
+func ownerChildDescription(index int, large bool) ownerDescribeResult {
+	token := fmt.Sprintf("child-%02d", index)
+	description := ownerDescribeResult{OwnerToken: token, SessionID: "session-" + token, Name: "child", CWD: "/work/child"}
+	if large {
+		description.OwnerToken = token + strings.Repeat("t", maxOwnerIDBytes-len(token))
+		description.SessionID = token + strings.Repeat("s", maxOwnerIDBytes-len(token))
+		description.Name = strings.Repeat("n", maxOwnerNameBytes)
+		description.CWD = "/" + strings.Repeat("c", maxOwnerCWDBytes-1)
+	}
+	return description
+}
+
+func ownerReadyChild(t *testing.T, native *pifamily.Bridge, fixture *ownerNativeFixture, directory string, description ownerDescribeResult) error {
+	t.Helper()
+	fixture.mu.Lock()
+	fixture.descriptions[description.OwnerToken] = description
+	fixture.mu.Unlock()
+	return native.Call(ownerTestContext(t), "owner.ready", ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopeChild, Mode: ownerModePrint,
+		OwnerToken: description.OwnerToken, SessionID: description.SessionID, Name: description.Name,
+	}, nil)
+}
+
+// With maxOwnerBindings live bindings (the primary and its children), the
+// next Task child is refused with owner_capacity alone: the registry and the
+// primary keep serving. Before this change the cap was 256 and any refusal
+// failed the registry.
+func TestOwnerRegistryRefusesAChildOverTheBindingCapAlone(t *testing.T) {
+	listener := ownerBusListener(t)
+	directory := t.TempDir()
+	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+		"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+	}}
+	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+		Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+		InitialName: "requested", Groups: []string{"interactive"},
+	}, fixture)
+	_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+		Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one", Name: "event",
+	})
+	ownerAnswerHellos(t, listener)
+	for index := 1; index < maxOwnerBindings; index++ {
+		if err := ownerReadyChild(t, native, fixture, directory, ownerChildDescription(index, false)); err != nil {
+			t.Fatalf("child %d: %v", index, err)
+		}
+	}
+	err := ownerReadyChild(t, native, fixture, directory, ownerChildDescription(maxOwnerBindings, false))
+	var bridgeErr *pifamily.BridgeCallError
+	if !errors.As(err, &bridgeErr) || bridgeErr.Code != "owner_capacity" || bridgeErr.Message != "OMP owner admission failed" {
+		t.Fatalf("child over the cap = %#v", err)
+	}
+	registry.mu.Lock()
+	bound := len(registry.bindings)
+	registry.mu.Unlock()
+	if err := registry.Err(); err != nil || bound != maxOwnerBindings {
+		t.Fatalf("after the refusal: registry %v, bindings %d", err, bound)
+	}
+	body, err := protocol.RequestBytes(90, "message.deliver", kit.DeliveryRequest{
+		MessageID: "message-after-cap", Body: "hello",
+		From: kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerWrite(t, public, body)
+	frame := ownerFrame(t, scanner)
+	var receipt kit.DeliveryReceipt
+	if frame.Request || frame.ID != 90 || frame.Error != nil ||
+		protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil || receipt.Disposition != "written" {
+		t.Fatalf("primary delivery after the refusal = %+v, receipt %+v", frame, receipt)
+	}
+}
+
+// Peers fill their share; then every binding the cap allows, at the largest
+// fields validation accepts, and a report of one full bridge frame still fit,
+// and the owner stays. Before this change peers could take the whole budget
+// and the first internal reservation failed the owner.
+func TestOwnerRegistryKeepsTheInternalReserveUnderPeerPressure(t *testing.T) {
+	listener := ownerBusListener(t)
+	directory := t.TempDir()
+	fixture := &ownerNativeFixture{descriptions: map[string]ownerDescribeResult{
+		"owner-one": {OwnerToken: "owner-one", SessionID: "session-one", Name: "native", CWD: "/work/one"},
+	}}
+	registry, native := ownerRegistryPair(t, OwnerRegistryOptions{
+		Topology: ownerTopologyInteractive, Socket: listener.Addr().String(), Directory: directory,
+		InitialName: "requested", Groups: []string{"interactive"},
+	}, fixture)
+	_, public, scanner := ownerReady(t, registry, native, listener, ownerReadyRequest{
+		Topology: ownerTopologyInteractive, Directory: directory, Scope: ownerScopePrimary,
+		Mode: ownerModeTUI, OwnerToken: "owner-one", SessionID: "session-one", Name: "event",
+	})
+	from := kit.DeliverySource{SessionID: "sender", Product: "codex-peer", Groups: []string{"interactive"}}
+	// Four-byte characters make the largest body the SDK accepts in characters
+	// (262,144) about one public frame in bytes.
+	payload := strings.Repeat("\U0001F600", (protocol.MaxFrameBytes-4096)/4)
+	request := func(id int64) kit.DeliveryRequest {
+		return kit.DeliveryRequest{MessageID: fmt.Sprintf("message-%03d", id), From: from, Body: payload}
+	}
+	registry.mu.Lock()
+	state := registry.bindings["owner-one"]
+	baseline := registry.retainedBytes
+	registry.mu.Unlock()
+	<-state.stageGate
+	each := ownerPublicDeliveryRetainedBytes(request(1))
+	fits := int64((maxOwnerPeerRetainedBytes - baseline) / each)
+	for id := int64(1); id <= fits+1; id++ {
+		body, err := protocol.RequestBytes(id, "message.deliver", request(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownerWrite(t, public, body)
+	}
+	frame := ownerFrame(t, scanner)
+	var receipt kit.DeliveryReceipt
+	if frame.Request || frame.ID != fits+1 || frame.Error != nil ||
+		protocol.UnmarshalResult("message.deliver", frame.Result, &receipt) != nil ||
+		receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
+		t.Fatalf("delivery over the peer share = %+v, receipt %+v", frame, receipt)
+	}
+
+	ownerAnswerHellos(t, listener)
+	for index := 1; index < maxOwnerBindings; index++ {
+		if err := ownerReadyChild(t, native, fixture, directory, ownerChildDescription(index, true)); err != nil {
+			t.Fatalf("child %d under peer pressure: %v; registry %v", index, err, registry.Err())
+		}
+	}
+	prompt := strings.Repeat("x", ownerMaxReportBytes-1024)
+	if err := native.Call(ownerTestContext(t), "run.preflight", ownerPreflightRequest{
+		OwnerToken: "owner-one", SessionID: "session-one", ReportSequence: 2, RunToken: "run-full-frame", Prompt: prompt,
+	}, nil); err != nil {
+		t.Fatalf("full-frame report under peer pressure: %v; registry %v", err, registry.Err())
+	}
+	registry.mu.Lock()
+	retained := registry.retainedBytes
+	registry.mu.Unlock()
+	if err := registry.Err(); err != nil || retained > maxOwnerRetainedBytes {
+		t.Fatalf("owner under peer pressure: %v, retained %d", err, retained)
+	}
+	state.stageGate <- struct{}{}
+	for range fits {
+		if frame = ownerFrame(t, scanner); frame.Request || frame.Error != nil {
+			t.Fatalf("queued delivery answer = %+v", frame)
+		}
+	}
+	if err := registry.Err(); err != nil {
+		t.Fatalf("owner after the queued deliveries: %v", err)
 	}
 }
 

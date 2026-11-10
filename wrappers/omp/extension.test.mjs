@@ -402,6 +402,65 @@ test("native steer is refused outside the lane's primary session", async () => {
   assert.deepEqual([...interactive.steered(), ...primary.steered(), ...child.steered()], []);
 });
 
+// Our binding cap refuses a Task child with owner_capacity: that child runs on
+// natively without Sessionbus, never aborted, and the primary is untouched.
+// Before this change any failed owner.ready aborted the child's native work.
+test("a child refused by the binding cap is detached without aborting its work", async () => {
+  const owner = new FakeOwner();
+  const extension = createOMPExtension({ launch: launch("lane"), connect: owner.connect, createToken: deterministicTokens() });
+  const primary = nativeFixture();
+  await start(extension, primary, owner);
+  const capacity = () => new BridgeCallError("owner_capacity", "OMP owner admission failed");
+
+  owner.reject("owner.ready", capacity());
+  const child = nativeFixture("child-session", "print", "/work/child", "child");
+  extension(child.pi);
+  await child.emit("session_start");
+  await owner.waitFor((calls) => calls.filter((call) => call.method === "owner.ready").length === 2);
+  await flush();
+  assert.equal(child.aborts(), 0);
+  assert.equal(child.shutdowns(), 0);
+  assert.equal(extension.stats().bindings, 1);
+
+  // Its native hooks keep running quietly; only the Sessionbus tool fails.
+  assert.equal(await child.emit("before_agent_start", { type: "before_agent_start", prompt: "task" }, child.context()), undefined);
+  await child.emit("context", { type: "context", messages: [] }, child.context());
+  await assert.rejects(child.pi.tool.execute("child-call", { action: "list", arguments: {} }, undefined, undefined, child.context()));
+  await child.emit("session_shutdown", { type: "session_shutdown" }, child.context());
+  assert.equal(child.aborts(), 0);
+  assert.equal(child.shutdowns(), 0);
+  assert.equal(owner.calls.some((call) => call.method === "session_end"), false);
+
+  // A child ending while its refused owner.ready is in flight ends quietly too.
+  const held = owner.hold("owner.ready");
+  owner.reject("owner.ready", capacity());
+  const late = nativeFixture("late-child", "print", "/work/late", "late");
+  extension(late.pi);
+  await late.emit("session_start");
+  await held.entered;
+  const ending = late.emit("session_shutdown", { type: "session_shutdown" }, late.context());
+  held.release();
+  await ending;
+  assert.equal(late.aborts(), 0);
+  assert.equal(late.shutdowns(), 0);
+  assert.equal(owner.calls.some((call) => call.method === "session_end"), false);
+  assert.equal(extension.stats().bindings, 1);
+
+  // The primary still serves.
+  const result = await primary.pi.tool.execute("primary-call", { action: "list", arguments: {} }, undefined, undefined, primary.context());
+  assert.deepEqual(result.details.result, { action: "list", arguments: {} });
+  assert.equal(primary.aborts(), 0);
+
+  // Any other owner.ready failure keeps today's failure path.
+  owner.reject("owner.ready", new BridgeCallError("protocol_error", "OMP owner admission failed"));
+  const failed = nativeFixture("failed-child", "print", "/work/failed", "failed");
+  extension(failed.pi);
+  await failed.emit("session_start");
+  await owner.waitFor((calls) => calls.filter((call) => call.method === "owner.ready").length === 4);
+  await flush();
+  assert.equal(failed.aborts(), 1);
+});
+
 test("native stage can follow published hello before local owner.ready continuation", async () => {
   const owner = new FakeOwner();
   const held = owner.holdAfterNative("owner.ready");

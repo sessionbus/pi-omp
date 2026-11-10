@@ -31,6 +31,10 @@ match what was sent, or you clear the session (`/clear`) while it is pending,
 only that message's attempt ends: its receipt stays, it is not sent again,
 and the session stays connected for later messages.
 
+One OMP process has at most 64 concurrent Sessionbus sessions: its primary
+session and up to 63 native Task children. Further Task children run without
+Sessionbus.
+
 Pressing Escape while OMP shows its working animation returns a steered peer
 message that OMP had not read yet to your editor, as if you had typed it. It
 is neither sent nor written to the session history unless you submit it, and
@@ -66,6 +70,12 @@ lost and no receipt is wrong. If OMP fails the lane's prompt before starting wor
 with no model or no API key, or ends it before any run, for example on a
 usage-limit denial, the Run is `unavailable` with OMP's message when it gives
 one, and the lane stays.
+
+Interrupting a lane Run before OMP has started work on its prompt ends only
+that Run, as interrupted. OMP may still read the prompt, so a peer message
+that started the Run gets no receipt and is not sent again. If OMP takes the
+prompt, the lane stops that work; until OMP reports the prompt finished, a
+new Run is refused as busy and the lane stays.
 
 OMP reads the files that each `@path` in a prompt names, with no option to
 turn that off. In a peer message that starts a lane Run, the lane therefore

@@ -34,13 +34,34 @@ const (
 	ownerModeTUI             = "tui"
 	ownerModePrint           = "print"
 
-	maxOwnerBindings      = 256
+	maxOwnerBindings      = 64
 	maxOwnerWork          = 256
 	maxOwnerTrackedItems  = 256
 	maxOwnerTextBytes     = 1 << 20
 	maxOwnerRetainedBytes = 32 << 20
+	maxOwnerIDBytes       = 256
+	maxOwnerNameBytes     = 4096
+	maxOwnerCWDBytes      = 32 << 10
+	ownerMaxReportBytes   = 1 << 20
 	ownerPublicRetryDelay = 2 * time.Second
+
+	// ownerInternalReserve is the part of maxOwnerRetainedBytes that peer
+	// deliveries never use: all the registry itself can retain at its
+	// validation bounds. Per binding, its fields and three token histories
+	// (live batches, completed batches, consumed preflights); globally the
+	// retired owner tokens and one report frame. A factory's reports apply in
+	// order under registry.mu, so a report's raw is released before its tokens
+	// are reserved, and admission and removal share one acquire gate.
+	ownerMaxBindingBytes = 2*maxOwnerIDBytes + maxOwnerNameBytes + maxOwnerCWDBytes + len(ownerScopePrimary) + len(ownerModePrint)
+	ownerInternalReserve = maxOwnerBindings*(ownerMaxBindingBytes+3*maxOwnerTrackedItems*maxOwnerIDBytes) +
+		maxOwnerTrackedItems*maxOwnerIDBytes + ownerMaxReportBytes
+	maxOwnerPeerRetainedBytes = maxOwnerRetainedBytes - ownerInternalReserve
 )
+
+// errOwnerCapacity is our own binding cap refusing one Task child. Unlike any
+// other admission failure it leaves the registry running: the extension
+// detaches that child, which runs on natively without Sessionbus.
+var errOwnerCapacity = errors.New("OMP owner binding capacity is exhausted")
 
 type OwnerRegistryOptions struct {
 	Topology      string
@@ -292,7 +313,7 @@ func NewOwnerRegistry(ctx context.Context, options OwnerRegistryOptions) (*Owner
 		!validOwnerText(options.Socket, 32<<10) || !validOwnerText(options.Directory, 32<<10) {
 		return nil, errors.New("OMP owner registry paths must be absolute")
 	}
-	if !validOwnerText(options.InitialName, 4096) {
+	if !validOwnerText(options.InitialName, maxOwnerNameBytes) {
 		return nil, errors.New("OMP owner registry initial name is invalid")
 	}
 	if (options.Topology == ownerTopologyLane) != (options.PrimaryCaller != nil) {
@@ -450,7 +471,7 @@ func (registry *OwnerRegistry) ownerReady(ctx context.Context, raw json.RawMessa
 	var request ownerReadyRequest
 	if err := decodeOwnerJSON(raw, &request); err != nil || !registry.validClassification(request.Topology, request.Scope, request.Mode) ||
 		request.Directory != registry.directory || !validOwnerToken(request.OwnerToken) || !validOwnerID(request.SessionID) ||
-		!validOwnerText(request.Name, 4096) {
+		!validOwnerText(request.Name, maxOwnerNameBytes) {
 		return nil, registry.protocolFailure("invalid OMP owner.ready", err)
 	}
 	if err := registry.acquire(ctx); err != nil {
@@ -462,6 +483,9 @@ func (registry *OwnerRegistry) ownerReady(ctx context.Context, raw json.RawMessa
 		return nil, registry.protocolFailure("OMP native description failed", err)
 	}
 	if err = registry.admit(ctx, request.Scope, request.Mode, description); err != nil {
+		if errors.Is(err, errOwnerCapacity) {
+			return nil, pifamily.NewBridgeCallError("owner_capacity", "OMP owner admission failed")
+		}
 		return nil, registry.protocolFailure("OMP owner admission failed", err)
 	}
 	return map[string]string{"owner_token": request.OwnerToken, "session_id": request.SessionID}, nil
@@ -472,7 +496,7 @@ func (registry *OwnerRegistry) ownerSwitch(ctx context.Context, raw json.RawMess
 	if err := decodeOwnerJSON(raw, &request); err != nil || !registry.validClassification(request.Topology, request.Scope, request.Mode) ||
 		request.Scope != ownerScopePrimary || !validOwnerToken(request.PreviousOwnerToken) || !validOwnerToken(request.OwnerToken) ||
 		request.PreviousOwnerToken == request.OwnerToken || !validOwnerID(request.PreviousSessionID) || !validOwnerID(request.SessionID) ||
-		!validOwnerText(request.Name, 4096) || !validOwnerText(request.Reason, 256) || request.Reason == "" {
+		!validOwnerText(request.Name, maxOwnerNameBytes) || !validOwnerText(request.Reason, 256) || request.Reason == "" {
 		return nil, registry.protocolFailure("invalid OMP owner.switch", err)
 	}
 	if registry.topology == ownerTopologyLane {
@@ -732,7 +756,20 @@ func (registry *OwnerRegistry) admit(ctx context.Context, scope, mode string, de
 		registry.mu.Unlock()
 		return err
 	}
-	if _, retired := registry.retiredTokens[state.OwnerToken]; retired || registry.bindings[state.OwnerToken] != nil || len(registry.bindings) >= maxOwnerBindings {
+	if _, retired := registry.retiredTokens[state.OwnerToken]; retired || registry.bindings[state.OwnerToken] != nil {
+		registry.mu.Unlock()
+		return errors.New("OMP owner token is duplicate or capacity is exhausted")
+	}
+	children := len(registry.bindings)
+	if registry.primaryToken != "" {
+		children--
+	}
+	// The primary's slot is always kept, so only a child meets the cap.
+	if scope == ownerScopeChild && children >= maxOwnerBindings-1 {
+		registry.mu.Unlock()
+		return errOwnerCapacity
+	}
+	if len(registry.bindings) >= maxOwnerBindings {
 		registry.mu.Unlock()
 		return errors.New("OMP owner token is duplicate or capacity is exhausted")
 	}
@@ -973,9 +1010,10 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 			responseErr = errors.New("invalid OMP delivery parameters")
 		} else {
 			retained := ownerPublicDeliveryRetainedBytes(*delivery)
-			if retained >= 0 && registry.retainedBytes > maxOwnerRetainedBytes-retained {
-				// A delivery the retained-byte budget cannot hold is refused
-				// alone, before reserveStateLocked would fail the owner.
+			if retained >= 0 && registry.retainedBytes > maxOwnerPeerRetainedBytes-retained {
+				// A delivery over the peer share of the retained-byte budget
+				// is refused alone; the internal reserve stays free for the
+				// registry's own reservations, which would fail the owner.
 				registry.mu.Unlock()
 				if err := attempt.conn.Result(request, kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}); err != nil {
 					_ = attempt.conn.Close()
@@ -1127,9 +1165,10 @@ func (registry *OwnerRegistry) deliver(ctx context.Context, state *ownerRegistry
 		registry.mu.Unlock()
 		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "OMP staged delivery capacity or identity is invalid"}
 	}
-	if len(state.staged) >= maxOwnerTrackedItems || registry.retainedBytes > maxOwnerRetainedBytes-len(request.MessageID) {
-		// A full staged queue or retained-byte budget refuses only this
-		// delivery, before reserveStateLocked would fail the owner.
+	if len(state.staged) >= maxOwnerTrackedItems || registry.retainedBytes > maxOwnerPeerRetainedBytes-len(request.MessageID) {
+		// A full staged queue or peer share of the retained-byte budget
+		// refuses only this delivery, before reserveStateLocked would fail
+		// the owner.
 		registry.mu.Unlock()
 		return kit.DeliveryReceipt{}, &ownerDeliveryRefusal{reason: "queue_full"}
 	}
@@ -1262,7 +1301,7 @@ func (registry *OwnerRegistry) describe(ctx context.Context, token, sessionID st
 	}
 	var result ownerDescribeResult
 	if err := decodeOwnerJSON(raw, &result); err != nil || result.OwnerToken != token || result.SessionID != sessionID ||
-		!validOwnerText(result.Name, 4096) || !validOwnerCWD(result.CWD) {
+		!validOwnerText(result.Name, maxOwnerNameBytes) || !validOwnerCWD(result.CWD) {
 		return ownerDescribeResult{}, errors.New("OMP native description is invalid")
 	}
 	return result, nil
@@ -1677,11 +1716,11 @@ func decodeOwnerJSON(raw json.RawMessage, value any) error {
 }
 
 func validOwnerToken(value string) bool {
-	return value != "" && len(value) <= 256 && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0 && !strings.ContainsRune(value, ' ')
+	return value != "" && len(value) <= maxOwnerIDBytes && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0 && !strings.ContainsRune(value, ' ')
 }
 
 func validOwnerID(value string) bool {
-	return value != "" && len(value) <= 256 && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsSpace) < 0 && strings.IndexFunc(value, unicode.IsControl) < 0
+	return value != "" && len(value) <= maxOwnerIDBytes && utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsSpace) < 0 && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 func validOwnerMessageID(value string) bool {
@@ -1693,7 +1732,7 @@ func validOwnerText(value string, limit int) bool {
 }
 
 func validOwnerCWD(value string) bool {
-	return filepath.IsAbs(value) && validOwnerText(value, 32<<10)
+	return filepath.IsAbs(value) && validOwnerText(value, maxOwnerCWDBytes)
 }
 
 func validOwnerMessageIDs(values []string) bool {

@@ -1864,7 +1864,7 @@ func TestPiLaneDeliveryPastTheNativeBoundIsRefusedBeforeSending(t *testing.T) {
 	sender := strings.Repeat("s", 128) + "@h"
 	receipt, err := wrapper.Deliver(ctx, sessionkit.DeliveryRequest{MessageID: "message-abcdefghijkl", Body: strings.Repeat("\U0001F600", 262030),
 		From: sessionkit.DeliverySource{SessionID: sender, Product: "pi", Groups: []string{"g", "session:" + sender}}}, run)
-	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "invalid Pi native delivery" || calls != 0 {
+	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "message too large for Pi (over its 1 MiB input limit after formatting)" || calls != 0 {
 		t.Fatalf("oversized lane delivery = %+v, %v, native calls %d", receipt, err, calls)
 	}
 	// The lane goes on: the next valid delivery is steered as usual.

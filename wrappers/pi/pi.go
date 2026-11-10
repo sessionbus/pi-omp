@@ -660,9 +660,9 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	}
 	// The managed extension refuses a body past 1 MiB (native.mjs
 	// validDelivery); one that grows past it once rendered is refused here,
-	// before any native call, with that check's own text.
+	// before any native call, with the owner-approved reason.
 	if len(body) > 1<<20 {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "invalid Pi native delivery"}, nil
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "message too large for Pi (over its 1 MiB input limit after formatting)"}, nil
 	}
 	if err = ctx.Err(); err != nil {
 		return sessionkit.DeliveryReceipt{}, err

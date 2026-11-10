@@ -460,8 +460,8 @@ export class PiInteractiveOwner {
     const body = renderPiDelivery(request);
     // Pi's native side refuses a body past this bound (native.mjs
     // validDelivery). A delivery that grows past it once rendered is refused
-    // here, before it is queued or answered, with that check's own text.
-    if (Buffer.byteLength(body) > maxTextBytes) return { disposition: "rejected", reason: "invalid Pi native delivery" };
+    // here, before it is queued or answered, with the owner-approved reason.
+    if (Buffer.byteLength(body) > maxTextBytes) return { disposition: "rejected", reason: "message too large for Pi (over its 1 MiB input limit after formatting)" };
     if (this.#treeBusy && this.#queue.length) return { disposition: "rejected", reason: "native_branch_summary_busy" };
     if (this.#queue.length) return this.#enqueue(request.message_id, body);
     // While Pi runs a task the message goes into Pi's steering queue, which

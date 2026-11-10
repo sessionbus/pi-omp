@@ -79,6 +79,10 @@ type Wrapper struct {
 	closeOnce   sync.Once
 	closeErr    error
 	workers     sync.WaitGroup
+
+	// drainReports is set by an early stop: the next Run first waits for
+	// the extension's earlier reports (see drainAfterEarlyStop).
+	drainReports bool
 }
 
 func New(socket, provisional string, native NativeExecutable, extension string) *Wrapper {

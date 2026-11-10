@@ -317,6 +317,18 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     }
   }
 
+  // Our own binding cap refused this Task child (owner_capacity on its
+  // owner.ready): it runs on natively without Sessionbus. Unlike failState,
+  // nothing aborts its native work; its binding is released.
+  function detachState(state, error) {
+    if (!state || state.failure) return;
+    state.failure = error instanceof Error ? error : new Error(String(error));
+    state.factory.failed = state.failure;
+    state.ending = true;
+    state.detached = true;
+    removeState(state);
+  }
+
   function failStartup(factory, ctx, error) {
     factory.failed = error instanceof Error ? error : new Error(String(error));
     factories.delete(factory);
@@ -561,12 +573,18 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
         const result = await callHost(work.state, work.method, work.params, undefined, { ending: work.ending });
         work.validate(result);
       } catch (error) {
-        failState(work.state, error);
-        if (factory.current !== work.state) failState(factory.current, error);
+        const detached = work.method === "owner.ready" && work.state.scope === "child" &&
+          error instanceof BridgeCallError && error.code === "owner_capacity";
+        if (detached) {
+          detachState(work.state, error);
+        } else {
+          failState(work.state, error);
+          if (factory.current !== work.state) failState(factory.current, error);
+        }
         const endingReports = [];
         while (factory.reports.length > 0) {
           const abandoned = factory.reports.shift();
-          if (abandoned.ending) {
+          if (abandoned.ending && !detached) {
             endingReports.push(abandoned);
             continue;
           }
@@ -574,7 +592,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
           release(abandoned.bytes);
         }
         factory.reports.unshift(...endingReports);
-        throw error;
+        if (!detached) throw error;
       } finally {
         reportItems -= 1;
         release(work.bytes);
@@ -637,7 +655,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     if (!reserve(bindingBytes)) throw new Error("OMP native factory retained-payload capacity is exhausted");
     const state = {
       factory, pi, ctx, scope, mode, ownerToken: token, sessionID, controller: new AbortController(),
-      described: false, admitted: false, ending: false, ended: false, failure: undefined,
+      described: false, admitted: false, ending: false, ended: false, detached: false, failure: undefined,
       queued: [], batches: new Map(), runToken: undefined,
       deliveryBytes: 0, bindingBytes, reportSequence: 0, runSequence: 0, batchSequence: 0,
       resetBoundary: resetBoundarySnapshot(ctx),
@@ -935,6 +953,7 @@ export function createOMPExtension({ launch, connect = connectBridge, createToke
     }
     try {
       await joinReports(factory);
+      if (state.detached) return;
       if (!state.endAcknowledged) throw endError ?? new Error("OMP session_end was not acknowledged");
       if (endError) throw endError;
       if (state.scope === "primary") bridgeClosing = true;

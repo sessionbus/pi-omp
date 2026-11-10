@@ -1033,7 +1033,7 @@ test("a delivery past the native bound once rendered is refused before it is que
     await ready(fixture.owner);
     const deliver = (request) => fixture.fake.latest().deliver(request);
     if (queued) assert.deepEqual(await deliver(inbound("held")), { disposition: "queued_for_next_turn" });
-    assert.deepEqual(await deliver(oversized), { disposition: "rejected", reason: "invalid Pi native delivery" });
+    assert.deepEqual(await deliver(oversized), { disposition: "rejected", reason: "message too large for Pi (over its 1 MiB input limit after formatting)" });
     assert.equal(fixture.appended().length, 0);
     // The owner goes on: the next valid delivery waits as usual.
     assert.deepEqual(await deliver(inbound("after")), { disposition: "queued_for_next_turn" });
