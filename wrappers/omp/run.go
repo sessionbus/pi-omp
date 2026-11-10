@@ -302,12 +302,16 @@ func (turn *ompNativeTurn) recordEvent(kind string, raw json.RawMessage) error {
 // prompt_result, so it is none of ours.
 var errOMPUnansweredPromptResult = errors.New("OMP native prompt_result is invalid")
 
-// endOnUnansweredPromptResult ends the lane, as the reader ends it for an
-// invalid prompt_result, when a turn StartPrompt dropped without a prompt took
-// one. It runs once the turn takes no more events; an earlier transport
-// failure stays the lane's cause.
-func (turn *ompNativeTurn) endOnUnansweredPromptResult(rpc *nativeRPC) {
+// sealWithoutPrompt seals a turn StartPrompt dropped without a prompt, after
+// finishNativeTurn. Under the lock recordEvent runs under it marks the turn
+// finalized, so a prompt_result an event already holding the turn delivers
+// later is refused as after the owned terminal, and the reader ends the lane
+// with it; OMP's own run events stay harmless. A prompt_result the turn
+// already took ends the lane here, as the reader ends it for an invalid one.
+// An earlier transport failure stays the lane's cause.
+func (turn *ompNativeTurn) sealWithoutPrompt(rpc *nativeRPC) {
 	turn.mu.Lock()
+	turn.finalized = true
 	seen := turn.promptResultSeen
 	turn.mu.Unlock()
 	if seen {
@@ -896,7 +900,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 		// Nothing of the prompt reached the agent. The turn and anything it
 		// recorded from OMP's own work are dropped; the lane stays.
 		p.finishNativeTurn(turn)
-		turn.endOnUnansweredPromptResult(owner.rpc)
+		turn.sealWithoutPrompt(owner.rpc)
 		return nil, refusal
 	}
 	turn.mu.Lock()
@@ -921,7 +925,7 @@ func (p *Wrapper) startNativeTurn(ctx context.Context, run *sessionkit.Run, prom
 			return turn, nil
 		}
 		p.finishNativeTurn(turn)
-		turn.endOnUnansweredPromptResult(owner.rpc)
+		turn.sealWithoutPrompt(owner.rpc)
 		return nil, callErr
 	}
 	invoked, known := native.ImmediateAgentInvoked()

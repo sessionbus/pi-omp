@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -755,6 +756,7 @@ func waitOMPPromptResultTaken(t *testing.T, fixture *ompRunFixture) *ompNativeTu
 	if turn == nil {
 		t.Fatal("no active turn")
 	}
+	ctx := nativeRPCTestContext(t)
 	for {
 		turn.mu.Lock()
 		seen, failure := turn.promptResultSeen, turn.failure
@@ -763,7 +765,7 @@ func waitOMPPromptResultTaken(t *testing.T, fixture *ompRunFixture) *ompNativeTu
 			return turn
 		}
 		select {
-		case <-nativeRPCTestContext(t).Done():
+		case <-ctx.Done():
 			t.Fatal("the prompt_result did not reach the turn")
 		default:
 			runtime.Gosched()
@@ -939,6 +941,61 @@ func TestOMPPromptResultWithoutAnAnsweredPromptEndsTheLane(t *testing.T) {
 		}
 		if ompLaneFailure(fixture) == nil {
 			t.Fatal("the lane stayed")
+		}
+	})
+	t.Run("held by an event across a refusal", func(t *testing.T) {
+		// observeNative takes p.active under p.mu and records outside it; a
+		// test-only observer models a result whose event took the turn
+		// before StartPrompt resolved and records after the turn was dropped.
+		fixture := newOMPRunFixture(t)
+		var held atomic.Pointer[ompNativeTurn]
+		rpc, peer := newNativeRPCTest(t, func(raw json.RawMessage) error {
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if turn := held.Load(); turn != nil && json.Unmarshal(raw, &envelope) == nil && envelope.Type == "prompt_result" {
+				return turn.recordEvent(envelope.Type, raw)
+			}
+			return fixture.wrapper.observeNative(raw)
+		}, nativeRPCLimits{})
+		fixture.rpc, fixture.peer, fixture.wrapper.owner.rpc = rpc, peer, rpc
+		_, _, result, id := startOMPRacedRun(t, fixture, "refused prompt")
+		fixture.wrapper.mu.Lock()
+		held.Store(fixture.wrapper.active)
+		fixture.wrapper.mu.Unlock()
+		fixture.peer.write(t, `{"id":`+mustOMPJSONText(t, id)+`,"type":"response","command":"prompt","success":false,"error":"Agent is busy"}`)
+		start := <-result
+		var refusal *nativePromptRefusal
+		if start.turn != nil || !errors.As(start.err, &refusal) || fixture.rpc.Err() != nil {
+			t.Fatalf("refused start = %#v, %v; lane %v", start.turn, start.err, fixture.rpc.Err())
+		}
+		fixture.promptResult(t, id+"-other", "completed")
+		select {
+		case <-fixture.rpc.Done():
+		case <-nativeRPCTestContext(t).Done():
+			t.Fatal("the lane stayed")
+		}
+		if err := fixture.rpc.Err(); err == nil || !strings.Contains(err.Error(), "OMP native emitted prompt_result after the owned terminal") {
+			t.Fatalf("lane end = %v", err)
+		}
+	})
+	t.Run("direct: a sealed turn refuses a later result", func(t *testing.T) {
+		// Helper tier: recordEvent on the dropped turn, without the reader.
+		fixture := newOMPRunFixture(t)
+		turn := newOMPNativeTurn(fixture.wrapper, nil, "refused prompt", fixture.binding)
+		turn.sealWithoutPrompt(fixture.rpc)
+		if fixture.rpc.Err() != nil {
+			t.Fatalf("a refusal without a result ended the lane: %v", fixture.rpc.Err())
+		}
+		err := turn.recordEvent("prompt_result", json.RawMessage(`{"type":"prompt_result","id":"omp:2","agentInvoked":true,"status":"completed"}`))
+		turn.mu.Lock()
+		retirement := turn.retirement
+		turn.mu.Unlock()
+		if err == nil || retirement == nil {
+			t.Fatalf("recordEvent = %v; retirement %v", err, retirement)
+		}
+		if err := turn.recordEvent("agent_start", json.RawMessage(`{"type":"agent_start"}`)); err != nil {
+			t.Fatalf("OMP's own run event = %v", err)
 		}
 	})
 	t.Run("another prompt's, after the start resolved without one", func(t *testing.T) {
