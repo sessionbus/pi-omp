@@ -90,7 +90,13 @@ and those arriving then. If Pi quits or switches sessions in that time, or
 while a task is running, each can start its own task in the session being
 left. Some accepted messages can be lost, with no delivery and no history
 entry, although their senders were told they were written or queued. Unread
-steered peer messages are not affected.
+steered peer messages are not affected. After an ordinary quit, the first new
+task can run to completion with your normal Pi permissions while Pi's screen
+is already closed; it cannot be observed or stopped through that closed screen.
+In the same slow-handler window, Escape alone can also start several separate
+tasks instead of combining the waiting messages into one task. Without quit
+or a session switch there is no shutdown-loss path, but the separate
+deferred-start failure below still applies.
 A peer delivery accepted while another extension's settled handler runs can
 be lost if an earlier deferred Pi action fails (a Pi defect, reported as
 [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955)).
