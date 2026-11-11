@@ -82,13 +82,15 @@ waiting for Pi's next task are written once to the history of the session
 being left, on quit or on a session switch, after those, in arrival order; no
 new task starts then. A peer message that arrives while Pi quits or switches
 is written to that history if Pi is idle and no message waits before it, and
-is otherwise refused. One exception: Pi stops a running task before it ends
-the session, on quit (Pi 1.5.1 and 1.5.2) and on a session switch (Pi 1.5.0,
-1.5.1 and 1.5.2).
-If another extension is still slowly handling the end of that task, a peer
-message waiting for Pi's next task, or one arriving at that moment, can start
-one more task, which Pi runs to its end before it quits or switches (a
-recorded limit). Unread steered peer messages are not affected.
+is otherwise refused. One exception (**OPEN DEFECT**, found in the source of Pi 1.5.1 and 1.5.2 for
+quit, and of Pi 1.5.0, 1.5.1 and 1.5.2 for a session switch): while another
+installed extension is still slowly handling the end of a task, Pi holds the
+peer messages this extension hands it, both those waiting for Pi's next task
+and those arriving then. If Pi quits or switches sessions in that time, or
+while a task is running, each can start its own task in the session being
+left. Some accepted messages can be lost, with no delivery and no history
+entry, although their senders were told they were written or queued. Unread
+steered peer messages are not affected.
 A peer delivery accepted while another extension's settled handler runs can
 be lost if an earlier deferred Pi action fails (a Pi defect, reported as
 [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955)).
