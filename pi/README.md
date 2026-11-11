@@ -83,7 +83,8 @@ being left, on quit or on a session switch, after those, in arrival order; no
 new task starts then. A peer message that arrives while Pi quits or switches
 is written to that history if Pi is idle and no message waits before it, and
 is otherwise refused. One exception: Pi stops a running task before it ends
-the session, on quit (Pi 1.5.1) and on a session switch (Pi 1.5.0 and 1.5.1).
+the session, on quit (Pi 1.5.1 and 1.5.2) and on a session switch (Pi 1.5.0,
+1.5.1 and 1.5.2).
 If another extension is still slowly handling the end of that task, a peer
 message waiting for Pi's next task, or one arriving at that moment, can start
 one more task, which Pi runs to its end before it quits or switches (a
