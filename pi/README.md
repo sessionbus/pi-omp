@@ -1,9 +1,13 @@
 # Sessionbus for Pi
 
 This archive installs `pi-peer` and its fixed managed extension beside the
-binary. Release v0.5.13 was tested with native `@earendil-works/pi-coding-agent`
-1.3.0; 1.4.0, 1.5.0 and 1.5.1 were checked against their source. Neither Pi
-1.5 release has been run with this release.
+binary. The final code of release v0.5.13 (commit `5794951`; later commits
+change only documentation) passed one interactive idle wake and one lane Run
+with native `@earendil-works/pi-coding-agent` 1.5.1 and Node 25.3.0 on Linux.
+The interactive check ended with an ordinary quit; quitting with peer messages
+waiting, session switch and busy steering were not run on that code. Earlier
+builds of this release had live checks with Pi 1.3.0 (the owner's matrix),
+1.4.0 and 1.5.0.
 Install that package with its `pi` executable available on the login `PATH`.
 
 For a source build:
@@ -78,9 +82,11 @@ waiting for Pi's next task are written once to the history of the session
 being left, on quit or on a session switch, after those, in arrival order; no
 new task starts then. A peer message that arrives while Pi quits or switches
 is written to that history if Pi is idle and no message waits before it, and
-is otherwise refused. Pi 1.5.1 aborts a running task before it quits or
-switches; if another extension's handler for that settled task waits on real
-I/O, a waiting peer message can start one more task first (a recorded limit).
+is otherwise refused. One exception: Pi stops a running task before it ends
+the session, on quit (Pi 1.5.1) and on a session switch (Pi 1.5.0 and 1.5.1),
+and Pi 1.5.1 also stops a running manual compaction. If another extension is
+still slowly handling the end of that task, or the failed compaction, a
+waiting peer message can start one more task first (a recorded limit).
 A peer delivery accepted while another extension's settled handler runs can
 be lost if an earlier deferred Pi action fails (a Pi defect, reported as
 [earendil-works/pi#11955](https://github.com/earendil-works/pi/issues/11955)).
