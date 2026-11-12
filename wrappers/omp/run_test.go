@@ -1422,6 +1422,17 @@ func TestOMPLaneSteerFailureIsUncertainAndTheLaneStays(t *testing.T) {
 // error was discarded and the lane stayed, unusable.
 func TestOMPOwnWorkDialogCancelFailureEndsTheLane(t *testing.T) {
 	fixture := newOMPRunFixture(t)
+	// A negotiation response can arrive before the writer releases its slot.
+	// Settle that initial write before replacing the queue count below.
+	writeCtx := nativeRPCTestContext(t)
+	for fixture.rpc.Stats().pendingWrites != 0 {
+		select {
+		case <-writeCtx.Done():
+			t.Fatal("OMP negotiation write did not settle before arming the full native queue")
+		default:
+			runtime.Gosched()
+		}
+	}
 	fixture.rpc.mu.Lock()
 	saved := fixture.rpc.pendingWrites
 	fixture.rpc.pendingWrites = fixture.rpc.limits.maxPendingWrites
