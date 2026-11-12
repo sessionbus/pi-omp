@@ -180,7 +180,7 @@ func TestOwnerTransferReceiveProjectsTerminalOffReaderAndKeepsDelivery(t *testin
 	}
 }
 
-func TestOwnerProjectedDeliveryCapacityRefusesBeforeNativeAndReleasesOriginalReservation(t *testing.T) {
+func TestOwnerProjectedDeliveryCapacityRefusesBeforeNativeAndKeepsOriginalReservation(t *testing.T) {
 	registry, _, fixture, _, _, _ := transferOwner(t)
 	registry.mu.Lock()
 	state := registry.bindings["transfer-owner"]

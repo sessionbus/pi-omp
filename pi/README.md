@@ -168,7 +168,7 @@ Interactive sessions and managed lanes expose `transfer.offer`,
 `transfer.request`, `transfer.accept`, `transfer.cancel` and `transfer.status`
 through the existing Sessionbus tool. Transfers require Sessionbus v0.5.14
 on the participating hosts and a transfer-capable recipient. The Go SDK and
-bundled JavaScript kit are pinned to v0.5.14.
+bundled JavaScript kit are pinned to v0.5.14 and v0.5.15 respectively.
 
 Local `source` and `destination` paths are relative to the native session's
 working directory. Absolute paths stay absolute; a relative path is refused
