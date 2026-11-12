@@ -66,7 +66,7 @@ func TestRepositoryBoundary(t *testing.T) {
 
 func TestModuleAndImportBoundary(t *testing.T) {
 	module := read(t, "go.mod")
-	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.14\n", commonVersion} {
+	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.16\n", commonVersion} {
 		if !bytes.Contains(module, []byte(expected)) {
 			t.Errorf("go.mod lacks %q", expected)
 		}
@@ -220,7 +220,7 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 		if err := json.Unmarshal(read(t, product+"/package.json"), &manifest); err != nil {
 			t.Fatal(err)
 		}
-		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.15" {
+		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.16" {
 			t.Errorf("%s kit dependency = %#v", product, manifest.Dependencies)
 		}
 		var lock struct {
@@ -234,8 +234,8 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		kit := lock.Packages["node_modules/@sessionbus/kit"]
-		if kit.Version != "0.5.15" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.15.tgz" ||
-			kit.Integrity != "sha512-dygNZ+u88Cp32ly8AhoaxTH/E9MttOeqQwXmL+fc6ot0BsfUCUfTZFdgv4uSku3xAzWS0nrwNylYbruo3Ui7Tg==" {
+		if kit.Version != "0.5.16" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.16.tgz" ||
+			kit.Integrity != "sha512-beiJWHttoSfH28XCrYn/SQ80I9/AoM/9mSN2PRjdR13U4g+8yCA+kmEQuLVQJoxRoXz4LDTF/ejDAKgfrpOvCg==" {
 			t.Errorf("%s locked kit = %#v", product, kit)
 		}
 	}
