@@ -1,5 +1,7 @@
 github.com/antst/sessionbus/bus/sdk/go v0.5.14 h1:5DKw1eZm7NEuLmPJIZUXqtCNXUh69pBPYTFZfJfOlF4=
 github.com/antst/sessionbus/bus/sdk/go v0.5.14/go.mod h1:SujgzvvPHjgVO/vHIixeL9EbOS8NPs/zXJA5ISSFnqM=
+github.com/antst/sessionbus/bus/sdk/go v0.5.16 h1:hnsyA/Ty5JjxC4bQnFVqnhpx3UPchHmyGYq5fWIqQOo=
+github.com/antst/sessionbus/bus/sdk/go v0.5.16/go.mod h1:SujgzvvPHjgVO/vHIixeL9EbOS8NPs/zXJA5ISSFnqM=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6NgVqpn3+iol9aGu4=
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
 github.com/sessionbus/peer-common v0.0.0-20261112004236-db8f85d47fbc h1:tvqTTD8s2jQgs/ZO+hrHTtExJhYA62tKF1hLVKH3xIA=

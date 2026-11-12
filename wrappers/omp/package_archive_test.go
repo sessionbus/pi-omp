@@ -123,7 +123,7 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 			Version string `json:"version"`
 		}
 		body, err := os.ReadFile(filepath.Join(permanent, "plugin", "node_modules", "@sessionbus", "kit", "package.json"))
-		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.15" {
+		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.16" {
 			t.Fatalf("installed kit = %#v (%v)", kit, err)
 		}
 	}

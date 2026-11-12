@@ -1,4 +1,4 @@
-github.com/antst/sessionbus/bus/sdk/go v0.5.14
+github.com/antst/sessionbus/bus/sdk/go v0.5.16
 ===================================================
 
 MIT License
@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-@sessionbus/kit 0.5.15
+@sessionbus/kit 0.5.16
 ======================
 
 MIT License
