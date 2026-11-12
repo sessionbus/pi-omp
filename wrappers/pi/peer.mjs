@@ -216,7 +216,7 @@ class OwnedPeer {
     for (const timer of this.#timers) timer.cancel?.();
     this.#timers.clear();
     this.#peer.shutdown();
-    this.#dispose = Promise.allSettled([...this.#tasks]);
+    this.#dispose = Promise.allSettled([...this.#tasks, this.#peer.closed]);
     return this.#dispose;
   }
 }

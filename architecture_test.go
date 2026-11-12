@@ -18,12 +18,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sessionbus/peer-common/mcp"
 )
 
 const (
 	productModule           = "github.com/sessionbus/pi-omp"
 	sdkModule               = "github.com/antst/sessionbus/bus/sdk/go"
-	commonVersion           = "github.com/sessionbus/peer-common v0.0.0-20260929104500-c5551a29654c"
+	commonVersion           = "github.com/sessionbus/peer-common v0.0.0-20261112004236-db8f85d47fbc"
 	citationCount           = 116
 	citationReachabilitySHA = "70a0acc5246af380d8fb221bdd9e1ab8e6b8afa3a48e51c0c99ca58adb6a4550"
 	factsHeader             = "> Historical source note: citations to pre-split Sessionbus paths resolve in\n> the Forgejo `ai/sessionbus` repository through its `legacy-*` branches.\n> Citations to product source resolve in the external repository and full\n> commit recorded by the split archive manifest. Host evidence paths are\n> immutable external artifacts, not repository paths."
@@ -64,7 +66,7 @@ func TestRepositoryBoundary(t *testing.T) {
 
 func TestModuleAndImportBoundary(t *testing.T) {
 	module := read(t, "go.mod")
-	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.9", commonVersion} {
+	for _, expected := range []string{"module " + productModule + "\n", sdkModule + " v0.5.14\n", commonVersion} {
 		if !bytes.Contains(module, []byte(expected)) {
 			t.Errorf("go.mod lacks %q", expected)
 		}
@@ -218,7 +220,7 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 		if err := json.Unmarshal(read(t, product+"/package.json"), &manifest); err != nil {
 			t.Fatal(err)
 		}
-		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.12" {
+		if len(manifest.Dependencies) != 1 || manifest.Dependencies["@sessionbus/kit"] != "0.5.15" {
 			t.Errorf("%s kit dependency = %#v", product, manifest.Dependencies)
 		}
 		var lock struct {
@@ -232,8 +234,8 @@ func TestPackageAndInstallerBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		kit := lock.Packages["node_modules/@sessionbus/kit"]
-		if kit.Version != "0.5.12" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.12.tgz" ||
-			kit.Integrity != "sha512-Rydn+tWNs2SaOA/RwigoFjmdOXpACcSDFrKiXxBiPFh6s3FUSSMkN5kocFmhKSLUWh0HdOhkCXcLaT4mz98XRQ==" {
+		if kit.Version != "0.5.15" || kit.Resolved != "https://registry.npmjs.org/@sessionbus/kit/-/kit-0.5.15.tgz" ||
+			kit.Integrity != "sha512-dygNZ+u88Cp32ly8AhoaxTH/E9MttOeqQwXmL+fc6ot0BsfUCUfTZFdgv4uSku3xAzWS0nrwNylYbruo3Ui7Tg==" {
 			t.Errorf("%s locked kit = %#v", product, kit)
 		}
 	}
@@ -372,4 +374,16 @@ func read(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+// This is the complete shared declaration used by both native adapters, not
+// a hand-maintained action list or a copy with product-specific wording.
+func TestNativeToolArtifactEqualsPinnedCommon(t *testing.T) {
+	want, err := json.Marshal(mcp.Tool())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read(t, "wrappers/pifamily/extension/sessionbus-tool.json"), append(want, '\n')) {
+		t.Fatal("native tool artifact differs from pinned common.Tool")
+	}
 }

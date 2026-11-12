@@ -44,22 +44,29 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 		"plugin/node_modules/@sessionbus/kit/sdk/js/index.js",
 		"plugin/node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
 		"plugin/node_modules/@sessionbus/kit/sdk/js/schema.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/transfer-filesystem.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/transfer-protocol.js",
+		"plugin/node_modules/@sessionbus/kit/sdk/js/transfers.js",
 		"plugin/omp/extension.mjs",
 		"plugin/package-lock.json", "plugin/package.json",
 		"plugin/pifamily/extension/bridge.mjs",
 		"plugin/pifamily/extension/inherited.mjs",
+		"plugin/pifamily/extension/sessionbus-tool.json",
+		"plugin/pifamily/extension/transfer-paths.mjs",
 	}
 	if got := ompArchiveFiles(t, extracted); !reflect.DeepEqual(got, wantFiles) {
 		t.Fatalf("archive files = %v, want %v", got, wantFiles)
 	}
 	for source, installed := range map[string]string{
-		"wrappers/omp/extension.mjs":                "plugin/omp/extension.mjs",
-		"wrappers/pifamily/extension/bridge.mjs":    "plugin/pifamily/extension/bridge.mjs",
-		"wrappers/pifamily/extension/inherited.mjs": "plugin/pifamily/extension/inherited.mjs",
-		"omp/package.json":                          "plugin/package.json",
-		"omp/package-lock.json":                     "plugin/package-lock.json",
-		"omp/README.md":                             "README.md",
-		"scripts/release/THIRD-PARTY-NOTICES.txt":   "THIRD-PARTY-NOTICES.txt",
+		"wrappers/pifamily/extension/sessionbus-tool.json": "plugin/pifamily/extension/sessionbus-tool.json",
+		"wrappers/pifamily/extension/transfer-paths.mjs":   "plugin/pifamily/extension/transfer-paths.mjs",
+		"wrappers/omp/extension.mjs":                       "plugin/omp/extension.mjs",
+		"wrappers/pifamily/extension/bridge.mjs":           "plugin/pifamily/extension/bridge.mjs",
+		"wrappers/pifamily/extension/inherited.mjs":        "plugin/pifamily/extension/inherited.mjs",
+		"omp/package.json":                                 "plugin/package.json",
+		"omp/package-lock.json":                            "plugin/package-lock.json",
+		"omp/README.md":                                    "README.md",
+		"scripts/release/THIRD-PARTY-NOTICES.txt":          "THIRD-PARTY-NOTICES.txt",
 	} {
 		ompEqualFile(t, filepath.Join(repo, source), filepath.Join(extracted, installed))
 	}
@@ -116,7 +123,7 @@ func TestOMPArchiveInstallsOnlyTheManagedLaunchPayload(t *testing.T) {
 			Version string `json:"version"`
 		}
 		body, err := os.ReadFile(filepath.Join(permanent, "plugin", "node_modules", "@sessionbus", "kit", "package.json"))
-		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.12" {
+		if err != nil || json.Unmarshal(body, &kit) != nil || kit.Name != "@sessionbus/kit" || kit.Version != "0.5.15" {
 			t.Fatalf("installed kit = %#v (%v)", kit, err)
 		}
 	}

@@ -1267,7 +1267,10 @@ test("actual Unix bridge supports owner.ready callback into native.describe", as
 test("native tool arguments match the shared closed MCP field declaration", () => {
   const native = nativeFixture();
   createOMPExtension({ launch: launch("lane") })(native.pi);
-  const declaration = JSON.parse(fs.readFileSync(new URL("../pifamily/extension/testdata/sessionbus-tool.json", import.meta.url), "utf8"));
+  const declaration = JSON.parse(fs.readFileSync(new URL("../pifamily/extension/sessionbus-tool.json", import.meta.url), "utf8"));
+  assert.equal(native.pi.tool.name, declaration.name);
+  assert.equal(native.pi.tool.description, declaration.description);
+  assert.deepEqual(native.pi.tool.parameters, declaration.inputSchema);
   assert.deepEqual(native.pi.tool.parameters.properties.action, declaration.inputSchema.properties.action);
   assert.deepEqual(native.pi.tool.parameters.properties.arguments, declaration.inputSchema.properties.arguments);
   assert.equal(native.pi.tool.parameters.properties.arguments.additionalProperties, false);
@@ -1402,3 +1405,21 @@ test("lane steers hold at most their share of the retained bytes", async () => {
   assert.deepEqual(answers, [true, true, true, true, true, true, true, true, false]);
   assert.equal(native.steered().length, 8);
 });
+
+for (const topology of ["interactive", "lane"]) {
+  test(`${topology} transfer paths bind to the native cwd and input errors keep the owner usable`, async () => {
+    const owner = new FakeOwner();
+    const native = nativeFixture("transfer-owner", topology === "lane" ? "rpc" : "tui", "/native/work");
+    const extension = createOMPExtension({ launch: launch(topology), connect: owner.connect, createToken: deterministicTokens() });
+    await start(extension, native, owner);
+    const call = (arguments_, ctx = native.context()) => native.pi.tool.execute("transfer-call", { action: "transfer.accept", arguments: arguments_ }, undefined, undefined, ctx);
+    await assert.rejects(call({ id: "x", Destination: "relative.txt" }), /unknown field/);
+    await assert.rejects(call({ id: "x", destination: "relative.txt" }, { ...native.context(), cwd: "relative" }), /working directory is not absolute/);
+    assert.equal(owner.calls.filter((c) => c.method === "tool.call").length, 0);
+    await call({ id: "x", destination: "symlink/../relative.txt" });
+    assert.equal(owner.calls.at(-1).params.arguments.destination, "/native/work/symlink/../relative.txt");
+    assert.equal(native.aborts(), 0);
+    assert.equal(native.shutdowns(), 0);
+    await native.emit("session_shutdown", { type: "session_shutdown" }, native.context());
+  });
+}

@@ -107,6 +107,7 @@ type ownerRegistryState struct {
 }
 
 type ownerPublicAttempt struct {
+	transfers    *kit.Transfers
 	conn         *kit.Connection
 	caller       *kit.Caller
 	deliveries   chan ownerPublicDelivery
@@ -120,6 +121,7 @@ type ownerPublicAttempt struct {
 }
 
 type ownerPublicDelivery struct {
+	project       func(context.Context, *kit.DeliveryRequest) error
 	ctx           context.Context
 	conn          *kit.Connection
 	request       *kit.Request
@@ -849,7 +851,13 @@ func (registry *OwnerRegistry) connectPublicAttempt(state *ownerRegistryState) (
 	if err != nil {
 		return state.publicCtx.Err() == nil, nil
 	}
+	transfers, err := kit.NewConnectionTransfers(nil)
+	if err != nil {
+		_ = fd.Close()
+		return false, err
+	}
 	attempt := &ownerPublicAttempt{
+		transfers:    transfers,
 		deliveries:   make(chan ownerPublicDelivery, maxOwnerWork),
 		deliveryDone: make(chan struct{}),
 	}
@@ -865,9 +873,9 @@ func (registry *OwnerRegistry) connectPublicAttempt(state *ownerRegistryState) (
 		registry.handlePublic(callCtx, state, attempt, request)
 	})
 	attempt.conn = conn
-	attempt.caller = kit.NewCaller(func(callCtx context.Context, method string, params any) (json.RawMessage, error) {
+	attempt.caller = kit.NewCallerWithTransfers(func(callCtx context.Context, method string, params any) (json.RawMessage, error) {
 		return registry.callPublic(callCtx, state, attempt, method, params)
-	})
+	}, transfers)
 	attempt.cancelDone = make(chan struct{})
 	attempt.stopCancel = context.AfterFunc(state.publicCtx, func() {
 		defer close(attempt.cancelDone)
@@ -897,8 +905,7 @@ func (registry *OwnerRegistry) connectPublicAttempt(state *ownerRegistryState) (
 		Groups: slices.Clone(registry.groups), Info: map[string]any{"cwd": state.CWD},
 	}
 	registry.mu.Unlock()
-	var response json.RawMessage
-	err = conn.CallObserved(state.publicCtx, "session.hello", identity, &response, func() error {
+	err = transfers.HelloObserved(state.publicCtx, state.publicCtx, conn, identity, func() error {
 		registry.mu.Lock()
 		defer registry.mu.Unlock()
 		if registry.ending || registry.bindings[state.OwnerToken] != state || state.terminal || state.attempt != attempt {
@@ -962,6 +969,7 @@ func (attempt *ownerPublicAttempt) stop() {
 		<-attempt.cancelDone
 	}
 	_ = attempt.conn.Close()
+	attempt.transfers.CloseConnectionGeneration(attempt.conn)
 	attempt.handlers.Wait()
 	<-attempt.deliveryDone
 }
@@ -979,6 +987,10 @@ func (registry *OwnerRegistry) detachPublicAttempt(state *ownerRegistryState, at
 }
 
 func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerRegistryState, attempt *ownerPublicAttempt, request *kit.Request) {
+	// Machine transfers remain SDK-owned; they never wait on native delivery.
+	if attempt.transfers.HandleConnectionRequest(attempt.conn, request) {
+		return
+	}
 	registry.mu.Lock()
 	if registry.ending || registry.bindings[state.OwnerToken] != state || state.attempt != attempt || !state.admitted || !state.published || state.terminal {
 		registry.mu.Unlock()
@@ -1030,7 +1042,7 @@ func (registry *OwnerRegistry) handlePublic(ctx context.Context, state *ownerReg
 				value := *delivery
 				value.From.Groups = slices.Clone(delivery.From.Groups)
 				select {
-				case attempt.deliveries <- ownerPublicDelivery{ctx: ctx, conn: attempt.conn, request: request, value: value, retainedBytes: retained}:
+				case attempt.deliveries <- ownerPublicDelivery{ctx: ctx, conn: attempt.conn, request: request, value: value, retainedBytes: retained, project: attempt.transfers.ProjectDelivery(attempt.conn, delivery)}:
 					registry.mu.Unlock()
 					return
 				default:
@@ -1085,7 +1097,7 @@ func (registry *OwnerRegistry) deliveryLoop(state *ownerRegistryState, attempt *
 		case <-attempt.conn.Context().Done():
 			return
 		case work := <-attempt.deliveries:
-			receipt, err := registry.deliver(work.ctx, state, work.value)
+			receipt, err := registry.deliverPublic(state, &work)
 			var responseErr error
 			var refusal *ownerDeliveryRefusal
 			if errors.As(err, &refusal) {
@@ -1108,6 +1120,33 @@ func (registry *OwnerRegistry) deliveryLoop(state *ownerRegistryState, attempt *
 			registry.releasePublicDelivery(state, work.retainedBytes)
 		}
 	}
+}
+
+// Projection may wait for a machine terminal frame, so it runs on the existing
+// delivery worker, never the RPC reader. The projected body keeps the same
+// bounded reservation as ordinary deliveries before native staging begins.
+func (registry *OwnerRegistry) deliverPublic(state *ownerRegistryState, work *ownerPublicDelivery) (kit.DeliveryReceipt, error) {
+	if work.project != nil {
+		if err := work.project(work.ctx, &work.value); err != nil {
+			return kit.DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, nil
+		}
+		size := ownerPublicDeliveryRetainedBytes(work.value)
+		delta := size - work.retainedBytes
+		registry.mu.Lock()
+		if delta > 0 && registry.retainedBytes > maxOwnerPeerRetainedBytes-delta {
+			registry.mu.Unlock()
+			return kit.DeliveryReceipt{Disposition: "rejected", Reason: "queue_full"}, nil
+		}
+		if delta > 0 {
+			registry.retainedBytes += delta
+			state.retainedBytes += delta
+		} else if delta < 0 {
+			registry.releaseStateLocked(state, -delta)
+		}
+		work.retainedBytes = size
+		registry.mu.Unlock()
+	}
+	return registry.deliver(work.ctx, state, work.value)
 }
 
 func (registry *OwnerRegistry) releasePublicDelivery(state *ownerRegistryState, size int) {

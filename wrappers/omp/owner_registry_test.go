@@ -242,7 +242,7 @@ func ownerRegistryPair(t *testing.T, options OwnerRegistryOptions, fixture *owne
 	return registry, nativeBridge
 }
 
-func ownerReady(t *testing.T, registry *OwnerRegistry, native *pifamily.Bridge, listener net.Listener, request ownerReadyRequest) (kit.PeerIdentity, net.Conn, *bufio.Scanner) {
+func ownerReady(t *testing.T, registry *OwnerRegistry, native *pifamily.Bridge, listener net.Listener, request ownerReadyRequest, capabilities ...string) (kit.PeerIdentity, net.Conn, *bufio.Scanner) {
 	t.Helper()
 	result := make(chan error, 1)
 	go func() { result <- native.Call(ownerTestContext(t), "owner.ready", request, nil) }()
@@ -262,7 +262,7 @@ func ownerReady(t *testing.T, registry *OwnerRegistry, native *pifamily.Bridge, 
 	if !ok {
 		t.Fatalf("public hello params = %T", params)
 	}
-	body, err := protocol.ResultBytes(frame.ID, frame.Method, struct{}{})
+	body, err := protocol.ResultBytes(frame.ID, frame.Method, protocol.HelloResult{Capabilities: capabilities})
 	if err != nil {
 		t.Fatal(err)
 	}

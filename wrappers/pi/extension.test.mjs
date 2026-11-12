@@ -229,6 +229,7 @@ test("lane handshake and ordered witnesses retain native ownership", async () =>
   assert.equal(native.pi.tool.name, toolName);
   assert.deepEqual(native.pi.tool.parameters.properties.action.enum, [
     "list", "send", "spawn", "describe", "trace", "run", "start", "wait", "status", "interrupt", "close", "forget", "ack",
+    "transfer.offer", "transfer.request", "transfer.accept", "transfer.cancel", "transfer.status",
   ]);
 
   await native.emit("session_start", { type: "session_start", reason: "startup" });
@@ -1342,9 +1343,30 @@ test("interactive transport loss during an action is a native tool error and kee
 test("native tool arguments match the shared closed MCP field declaration", () => {
   const native = nativeFixture();
   createPiExtension({ launch: launch("lane") })(native.pi);
-  const declaration = JSON.parse(fs.readFileSync(new URL("../pifamily/extension/testdata/sessionbus-tool.json", import.meta.url), "utf8"));
+  const declaration = JSON.parse(fs.readFileSync(new URL("../pifamily/extension/sessionbus-tool.json", import.meta.url), "utf8"));
+  assert.equal(native.pi.tool.name, declaration.name);
+  assert.equal(native.pi.tool.description, declaration.description);
+  assert.deepEqual(native.pi.tool.parameters, declaration.inputSchema);
   assert.deepEqual(native.pi.tool.parameters.properties.action, declaration.inputSchema.properties.action);
   assert.deepEqual(native.pi.tool.parameters.properties.arguments, declaration.inputSchema.properties.arguments);
   assert.equal(native.pi.tool.parameters.properties.arguments.additionalProperties, false);
   assert.equal(Object.hasOwn(native.pi.tool.parameters.properties.arguments.properties, "summary"), false);
 });
+
+for (const topology of ["interactive", "lane"]) {
+  test(`${topology} transfer paths bind to the native cwd without ending the owner on input errors`, async () => {
+    const native = nativeFixture("transfer-owner", topology === "lane" ? "rpc" : "tui");
+    const owner = fakeConnection({ topology });
+    createPiExtension({ launch: launch(topology), connect: owner.connect })(native.pi);
+    await native.emit("session_start", { type: "session_start", reason: "startup" });
+    const call = (arguments_, ctx = native.ctx) => native.pi.tool.execute("transfer-call", { action: "transfer.offer", arguments: arguments_ }, undefined, undefined, ctx);
+    await assert.rejects(call({ target: "t", Source: "relative.txt" }), /unknown field/);
+    await assert.rejects(call({ target: "t", source: "relative.txt" }, { ...native.ctx, cwd: "relative" }), /absolute path/);
+    assert.equal(owner.calls.filter((c) => c.method === "tool.call").length, 0);
+    await call({ target: "t", source: "symlink/../relative.txt" });
+    assert.equal(owner.calls.at(-1).params.arguments.source, "/project/symlink/../relative.txt");
+    assert.equal(native.aborted(), 0);
+    assert.equal(native.shutdown(), 0);
+    await native.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+  });
+}

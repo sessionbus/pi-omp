@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 import path from "node:path";
+import declaration from "../pifamily/extension/sessionbus-tool.json" with { type: "json" };
+import { bindTransferPaths } from "../pifamily/extension/transfer-paths.mjs";
 
 import {
   BridgeCallError,
@@ -14,10 +16,7 @@ export const toolName = "sessionbus";
 
 const processExtensionKey = Symbol.for("sessionbus.pi.managed-extension.v1");
 
-const actions = Object.freeze([
-  "list", "send", "spawn", "describe", "trace", "run", "start", "wait", "status",
-  "interrupt", "close", "forget", "ack",
-]);
+const actions = Object.freeze(declaration.inputSchema.properties.action.enum);
 const topologyMode = Object.freeze({ lane: "rpc", interactive: "tui" });
 const drainWitnesses = Object.freeze([
   "before_agent_start", "agent_settled", "session_before_tree_cancelled",
@@ -28,19 +27,7 @@ const sessionEndReasons = Object.freeze(["quit", "reload", "new", "resume", "for
 const maxSteeredItems = 256;
 const maxSteeredBytes = 8 << 20;
 
-const toolDescription = `Call Sessionbus using this exact Pi session identity.
-Use list to discover peers and self_info, send to message peers, describe before
-spawning a product lane, trace a direct child's Sessionbus messages, and
-run/start/status/wait/ack/interrupt/close/forget to
-own a lane through its full lifecycle. Arguments must have the exact public
-shape for the selected action. A successful send confirms only the recipient's
-published delivery disposition; queued_for_next_turn is not model consumption.
-A lane queued_for_next_turn receipt means the daemon retained the definitely
-unsubmitted message in bounded memory and scheduled its next managed run.
-A completion pointer is an ordinary peer message, not the lane result. Tracing
-defaults off; events copies message and settled-delivery metadata, content also
-includes message bodies, and neither mode includes history or lane lifecycle.
-Copies arrive as daemon-generated JSON trace envelopes in ordinary messages.`;
+const toolDescription = declaration.description;
 
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -138,39 +125,7 @@ function validateEcho(result, sessionID, extra = {}) {
   return result;
 }
 
-// Same closed field union as the shared MCP declaration. Action-specific
-// required fields and combinations remain enforced by the public kit.
-function argumentSchema() {
-  const properties = {};
-  for (const field of ["session_id", "host", "message", "target", "group", "product", "name", "resume_session_id", "notify_target", "input", "run_id"]) {
-    properties[field] = { type: "string" };
-  }
-  for (const field of ["targets", "extra_groups"]) {
-    properties[field] = { type: "array", items: { type: "string" } };
-  }
-  for (const field of ["persistent", "notify", "forget"]) properties[field] = { type: "boolean" };
-  for (const field of ["auto_close_ms", "timeout_ms"]) properties[field] = { type: "integer" };
-  properties.trace = { type: "string", enum: ["off", "events", "content"] };
-  properties.mode = { type: "string", enum: ["off", "events", "content"] };
-  const open = {};
-  for (const field of ["cwd", "permission_mode", "model", "reasoning_effort"]) open[field] = { type: "string" };
-  open.arguments = { type: "array", items: { type: "string" } };
-  properties.open = { type: "object", additionalProperties: false, properties: open };
-  return { type: "object", additionalProperties: false, properties,
-    description: "Use only the fields listed for the selected action in the tool description. send has no summary field; put the complete content in message." };
-}
-
-function toolParameters() {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["action", "arguments"],
-    properties: {
-      action: { type: "string", enum: [...actions] },
-      arguments: argumentSchema(),
-    },
-  };
-}
+function toolParameters() { return structuredClone(declaration.inputSchema); }
 
 export function createPiExtension({
   launch,
@@ -535,13 +490,14 @@ export function createPiExtension({
         if (!actions.includes(params.action) || !object(params.arguments)) {
           throw new Error("Pi Sessionbus tool arguments are invalid");
         }
+        const args = bindTransferPaths(params.action, params.arguments, ctx.cwd);
         let response;
         try {
           response = await (await connection()).call("tool.call", {
             session_id: record.session_id,
             call_id: callID,
             action: params.action,
-            arguments: params.arguments,
+            arguments: args,
           }, { signal: combinedSignal(lifetime.signal, record.controller.signal, signal) });
         } catch (error) {
           if (!(error instanceof BridgeCallError)) stop(ctx, error);

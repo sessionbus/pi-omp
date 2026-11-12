@@ -161,3 +161,20 @@ extension handles a prompt and forwards it so late that its preflight comes
 after the next Run recorded its input, the next Run can take it: Pi's
 preflight carries no prompt identity. Dialogs that
 Pi's own work raises in a lane are cancelled, as the lane's own are.
+
+## File transfers
+
+Interactive sessions and managed lanes expose `transfer.offer`,
+`transfer.request`, `transfer.accept`, `transfer.cancel` and `transfer.status`
+through the existing Sessionbus tool. Transfers require Sessionbus v0.5.14
+on the participating hosts and a transfer-capable recipient. The Go SDK and
+bundled JavaScript kit are pinned to v0.5.14 and v0.5.15 respectively.
+
+Local `source` and `destination` paths are relative to the native session's
+working directory. Absolute paths stay absolute; a relative path is refused
+if that directory is unknown. Transfers use the SDK's default filesystem
+access as the OS user, without the native sandbox or per-path approval.
+Tightening transfer permissions remains open and is not a release gate.
+Offer/request and completion notices use the existing peer-delivery path and
+retain its admission and wake limitations. An uncertain transfer outcome is
+not permission to retry it.

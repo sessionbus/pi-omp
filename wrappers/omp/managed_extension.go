@@ -13,6 +13,8 @@ var managedPluginFiles = []string{
 	"omp/extension.mjs",
 	"pifamily/extension/bridge.mjs",
 	"pifamily/extension/inherited.mjs",
+	"pifamily/extension/sessionbus-tool.json",
+	"pifamily/extension/transfer-paths.mjs",
 	"package.json",
 	"package-lock.json",
 	"node_modules/.package-lock.json",
@@ -25,6 +27,9 @@ var managedPluginFiles = []string{
 	"node_modules/@sessionbus/kit/sdk/js/index.js",
 	"node_modules/@sessionbus/kit/sdk/js/protocol.d.ts",
 	"node_modules/@sessionbus/kit/sdk/js/schema.js",
+	"node_modules/@sessionbus/kit/sdk/js/transfer-filesystem.js",
+	"node_modules/@sessionbus/kit/sdk/js/transfer-protocol.js",
+	"node_modules/@sessionbus/kit/sdk/js/transfers.js",
 }
 
 // ResolveManagedExtension locates the fixed extension payload next to an

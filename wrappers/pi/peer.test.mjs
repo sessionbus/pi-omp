@@ -1174,3 +1174,19 @@ test("an accepted append's nested before_agent_start drain finishes after the ou
   assert.deepEqual(sent, [["append", "first"], ["steer", "second"]]);
   await owner.close();
 });
+
+// Public closed is the kit's retirement join; own delivery completion alone
+// must not let final native disposal outrun it.
+test("direct owner close waits for the public kit retirement promise", async () => {
+  const f = ownerFixture();
+  await ready(f.owner);
+  const retired = deferred();
+  f.fake.latest().closed = retired.promise;
+  let finished = false;
+  const closing = f.owner.close().then(() => { finished = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false);
+  retired.resolve();
+  await closing;
+  assert.equal(finished, true);
+});
