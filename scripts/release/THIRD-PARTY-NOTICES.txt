@@ -1,4 +1,4 @@
-github.com/antst/sessionbus/bus/sdk/go v0.5.9
+github.com/antst/sessionbus/bus/sdk/go v0.5.14
 ===================================================
 
 MIT License
@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-@sessionbus/kit 0.5.12
+@sessionbus/kit 0.5.15
 ======================
 
 MIT License
@@ -82,7 +82,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-github.com/sessionbus/peer-common v0.0.0-20260929104500-c5551a29654c
+github.com/sessionbus/peer-common v0.0.0-20261112004236-db8f85d47fbc
 ============================================================================
 
 MIT License
