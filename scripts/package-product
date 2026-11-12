@@ -20,11 +20,11 @@ mkdir "$stage/plugin"
 if [ "$product" = pi ]; then
  mkdir -p "$stage/plugin/pi" "$stage/plugin/pifamily/extension"
  cp wrappers/pi/extension.mjs wrappers/pi/native.mjs wrappers/pi/peer.mjs "$stage/plugin/pi/"
- cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs "$stage/plugin/pifamily/extension/"
+ cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs wrappers/pifamily/extension/sessionbus-tool.json wrappers/pifamily/extension/transfer-paths.mjs "$stage/plugin/pifamily/extension/"
 else
  mkdir -p "$stage/plugin/omp" "$stage/plugin/pifamily/extension"
  cp wrappers/omp/extension.mjs "$stage/plugin/omp/"
- cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs "$stage/plugin/pifamily/extension/"
+ cp wrappers/pifamily/extension/bridge.mjs wrappers/pifamily/extension/inherited.mjs wrappers/pifamily/extension/sessionbus-tool.json wrappers/pifamily/extension/transfer-paths.mjs "$stage/plugin/pifamily/extension/"
 fi
 # npm runs only while assembling the archive. It verifies and stages the exact
 # published kit; the target installer never invokes npm or downloads packages.
